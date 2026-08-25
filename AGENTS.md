@@ -21,7 +21,9 @@
   adopts. On that thread (`TScreenStream.OnSample` and everything it
   calls): no exceptions, no `try..finally`, no `WriteLn`, no managed-type
   writes outside a `TPThreadMutex`. `cmem` stays the first unit of the
-  program and `IsMultiThread` is set at startup ([docs/architecture.md](docs/architecture.md)).
+  program, `Opname.ThreadManager` (pthread-backed RTL locks/events, no
+  thread creation) comes second, and `IsMultiThread` is set at startup
+  ([docs/architecture.md](docs/architecture.md)).
 - **`source/capture/**` is vendored** from lantaarn and excluded from
   `lwpt format`. Additions go in the marked blocks; do not restyle the
   carried code. Substantive changes are recorded in

@@ -94,6 +94,15 @@ rejects.
   shape: `cmem` (libc heap, thread-safe without a thread manager) first,
   real pthread mutexes, and `IsMultiThread := True` at startup so the
   RTL's refcount updates use locked instructions.
+- **`Opname.ThreadManager`:** the first on-device run showed the shape
+  above is not enough by itself — with `IsMultiThread` true, FPC's
+  NoThreadManager stubs hard-error (RTE 232) on the critical sections and
+  events that `Classes`/`SysUtils` create and destroy in their unit init
+  and finalization. The unit, placed directly after `cmem` in the program
+  uses clause, installs pthread-backed implementations of exactly the
+  lock and event primitives (recursive mutexes, cond-var events) while
+  leaving thread creation on the error stubs: the RTL still never spawns
+  or adopts a thread, and the capture queue stays foreign.
 - Stop order is fixed: `TScreenStream.Stop` (waits for the framework's
   completion) *then* `TMovieWriter.Finish`, so no append can race the
   finish. The output object's owner ivar is cleared before the stream is

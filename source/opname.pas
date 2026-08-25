@@ -16,6 +16,7 @@ program opname;
 uses
   {$IFDEF DARWIN}
   cmem,        // libc heap: thread-safe without cthreads (prototype invariant)
+  Opname.ThreadManager, // pthread-backed RTL locks/events; no thread creation
   BaseUnix,
   ctypes,
   objc,        // the id type for the probe; the program is not in ObjC mode

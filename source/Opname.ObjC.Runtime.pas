@@ -80,11 +80,11 @@ const
 // goes through the same entry point; the C prototype just has to match
 // the selector's real signature, which these do.
 function MessageSendId(ASelf: id; AOperation: SEL): id;
-  cdecl; external name '_objc_msgSend';
+  cdecl; external name 'objc_msgSend';
 procedure MessageSendVoid(ASelf: id; AOperation: SEL);
-  cdecl; external name '_objc_msgSend';
+  cdecl; external name 'objc_msgSend';
 function MessageSendBoolSel(ASelf: id; AOperation: SEL;
-  AArgument: SEL): ObjCBOOL; cdecl; external name '_objc_msgSend';
+  AArgument: SEL): ObjCBOOL; cdecl; external name 'objc_msgSend';
 
 function Selector(const AName: string): SEL; inline;
 begin
