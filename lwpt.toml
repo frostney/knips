@@ -1,0 +1,27 @@
+# opname — a native macOS screen recorder in FreePascal (Kap's spiritual
+# successor). Built, tested, and formatted with lwpt. See README.md.
+
+[package]
+name = "opname"
+version = "0.1.0"
+units = ["source", "source/capture"]
+
+[format]
+# source/capture/** is vendored from the lantaarn/SoftKVM prototype; its
+# contents stay unrestyled so diffs against the origin remain readable
+# (see docs/porting-notes.md). Fetched modules are never rewritten.
+exclude = [".lwpt/**", "source/capture/**"]
+
+[dependencies]
+# Both resolved from the lwpt release tag via include filters, the same way
+# duetto and lantaarn consume them. cli is the option/subcommand framework;
+# testing is the *.Test.pas runner.
+cli = { source = "frostney/lwpt", version = "^0.7.0", include = ["packages/cli/**"], exclude = ["**/*.Test.pas"] }
+testing = { source = "frostney/lwpt", version = "^0.7.0", include = ["packages/testing/**"], exclude = ["**/*.Test.pas"] }
+
+[build]
+# The one default target stays linker-flag-free (AGENTS.md hard constraint).
+# If the runtime-built ObjC class spike fails on a given toolchain, the
+# documented escape hatch is a second entry with flags = ["-k-ld_classic"]
+# — see docs/tooling.md — never a change to this one.
+opname = { source = "source/opname.pas", output = "build/opname" }

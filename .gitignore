@@ -1,0 +1,22 @@
+# Build artefacts (everything the build outputs lands under build/).
+build/
+
+# LWPT toolkit state. The committed state under .lwpt/modules/ and
+# .lwpt/archives/ is NOT ignored (zero-install, mirroring lwpt). Only the
+# ephemeral install workspace, build sessions, and locks are ignored.
+.lwpt/tmp/
+.lwpt/sessions/
+.lwpt/session-roots
+.lwpt/install.lock
+
+# FPC artefacts (defensive — real builds output under build/).
+*.o
+*.ppu
+*.rsj
+*.compiled
+
+# OS noise.
+.DS_Store
+
+# Session-local agent handoff state — never committed.
+.agent/
