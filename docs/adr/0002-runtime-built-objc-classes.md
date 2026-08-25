@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted. This is the project's load-bearing decision.
+Accepted and **proven on device** (2026-08-26, Apple silicon, stock
+linker, flag-free build): `opname probe` passed all four checks and a
+real region recording produced a playable file with matching frame
+statistics — spike 0001's three gates are closed. This is the project's
+load-bearing decision.
 
 ## Context
 

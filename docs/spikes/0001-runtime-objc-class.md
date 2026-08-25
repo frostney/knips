@@ -1,5 +1,16 @@
 # Spike 0001: runtime-built Objective-C class on device
 
+## Status: CLOSED — passed on device 2026-08-26
+
+On Apple silicon (Darwin 25.5.0), after the `objc_msgSend` symbol-name
+fix and the `Opname.ThreadManager` install (both required before the
+binary would run at all): `probe` printed all four checks and `probe:
+ok`; `opname record --rect=0,0,640,360 --fps=30` wrote a playable
+1280x720 H.264 file — 133 frames, 0 dropped, duration 4.86 s matching
+the appended-frame span. Gates 1 and 3 are closed outright; gate 2's
+multi-minute soak remains a good idea but the primitive is proven.
+ADR-0002's status now records this.
+
 ## Question
 
 ADR-0002 asserts that an Objective-C class assembled through libobjc's C
