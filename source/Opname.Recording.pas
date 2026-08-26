@@ -170,7 +170,7 @@ begin
           begin
             AError := Format('--rect exceeds the display (%dx%d points)',
               [Integer(Display.width), Integer(Display.height)]);
-            Display.release;
+            // The enclosing finally releases Display.
             Exit;
           end;
           AGeometry.HasSourceRect := True;
