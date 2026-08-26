@@ -46,17 +46,19 @@ _Avoid_: encoder (the writer owns one; Knips never sees it), muxer.
 _Avoid_: format (ambiguous with pixel format), file type.
 
 **Session**:
-One recording start to finish (`TRecordingSession`), or one export start
-to finish (`TGifExportSession`): resolve, open, run, finish.
+One recording start to finish (`TRecordingSession`), one image export
+start to finish (`TExportSession`), or one passthrough trim
+(`TMovieTrimSession`): resolve, open, run, finish.
 _Avoid_: job, take.
 
 ### Export
 
 **Export**:
 Turning a finished recording into another format —
-`knips export --in=… --out=….gif`. Never used for writing the
-recording itself; that is the writer's job.
-_Avoid_: convert, transcode (there is no re-encode to a movie).
+`knips export --in=… --out=….gif|.apng`, or into a shorter movie of the
+same format (`--out=….mp4 --trim=…`, a passthrough copy). Never used for
+writing the recording itself; that is the writer's job.
+_Avoid_: convert, transcode (nothing is ever re-encoded).
 
 **Trim**:
 The time range of the input an export keeps, in seconds

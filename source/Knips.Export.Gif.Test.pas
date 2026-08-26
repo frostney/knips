@@ -55,6 +55,8 @@ type
     procedure TestFourColorsSurviveIntact;
     procedure TestManyColorsAreCappedAtTheLimit;
     procedure TestSmallLimitIsHonoured;
+    procedure TestOrdinaryContentStaysExact;
+    procedure TestOverflowFallsBackToTheCellHistogram;
   end;
 
   TGifStructureTests = class(TTestSuite)
@@ -487,6 +489,10 @@ begin
     TestFourColorsSurviveIntact);
   Test('a gradient is capped at 256 colours',
     TestManyColorsAreCappedAtTheLimit);
+  Test('a frame of ordinary content is counted colour by colour',
+    TestOrdinaryContentStaysExact);
+  Test('past the cap the histogram falls back to 6-bit cells',
+    TestOverflowFallsBackToTheCellHistogram);
   Test('a smaller colour limit is honoured', TestSmallLimitIsHonoured);
 end;
 
@@ -517,7 +523,7 @@ begin
   try
     Quantizer.SampleFrame(@Image.Pixels[0], Image.BytesPerRow, Image.Width,
       Image.Height);
-    Expect<Integer>(Quantizer.DistinctCells).ToBe(1);
+    Expect<Integer>(Quantizer.DistinctColors).ToBe(1);
     Palette := Quantizer.BuildPalette(GifMaxColors);
     Expect<Integer>(Palette.Count).ToBe(1);
     Expect<Integer>(Palette.Colors[0].Red).ToBe(17);
@@ -543,7 +549,7 @@ begin
   try
     Quantizer.SampleFrame(@Image.Pixels[0], Image.BytesPerRow, Image.Width,
       Image.Height);
-    Expect<Integer>(Quantizer.DistinctCells).ToBe(4);
+    Expect<Integer>(Quantizer.DistinctColors).ToBe(4);
     Palette := Quantizer.BuildPalette(GifMaxColors);
     Expect<Integer>(Palette.Count).ToBe(4);
   finally
@@ -563,7 +569,7 @@ begin
   try
     Quantizer.SampleFrame(@Image.Pixels[0], Image.BytesPerRow, Image.Width,
       Image.Height);
-    Expect<Boolean>(Quantizer.DistinctCells > GifMaxColors).ToBe(True);
+    Expect<Boolean>(Quantizer.DistinctColors > GifMaxColors).ToBe(True);
     Palette := Quantizer.BuildPalette(GifMaxColors);
     Expect<Integer>(Palette.Count).ToBe(GifMaxColors);
   finally
@@ -585,6 +591,65 @@ begin
       Image.Height);
     Palette := Quantizer.BuildPalette(16);
     Expect<Integer>(Palette.Count).ToBe(16);
+  finally
+    Quantizer.Free;
+  end;
+end;
+
+procedure TGifQuantizerTests.TestOrdinaryContentStaysExact;
+var
+  Image: TBgraImage;
+  Quantizer: TGifQuantizer;
+  Palette: TGifPalette;
+begin
+  BgraImageResize(Image, 64, 64);
+  FillGradient(Image);
+  Quantizer := TGifQuantizer.Create;
+  try
+    Quantizer.SampleFrame(@Image.Pixels[0], Image.BytesPerRow, Image.Width,
+      Image.Height);
+    Expect<Boolean>(Quantizer.IsExactHistogram).ToBe(True);
+    Palette := Quantizer.BuildPalette(GifMaxOpaqueColors);
+    Expect<Integer>(Palette.Count).ToBe(GifMaxOpaqueColors);
+  finally
+    Quantizer.Free;
+  end;
+end;
+
+// The graceful-degradation path: more distinct colours than the exact
+// table may hold folds everything into the 6-bit histogram and carries
+// on, rather than failing or growing without bound. Five frames of
+// 500x500 all-distinct colours is 1.25 M, past the 2^20 cap.
+procedure TGifQuantizerTests.TestOverflowFallsBackToTheCellHistogram;
+var
+  Image: TBgraImage;
+  Quantizer: TGifQuantizer;
+  Palette: TGifPalette;
+  Frame, X, Y, Value: Integer;
+begin
+  BgraImageResize(Image, 500, 500);
+  Quantizer := TGifQuantizer.Create;
+  try
+    for Frame := 0 to 4 do
+    begin
+      for Y := 0 to 499 do
+        for X := 0 to 499 do
+        begin
+          Value := Frame * 250000 + Y * 500 + X;
+          SetPixel(Image, X, Y, Byte((Value shr 16) and $FF),
+            Byte((Value shr 8) and $FF), Byte(Value and $FF));
+        end;
+      Quantizer.SampleFrame(@Image.Pixels[0], Image.BytesPerRow, Image.Width,
+        Image.Height);
+    end;
+    Expect<Boolean>(Quantizer.IsExactHistogram).ToBe(False);
+    // Everything now lives in the 64^3 cells, so the distinct count is
+    // bounded by them rather than by the colours that arrived.
+    Expect<Boolean>(Quantizer.DistinctColors <= GifHistogramCells)
+      .ToBe(True);
+    Expect<Boolean>(Quantizer.DistinctColors > GifMaxColors).ToBe(True);
+    Palette := Quantizer.BuildPalette(GifMaxOpaqueColors);
+    Expect<Integer>(Palette.Count).ToBe(GifMaxOpaqueColors);
   finally
     Quantizer.Free;
   end;

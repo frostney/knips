@@ -22,8 +22,15 @@
 - Two threads: the main thread (run loop, signals, progress) and SCK's
   capture queue (sample delivery → append). No `cthreads`; shared counters
   sit under a pthread mutex; the capture path never raises or prints.
-- Everything platform-neutral (option model, type encodings) is a unit
-  with a co-located test that runs on Linux too.
+- `knips export` writes three things from one `--out` extension: a GIF
+  (exact-colour palette, dithering, LZW), an APNG (truecolour, no
+  quantisation, paszlib), or a trimmed movie via
+  `AVAssetExportSession` passthrough — no decode, no re-encode. The first
+  two share the reader, the decimator, the scaler and the frame-delay
+  planner; see [The export pipeline](#the-export-pipeline).
+- Everything platform-neutral (option model, type encodings, both image
+  encoders, the delay planner) is a unit with a co-located test that runs
+  on Linux too.
 
 ## Process shape
 
@@ -56,8 +63,8 @@
 | App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.State` | Status item + menu, selection overlay, and the neutral state machine (tested) |
 | Recording | `Knips.Recording` | Target → filter + geometry → writer → stream; progress; report |
 | Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
-| Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.GifPipeline` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; the two-pass GIF export |
-| Export (neutral) | `Knips.Export.Gif`, `Knips.Export.Bitmap` | Median cut, dithering, LZW, GIF89a writer; BGRA buffer + resampling (both tested) |
+| Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.MovieTrim`, `Knips.Export.Pipeline` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; AVAssetExportSession passthrough trim; the shared GIF/APNG pipeline |
+| Export (neutral) | `Knips.Export.Gif`, `Knips.Export.Apng`, `Knips.Export.Bitmap`, `Knips.Export.Timing` | Median cut, dithering, LZW, GIF89a writer; APNG chunks, PNG filters, paszlib; BGRA buffer + resampling; frame-delay planning (all tested) |
 | ObjC | `Knips.ObjC.Runtime`, `Knips.ObjC.TypeEncoding` | Class assembly via libobjc; method type encodings (tested) |
 | Options | `Knips.Options` | Neutral option model, validation, derived values (tested) |
 | Vendored | `source/capture/*` | CoreMedia/CoreVideo/VideoToolbox/GCD, ScreenCaptureKit externals, pthread mutex |
@@ -65,14 +72,18 @@
 Nothing above the capture layer knows about `objcclass`; nothing below
 the recording layer knows about the CLI.
 
-## The GIF export
+## The export pipeline
 
 `knips export` is the mirror of `record`, and it is deliberately thin on
 the Darwin side: `Knips.Export.MovieReader` turns an `.mp4`/`.mov` into
 a stream of BGRA `CVPixelBuffer`s with presentation stamps, and
 everything that decides what the file looks like —
-`Knips.Export.Bitmap` and `Knips.Export.Gif` — is platform-neutral and
-unit-tested off-device.
+`Knips.Export.Bitmap`, `Knips.Export.Gif`, `Knips.Export.Apng` and
+`Knips.Export.Timing` — is platform-neutral and unit-tested off-device.
+
+`Knips.Export.Pipeline` owns the reader, the decimator and the scaler;
+only the sink differs, so GIF and APNG cannot drift apart on which
+frames they pick or how long each is shown.
 
 ```text
   AVAssetReader (timeRange = --trim)
@@ -83,25 +94,67 @@ unit-tested off-device.
         ▼
   BgraResample to --width (integer box reduce, then bilinear)
         │
-        ├─ pass 1 ──▶ TGifQuantizer: 6-bit histogram over ≤32 sampled
-        │              frames ──▶ median cut ──▶ one global palette
+        ├─ .gif  pass 1 ─▶ TGifQuantizer: exact-colour histogram over ≤32
+        │                   sampled frames ─▶ median cut ─▶ one global palette
+        │        pass 2 ─▶ TGifEncoder: Floyd–Steinberg ─▶ changed rectangle
+        │                   ─▶ LZW twice, opaque and transparent, keep the
+        │                       shorter ─▶ GIF89a + NETSCAPE2.0 loop
         │
-        └─ pass 2 ──▶ TGifEncoder: Floyd–Steinberg ──▶ changed rectangle
-                       ──▶ LZW twice, opaque and transparent, keep the
-                           shorter ──▶ GIF89a + NETSCAPE2.0 loop
+        └─ .apng one pass ─▶ TApngEncoder: no quantisation at all ─▶ changed
+                              rectangle ─▶ PNG line filters ─▶ paszlib
+                              ─▶ acTL/fcTL/fdAT
 ```
 
-Three decisions carry most of the weight:
+Four decisions carry most of the weight:
 
 - **One global palette, two passes.** An `AVAssetReader` cannot seek
   backwards, so the palette pass and the encoding pass are two readers
   opened one after the other over the same `CMTimeRange`. A per-frame
   local palette would need only one pass, but it makes the colours shift
   between frames — very visible on a screen recording's flat UI — and
-  costs 768 bytes of colour table per frame. The histogram is a fixed
-  4 MB array of 64³ cells that accumulates *exact* 8-bit channel sums, so
-  the 6-bit cells decide only which colours share a median-cut box; every
-  palette entry is the count-weighted mean of the real colours in it.
+  costs 768 bytes of colour table per frame. The histogram counts
+  *exact* colours: an open-addressed table of packed 24-bit keys, capped
+  at 2^20 distinct colours so its 16 MB never grows with the movie, with
+  the old fixed 4 MB array of 64³ cells kept as the fallback for a source
+  that exceeds the cap (`knips export` says so in its last line when it
+  happens). Median cut then splits the box holding the most *squared
+  error*, along the channel holding most of it, and every palette entry
+  is the count-weighted mean of the real colours in its box.
+
+  Measured on a 14 s, 800×520 ScreenCaptureKit recording, 281 frames,
+  PSNR against the same source that every encoder read, with ffmpeg's
+  `palettegen` + `paletteuse` as the reference point:
+
+  | encoder | dithered | size | PSNR |
+  | --- | --- | --- | --- |
+  | knips, 6-bit histogram | Floyd–Steinberg | 14.4 MB | 38.17 dB |
+  | knips, exact histogram + error-based cut | Floyd–Steinberg | 1.79 MB | 41.48 dB |
+  | ffmpeg palettegen/paletteuse | Floyd–Steinberg | 1.30 MB | 42.50 dB |
+  | knips, 6-bit histogram | none | 0.87 MB | 37.47 dB |
+  | knips, exact histogram + error-based cut | none | 1.09 MB | 42.58 dB |
+  | ffmpeg palettegen/paletteuse | none | 1.11 MB | 43.97 dB |
+
+  The dithered row is the one that matters, because dithering is the
+  default. It collapsed by 8.1× — not because the encoder got cleverer
+  about bytes, but because a palette that is 3.3 dB closer leaves far
+  smaller errors for Floyd–Steinberg to diffuse, and diffused error is
+  what was destroying the frame-to-frame coherence the changed rectangle
+  and the transparency trial both depend on. Encoding time did not move
+  (13.19 s before, 13.20 s after, same machine, same file).
+
+  Undithered, knips is now marginally *smaller* than ffmpeg at 1.4 dB
+  less; dithered it is 37% larger at 1.0 dB less. The remaining gap is
+  median cut against ffmpeg's own cut, not the histogram.
+- **Nearest-colour lookups are exact and memoised.** Mapping a pixel to
+  a palette index used to be answered per 6-bit *cell*, for the colour
+  the cell's corner expands to rather than for the pixel — a floor of a
+  couple of units per channel under every mapped pixel. Now the memo is
+  a direct-mapped table keyed by the colour itself (2^20 slots, 6 MB), so
+  a collision costs a search and never an answer; the search walks the
+  palette outwards from the entry nearest in green and stops when the
+  green difference alone exceeds the best distance so far, which gives
+  the same answer as scanning all 255 entries for a fraction of the
+  comparisons.
 - **Decimation counts grid slots, not deadlines.** Each frame's stamp is
   turned into a slot number, `floor((pts - first) * fps)`, and a frame is
   emitted when its slot is past the last one emitted. The obvious
@@ -110,12 +163,45 @@ Three decisions carry most of the weight:
   that should land exactly on the deadline lands a few parts in 10^16
   below it. Counting slots also means a source slower than the target
   never accumulates a backlog of frames that are "due".
-- **Delays come from the presentation stamps.** The delay written for a
-  frame is the gap to the frame after it, rounded to centiseconds
-  (GIF's unit) and clamped to at least 2 — browsers silently turn 0 and
-  1 into 10. That is why the pipeline holds one scaled frame back: it
-  cannot write frame *n*'s graphic-control block until it has seen
-  frame *n+1*.
+- **Delays are snapped to that same grid.** `TFrameDelayPlanner`
+  (`Knips.Export.Timing`) rounds each emitted frame's stamp to the
+  nearest whole slot and writes the difference between that slot's ideal
+  tick count and the ticks already spent. Two things have to hold at
+  once and the obvious implementations manage one each: rounding every
+  gap on its own loses ten percent of the running time at 30 fps
+  (3.33 cs becomes 3), while rounding each stamp against the centisecond
+  grid keeps the total honest but turns a 30 fps source decimated to
+  20 fps into 7, 3, 7, 3 — the source's frames land 3.33 cs either side
+  of every 1/20 s slot, and the alternation is visible judder. Snapping
+  to the slot first removes the alternation, taking the ideal from the
+  slot removes the drift, and measuring against ticks already spent means
+  a delay clamped at the floor (GIF's minimum of 2 — browsers silently
+  turn 0 and 1 into 10) is repaid by the frames after it rather than
+  lost. A gap longer than one slot keeps its length, so an idle stretch
+  stays idle. That is also why the pipeline holds one scaled frame back:
+  it cannot write frame *n*'s delay until it has seen frame *n+1*.
+
+  Measured on a 30 fps source: 30 → 20 fps went from `7,3,7,3,…`
+  (51 × 7 cs, 49 × 3 cs, 504 cs total) to `5,5,5,…` (100 × 5 cs, 500 cs
+  total, which is the source's own length exactly). 30 → 30 fps stays
+  `3,4,3,3,4,3` — 3.33 cs is not writable — but its total moved from
+  501 cs to 500 cs.
+
+  **The two clamps are deliberately not symmetric.** A delay pushed *up*
+  to the minimum is **owed**, and repaid by shortening the delays after
+  it, so a burst of frames closer together than the floor allows still
+  ends where it should. A delay pushed *down* to the ceiling — a delay
+  field is two bytes — is **forgiven**: the gap is emitted as one
+  maximum-length delay and the remainder is struck off rather than
+  carried. Owing it instead smears the excess over the frames *after* the
+  gap, which is the worst possible place for it: measured at APNG's
+  millisecond scale, a 300 s pause left the next four motion frames each
+  held for 65 535 ticks, turning the moment the recording came back to
+  life into a slideshow. Forgiving costs only the idle time past the
+  ceiling (the pause plays for 65.5 s instead of 300 s) and every frame
+  after it gets its true delay. In centiseconds the ceiling is 655 s, so
+  a GIF only meets it after eleven minutes of a perfectly still screen;
+  in practice this is an APNG concern.
 - **Changed-rectangle frames, and a transparency trial.** Every frame
   after the first is written as the bounding box of the palette indices
   that differ from the previous frame, with disposal "leave in place". A
@@ -142,6 +228,89 @@ Three decisions carry most of the weight:
 Memory is bounded by construction: one decoded frame (the framework's),
 one scaled frame, one pending scaled frame, and two palette-index buffers
 inside the encoder. Nothing accumulates with the length of the movie.
+
+`export` prints one line of advice to **stderr** when the result is going
+to be awkward to hand around — a canvas at or past 1280×720, or a file
+past 20 MB. It names only the knobs that would actually move: `--width=800`
+if the canvas is wider than that, `--fps=15` if the rate is higher, and a
+shorter `--trim` when neither is left. It is advice, not a failure: the
+file is written and usable, so the exit code stays 0 and the line goes to
+stderr where a pipeline will not eat it.
+`Knips.Options.LargeExportWarning` decides, and is tested.
+
+### APNG
+
+`--out=x.apng` writes an animated PNG instead, and its whole reason for
+existing is that it does **not** quantise: 8-bit truecolour, so the file
+holds exactly the pixels the scaler produced. On the same 14 s 800×520
+recording as the table above it comes out at 29.1 MB and 45.20 dB —
+which is the ceiling the YUV→RGB conversion itself imposes, 3.7 dB above
+the best a 256-colour palette managed, for 16× the bytes. It is the right
+choice for a UI clip that has to look right and the wrong one for a chat
+window.
+
+Everything before the sink is shared with the GIF path, and only two
+things differ:
+
+- **One pass, not two.** There is no palette to learn, so the reader runs
+  once. The canvas size comes from the track's `naturalSize`.
+- **Chunks instead of blocks.** `signature IHDR acTL | fcTL IDAT |
+  fcTL fdAT | … IEND`, with one contiguous sequence number shared by
+  `fcTL` and `fdAT`. Frames after the first are the changed rectangle at
+  its own offset with `dispose_op = NONE` and `blend_op = SOURCE`, which
+  with no alpha channel is exactly "replace these pixels and leave the
+  rest": the same composition the GIF path gets from disposal 1. Each
+  line picks among the five PNG filters by smallest sum of signed
+  magnitudes, and the result goes through the RTL's own paszlib
+  (`ZStream`) — part of FreePascal, not a new dependency — at the
+  **default** level, not level 9. Measured on a 480×312 / 100-frame
+  export, interleaved runs on CPU time: level 9 cost 6.28 s against
+  2.77 s for 2.0% fewer bytes, which is not a trade an animation format
+  should make on the user's behalf. Writing the five filter loops out
+  rather than selecting the predictor per byte is free by comparison:
+  byte-identical output, 2.92 s → 2.77 s.
+
+`acTL` has to carry the frame count and sits before the first frame, so
+it is written as zero and its four bytes and CRC are patched in `Finish`
+at a remembered offset. That is the only seek in the encoder; nothing
+else buffers, and memory is the current frame's RGB, the previous
+frame's, and one frame of compressed bytes.
+
+The co-located suite parses the encoder's own output — chunk order, every
+CRC, the sequence numbers, the ops, the delays — inflates it, unfilters
+it with an implementation written from the specification rather than from
+the encoder, and asserts the pixels come back **byte for byte**.
+
+### The passthrough trim
+
+`knips export --in=a.mp4 --out=b.mp4 --trim=1.5,3.5` does not come
+through the pipeline at all: it decodes nothing.
+`Knips.Export.MovieTrim` hands the asset to an `AVAssetExportSession`
+with `AVAssetExportPresetPassthrough`, a `timeRange`, and an
+`outputFileType` from the output extension, so the same coded samples are
+copied into a new container. A recording that has been through
+VideoToolbox once should not go through it again just to lose its first
+two seconds.
+
+The export is asynchronous and this program has no run loop, so the wait
+is the same shape as `TMovieWriter.Finish`: a global `cdecl` completion
+procedure sets a flag and the main thread pumps `CFRunLoopRunInMode` in
+millisecond slices until it does, or gives up and cancels.
+
+Only movie-to-movie is possible — passthrough copies samples, so there is
+no path from a GIF and none to one — and a movie `--out` without `--trim`
+is refused rather than silently copying the file. `--fps`, `--width` and
+`--no-dither` have no meaning here and say so on stderr rather than being
+ignored in silence.
+
+Verified on a real 14 s ScreenCaptureKit recording: `--trim=1.5,3.5`
+produced a file of duration exactly 2.000 s whose codec, profile, level,
+pixel format and dimensions all match the source, and whose decoded
+frames are `framemd5`-identical to the source seeked to 1.5 s (PSNR
+`inf`). Note that the container keeps the samples from the preceding
+keyframe and trims them with an edit list, so `ffprobe`'s `nb_frames` is
+larger than the number of frames actually presented; a decoder that
+honours the edit list sees exactly the requested range.
 
 ## The runtime-built output object
 

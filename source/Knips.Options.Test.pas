@@ -91,6 +91,28 @@ type
     procedure TestRejectsInvertedTrim;
     procedure TestRejectsAnExplicitZeroEnd;
     procedure TestAcceptsOpenEndedTrim;
+    procedure TestApngOutputIsAccepted;
+    procedure TestMovieOutputNeedsATrim;
+    procedure TestMovieOutputFillsItsContainer;
+    procedure TestMovieOutputRefusesAWholeMovieRange;
+  end;
+
+  TExportFormatTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestFormatFollowsTheExtension;
+    procedure TestUnknownExtensionsAreRefused;
+    procedure TestFormatNamesAreHumanReadable;
+  end;
+
+  TLargeExportTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestSmallExportsSaySilent;
+    procedure TestLargeCanvasWarns;
+    procedure TestLargeFileWarns;
+    procedure TestAdviceOnlyNamesKnobsThatMove;
+    procedure TestPassthroughTrimNeverWarns;
   end;
 
   TDerivedValueTests = class(TTestSuite)
@@ -587,7 +609,7 @@ begin
   Test('an input movie is required', TestRequiresInput);
   Test('an output path is required', TestRequiresOutput);
   Test('the input must be .mp4 or .mov', TestRejectsNonMovieInput);
-  Test('the output must be .gif for now', TestRejectsNonGifOutput);
+  Test('an unknown output extension is refused', TestRejectsNonGifOutput);
   Test('writing over the input is refused', TestRejectsInputEqualToOutput);
   Test('fps outside 1..50 is rejected', TestRejectsFpsOutOfRange);
   Test('width outside 16..4096 is rejected', TestRejectsWidthOutOfRange);
@@ -597,6 +619,12 @@ begin
   Test('a trim ending at zero is an empty range, not an open one',
     TestRejectsAnExplicitZeroEnd);
   Test('a trim with no end runs to the end', TestAcceptsOpenEndedTrim);
+  Test('an .apng output validates', TestApngOutputIsAccepted);
+  Test('a movie output without --trim is refused', TestMovieOutputNeedsATrim);
+  Test('a movie output fills in its own container',
+    TestMovieOutputFillsItsContainer);
+  Test('a movie output refuses a range that is the whole movie',
+    TestMovieOutputRefusesAWholeMovieRange);
 end;
 
 procedure TExportValidationTests.TestDefaultsPlusPathsAreValid;
@@ -759,6 +787,190 @@ begin
   Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
 end;
 
+procedure TExportValidationTests.TestApngOutputIsAccepted;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.OutputPath := 'demo.APNG';
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+  Expect<Boolean>(Options.Format = efApng).ToBe(True);
+end;
+
+// A passthrough trim with no range is a copy, which is not what the
+// command is for; saying so is better than silently duplicating a file.
+procedure TExportValidationTests.TestMovieOutputNeedsATrim;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.OutputPath := 'cut.mp4';
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+  Expect<Boolean>(Pos('--trim', Error) > 0).ToBe(True);
+  Options.HasTrim := True;
+  Options.TrimStartSeconds := 1.5;
+  Options.HasTrimEnd := True;
+  Options.TrimEndSeconds := 3.5;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+  Expect<Boolean>(Options.Format = efMovie).ToBe(True);
+end;
+
+procedure TExportValidationTests.TestMovieOutputFillsItsContainer;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.OutputPath := 'cut.mov';
+  Options.HasTrim := True;
+  Options.HasTrimEnd := True;
+  Options.TrimEndSeconds := 2;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+  Expect<Boolean>(Options.OutputContainer = ocQuickTime).ToBe(True);
+  Options.OutputPath := 'cut.mp4';
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+  Expect<Boolean>(Options.OutputContainer = ocMPEG4).ToBe(True);
+end;
+
+// --trim=0, parses and is a range, so it slips past "a movie output
+// needs --trim" while being exactly the whole-file copy that rule
+// exists to refuse.
+procedure TExportValidationTests.TestMovieOutputRefusesAWholeMovieRange;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.OutputPath := 'cut.mp4';
+  Options.HasTrim := True;
+  Options.TrimStartSeconds := 0;
+  Options.HasTrimEnd := False;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+  Expect<Boolean>(Pos('whole movie', Error) > 0).ToBe(True);
+  // An end makes it a real trim...
+  Options.HasTrimEnd := True;
+  Options.TrimEndSeconds := 3.5;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+  // ...and so does a later start with no end.
+  Options.HasTrimEnd := False;
+  Options.TrimStartSeconds := 1.5;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+  // A GIF, which is not a copy of anything, is unaffected.
+  Options.OutputPath := 'demo.gif';
+  Options.TrimStartSeconds := 0;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+end;
+
+{ TExportFormatTests }
+
+procedure TExportFormatTests.SetupTests;
+begin
+  Test('the extension picks the format', TestFormatFollowsTheExtension);
+  Test('anything else is refused', TestUnknownExtensionsAreRefused);
+  Test('formats have names worth printing',
+    TestFormatNamesAreHumanReadable);
+end;
+
+procedure TExportFormatTests.TestFormatFollowsTheExtension;
+var
+  Format: TExportFormat;
+begin
+  Expect<Boolean>(ExportFormatForPath('a.gif', Format)).ToBe(True);
+  Expect<Boolean>(Format = efGif).ToBe(True);
+  Expect<Boolean>(ExportFormatForPath('a.Apng', Format)).ToBe(True);
+  Expect<Boolean>(Format = efApng).ToBe(True);
+  Expect<Boolean>(ExportFormatForPath('a.mp4', Format)).ToBe(True);
+  Expect<Boolean>(Format = efMovie).ToBe(True);
+  Expect<Boolean>(ExportFormatForPath('a.MOV', Format)).ToBe(True);
+  Expect<Boolean>(Format = efMovie).ToBe(True);
+end;
+
+procedure TExportFormatTests.TestUnknownExtensionsAreRefused;
+var
+  Format: TExportFormat;
+begin
+  Expect<Boolean>(ExportFormatForPath('a.png', Format)).ToBe(False);
+  Expect<Boolean>(ExportFormatForPath('a.webp', Format)).ToBe(False);
+  Expect<Boolean>(ExportFormatForPath('a', Format)).ToBe(False);
+end;
+
+procedure TExportFormatTests.TestFormatNamesAreHumanReadable;
+begin
+  Expect<string>(ExportFormatName(efGif)).ToBe('GIF');
+  Expect<string>(ExportFormatName(efApng)).ToBe('APNG');
+  Expect<string>(ExportFormatName(efMovie)).ToBe('movie');
+end;
+
+{ TLargeExportTests }
+
+procedure TLargeExportTests.SetupTests;
+begin
+  Test('an ordinary export says nothing', TestSmallExportsSaySilent);
+  Test('a canvas at or past 1280x720 is worth a word',
+    TestLargeCanvasWarns);
+  Test('a small canvas that ran long is worth a word', TestLargeFileWarns);
+  Test('the advice only names knobs that would move',
+    TestAdviceOnlyNamesKnobsThatMove);
+  Test('a passthrough trim has nothing to suggest',
+    TestPassthroughTrimNeverWarns);
+end;
+
+procedure TLargeExportTests.TestSmallExportsSaySilent;
+begin
+  Expect<string>(LargeExportWarning(efGif, 800, 520, 20, 2 * 1024 * 1024))
+    .ToBe('');
+  Expect<string>(LargeExportWarning(efApng, 640, 400, 20, 19 * 1024 * 1024))
+    .ToBe('');
+end;
+
+procedure TLargeExportTests.TestLargeCanvasWarns;
+var
+  Warning: string;
+begin
+  Warning := LargeExportWarning(efGif, 1280, 720, 20, 1024);
+  Expect<Boolean>(Warning <> '').ToBe(True);
+  Expect<Boolean>(Pos('1280x720', Warning) > 0).ToBe(True);
+  Expect<Boolean>(Pos('--width=800', Warning) > 0).ToBe(True);
+  Expect<Boolean>(Pos('--fps=15', Warning) > 0).ToBe(True);
+  // The same area in a different shape still counts.
+  Expect<Boolean>(LargeExportWarning(efApng, 1600, 600, 20, 1024) <> '')
+    .ToBe(True);
+end;
+
+procedure TLargeExportTests.TestLargeFileWarns;
+var
+  Warning: string;
+begin
+  Warning := LargeExportWarning(efGif, 400, 300, 20, LargeExportBytes);
+  Expect<Boolean>(Warning <> '').ToBe(True);
+  Expect<Boolean>(Pos('20 MB', Warning) > 0).ToBe(True);
+  Expect<string>(LargeExportWarning(efGif, 400, 300, 20,
+    LargeExportBytes - 1)).ToBe('');
+end;
+
+// Advice nobody can act on is worse than none: a caller already at 800
+// pixels and 15 fps is told to shorten the range instead.
+procedure TLargeExportTests.TestAdviceOnlyNamesKnobsThatMove;
+var
+  Warning: string;
+begin
+  Warning := LargeExportWarning(efApng, 800, 520, 15, LargeExportBytes);
+  Expect<Boolean>(Pos('--width', Warning) > 0).ToBe(False);
+  Expect<Boolean>(Pos('--fps', Warning) > 0).ToBe(False);
+  Expect<Boolean>(Pos('--trim', Warning) > 0).ToBe(True);
+  Warning := LargeExportWarning(efApng, 800, 520, 30, LargeExportBytes);
+  Expect<Boolean>(Pos('--width', Warning) > 0).ToBe(False);
+  Expect<Boolean>(Pos('--fps=15', Warning) > 0).ToBe(True);
+end;
+
+procedure TLargeExportTests.TestPassthroughTrimNeverWarns;
+begin
+  Expect<string>(LargeExportWarning(efMovie, 1920, 1080, 30,
+    Int64(500) * 1024 * 1024)).ToBe('');
+end;
+
 { TDerivedValueTests }
 
 procedure TDerivedValueTests.SetupTests;
@@ -805,6 +1017,8 @@ begin
   TestRunnerProgram.AddSuite(TTrimTests.Create('ParseTrimRange'));
   TestRunnerProgram.AddSuite(TExportValidationTests.Create(
     'ValidateExportOptions'));
+  TestRunnerProgram.AddSuite(TExportFormatTests.Create('ExportFormatForPath'));
+  TestRunnerProgram.AddSuite(TLargeExportTests.Create('LargeExportWarning'));
   TestRunnerProgram.AddSuite(TDerivedValueTests.Create('derived values'));
   TestRunnerProgram.Run;
   ExitCode := TestResultToExitCode;

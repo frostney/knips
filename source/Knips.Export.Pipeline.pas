@@ -1,19 +1,30 @@
-unit Knips.Export.GifPipeline;
+unit Knips.Export.Pipeline;
 
-// One export, start to finish: movie in, animated GIF out.
+// One export, start to finish: movie in, animated image out.
 //
 //   AVAssetReader -> decimate to the target rate -> optional downscale
-//                 -> median-cut palette -> LZW -> .gif
+//                 -> GIF  (median-cut palette, dither, LZW)
+//                 -> APNG (no palette at all, zlib)
 //
-// Two passes over the movie, because the palette has to be known before
-// the first frame is written and AVAssetReader cannot rewind: the first
-// pass samples up to PaletteSampleFrames frames spread across the range
-// and feeds their colours to the quantiser, the second encodes. Only one
-// decoded frame and one pending scaled frame are ever in memory.
+// The reader, the decimator and the scaler are shared; only the sink
+// differs, so the two formats cannot drift apart on timing or on which
+// frames they pick. A GIF needs two passes over the movie, because the
+// palette has to be known before the first frame is written and
+// AVAssetReader cannot rewind: the first pass samples up to
+// PaletteSampleFrames frames spread across the range and feeds their
+// colours to the quantiser, the second encodes. APNG has nothing to
+// learn first, so it makes one pass.
+//
+// Only one decoded frame and one pending scaled frame are ever in
+// memory, whichever format is being written.
 //
 // Frame delays come from the presentation stamps the reader hands back,
-// not from the requested rate, so a recording that idles keeps its
-// timing instead of being stretched to a fixed cadence.
+// snapped to the decimation grid by Knips.Export.Timing, so a recording
+// that idles keeps its timing while a steady one gets a steady cadence.
+//
+// The third thing `knips export` can write — a trimmed movie — does not
+// come through here at all: it decodes nothing. See
+// Knips.Export.MovieTrim.
 
 {$I Shared.inc}
 
@@ -28,9 +39,11 @@ uses
 
   CocoaAll,
   Knips.Capture.CoreMedia,
+  Knips.Export.Apng,
   Knips.Export.Bitmap,
   Knips.Export.Gif,
   Knips.Export.MovieReader,
+  Knips.Export.Timing,
   Knips.Options,
   MacOSAll;
 
@@ -48,7 +61,8 @@ const
   GridEpsilon = 1E-6;
 
 type
-  TGifExportReport = record
+  TExportReport = record
+    Format: TExportFormat;
     InputPath: string;
     OutputPath: string;
     SourceWidth: Integer;
@@ -58,16 +72,70 @@ type
     FramesRead: Int64;
     FramesWritten: Int64;
     SampledFrames: Integer;
+    // Zero for APNG, which quantises nothing.
     PaletteColors: Integer;
-    // Playback length of the GIF: the sum of its frame delays.
+    // False when the colour histogram overflowed into its 6-bit
+    // fallback, which costs palette accuracy and is worth saying.
+    ExactPalette: Boolean;
+    // Playback length: the sum of the frame delays.
     DurationSeconds: Double;
     OutputBytes: Int64;
   end;
 
-  TGifExportSession = class
+  // What a pass of scaled frames is written into. The GIF and APNG
+  // encoders have the same shape but no common ancestor — one is a
+  // palette encoder and the other is not — so the pipeline gets one
+  // here rather than two copies of the frame loop.
+  TExportSink = class
+  public
+    function Open(const APath: string; out AError: string): Boolean;
+      virtual; abstract;
+    function AddFrame(const APixels: PByte; ABytesPerRow,
+      ADelayTicks: Integer; out AError: string): Boolean; virtual; abstract;
+    function Finish(out AError: string): Boolean; virtual; abstract;
+    function FrameCount: Int64; virtual; abstract;
+    function BytesWritten: Int64; virtual; abstract;
+    function TicksPerSecond: Integer; virtual; abstract;
+    function MinimumDelayTicks: Integer; virtual; abstract;
+  end;
+
+  TGifSink = class(TExportSink)
+  private
+    FEncoder: TGifEncoder;
+  public
+    constructor Create(AWidth, AHeight: Integer; const APalette: TGifPalette;
+      ADither: Boolean);
+    destructor Destroy; override;
+    function Open(const APath: string; out AError: string): Boolean; override;
+    function AddFrame(const APixels: PByte; ABytesPerRow,
+      ADelayTicks: Integer; out AError: string): Boolean; override;
+    function Finish(out AError: string): Boolean; override;
+    function FrameCount: Int64; override;
+    function BytesWritten: Int64; override;
+    function TicksPerSecond: Integer; override;
+    function MinimumDelayTicks: Integer; override;
+  end;
+
+  TApngSink = class(TExportSink)
+  private
+    FEncoder: TApngEncoder;
+  public
+    constructor Create(AWidth, AHeight: Integer);
+    destructor Destroy; override;
+    function Open(const APath: string; out AError: string): Boolean; override;
+    function AddFrame(const APixels: PByte; ABytesPerRow,
+      ADelayTicks: Integer; out AError: string): Boolean; override;
+    function Finish(out AError: string): Boolean; override;
+    function FrameCount: Int64; override;
+    function BytesWritten: Int64; override;
+    function TicksPerSecond: Integer; override;
+    function MinimumDelayTicks: Integer; override;
+  end;
+
+  TExportSession = class
   private
     FOptions: TExportOptions;
-    FReport: TGifExportReport;
+    FReport: TExportReport;
     FReader: TMovieReader;
     FScaled: TBgraImage;
     FPending: TBgraImage;
@@ -91,15 +159,14 @@ type
     function ResolveRange(out AError: string): Boolean;
     function CollectPalette(out APalette: TGifPalette;
       out AError: string): Boolean;
-    function WriteFrames(const APalette: TGifPalette;
-      out AError: string): Boolean;
+    function WriteFrames(ASink: TExportSink; out AError: string): Boolean;
   public
     constructor Create(const AOptions: TExportOptions);
     destructor Destroy; override;
     // False with a one-line message on any failure; the partial output
     // file is removed.
     function Run(out AError: string): Boolean;
-    property Report: TGifExportReport read FReport;
+    property Report: TExportReport read FReport;
   end;
 
 {$ENDIF}
@@ -108,28 +175,129 @@ implementation
 
 {$IFDEF DARWIN}
 
-{ TGifExportSession }
+{ TGifSink }
 
-constructor TGifExportSession.Create(const AOptions: TExportOptions);
+constructor TGifSink.Create(AWidth, AHeight: Integer;
+  const APalette: TGifPalette; ADither: Boolean);
+begin
+  inherited Create;
+  FEncoder := TGifEncoder.Create(AWidth, AHeight, APalette, ADither);
+end;
+
+destructor TGifSink.Destroy;
+begin
+  FEncoder.Free;
+  inherited Destroy;
+end;
+
+function TGifSink.Open(const APath: string; out AError: string): Boolean;
+begin
+  Result := FEncoder.Open(APath, AError);
+end;
+
+function TGifSink.AddFrame(const APixels: PByte; ABytesPerRow,
+  ADelayTicks: Integer; out AError: string): Boolean;
+begin
+  Result := FEncoder.AddFrame(APixels, ABytesPerRow, ADelayTicks, AError);
+end;
+
+function TGifSink.Finish(out AError: string): Boolean;
+begin
+  Result := FEncoder.Finish(AError);
+end;
+
+function TGifSink.FrameCount: Int64;
+begin
+  Result := FEncoder.FrameCount;
+end;
+
+function TGifSink.BytesWritten: Int64;
+begin
+  Result := FEncoder.BytesWritten;
+end;
+
+function TGifSink.TicksPerSecond: Integer;
+begin
+  Result := GifDelayTicksPerSecond;
+end;
+
+function TGifSink.MinimumDelayTicks: Integer;
+begin
+  Result := GifMinimumDelayTicks;
+end;
+
+{ TApngSink }
+
+constructor TApngSink.Create(AWidth, AHeight: Integer);
+begin
+  inherited Create;
+  FEncoder := TApngEncoder.Create(AWidth, AHeight, ApngDelayTicksPerSecond);
+end;
+
+destructor TApngSink.Destroy;
+begin
+  FEncoder.Free;
+  inherited Destroy;
+end;
+
+function TApngSink.Open(const APath: string; out AError: string): Boolean;
+begin
+  Result := FEncoder.Open(APath, AError);
+end;
+
+function TApngSink.AddFrame(const APixels: PByte; ABytesPerRow,
+  ADelayTicks: Integer; out AError: string): Boolean;
+begin
+  Result := FEncoder.AddFrame(APixels, ABytesPerRow, ADelayTicks, AError);
+end;
+
+function TApngSink.Finish(out AError: string): Boolean;
+begin
+  Result := FEncoder.Finish(AError);
+end;
+
+function TApngSink.FrameCount: Int64;
+begin
+  Result := FEncoder.FrameCount;
+end;
+
+function TApngSink.BytesWritten: Int64;
+begin
+  Result := FEncoder.BytesWritten;
+end;
+
+function TApngSink.TicksPerSecond: Integer;
+begin
+  Result := ApngDelayTicksPerSecond;
+end;
+
+function TApngSink.MinimumDelayTicks: Integer;
+begin
+  Result := ApngMinimumDelayTicks;
+end;
+
+{ TExportSession }
+
+constructor TExportSession.Create(const AOptions: TExportOptions);
 begin
   inherited Create;
   FOptions := AOptions;
 end;
 
-destructor TGifExportSession.Destroy;
+destructor TExportSession.Destroy;
 begin
   FreeAndNil(FReader);
   inherited Destroy;
 end;
 
-procedure TGifExportSession.BeginPass;
+procedure TExportSession.BeginPass;
 begin
   FEmitted := 0;
   FBaseSeconds := 0;
   FLastSlot := 0;
 end;
 
-function TGifExportSession.NextEmittedFrame(
+function TExportSession.NextEmittedFrame(
   out AFrame: TMovieReaderFrame): Boolean;
 var
   Frame: TMovieReaderFrame;
@@ -167,7 +335,7 @@ begin
   end;
 end;
 
-procedure TGifExportSession.EnsureTargetSize(ASourceWidth,
+procedure TExportSession.EnsureTargetSize(ASourceWidth,
   ASourceHeight: Integer);
 var
   TargetWidth: Integer;
@@ -177,8 +345,8 @@ begin
   FReport.SourceWidth := ASourceWidth;
   FReport.SourceHeight := ASourceHeight;
   TargetWidth := FOptions.Width;
-  // Upscaling a recording into a GIF only costs bytes, so a width above
-  // the source is treated as "as large as the source".
+  // Upscaling a recording into an animation only costs bytes, so a width
+  // above the source is treated as "as large as the source".
   if (TargetWidth = GifWidthFromSource) or (TargetWidth > ASourceWidth) then
     TargetWidth := ASourceWidth;
   FReport.PixelWidth := TargetWidth;
@@ -191,8 +359,8 @@ end;
 // A frame that cannot be read has to fail the export. Leaving the
 // destination untouched would hand the encoder the previous frame
 // again, or the quantiser the same frame twice, and still report
-// success — a wrong GIF is worse than no GIF.
-function TGifExportSession.ScaleFrame(const AFrame: TMovieReaderFrame;
+// success — a wrong animation is worse than none.
+function TExportSession.ScaleFrame(const AFrame: TMovieReaderFrame;
   var ADestination: TBgraImage; out AError: string): Boolean;
 var
   Base: Pointer;
@@ -230,7 +398,7 @@ begin
   end;
 end;
 
-function TGifExportSession.ExpectedFrameCount: Integer;
+function TExportSession.ExpectedFrameCount: Integer;
 var
   Seconds: Double;
 begin
@@ -244,7 +412,7 @@ begin
     Result := 1;
 end;
 
-function TGifExportSession.ResolveRange(out AError: string): Boolean;
+function TExportSession.ResolveRange(out AError: string): Boolean;
 begin
   Result := False;
   AError := '';
@@ -263,7 +431,7 @@ begin
   Result := True;
 end;
 
-function TGifExportSession.CollectPalette(out APalette: TGifPalette;
+function TExportSession.CollectPalette(out APalette: TGifPalette;
   out AError: string): Boolean;
 var
   Quantizer: TGifQuantizer;
@@ -318,6 +486,7 @@ begin
       AError := 'the selected range holds no frames';
       Exit;
     end;
+    FReport.ExactPalette := Quantizer.IsExactHistogram;
     // One index of the 256 is reserved for "unchanged since the last
     // frame", so the palette is built one colour short of the maximum.
     APalette := Quantizer.BuildPalette(GifMaxOpaqueColors);
@@ -328,16 +497,14 @@ begin
   Result := True;
 end;
 
-function TGifExportSession.WriteFrames(const APalette: TGifPalette;
+function TExportSession.WriteFrames(ASink: TExportSink;
   out AError: string): Boolean;
 var
-  Encoder: TGifEncoder;
+  Planner: TFrameDelayPlanner;
   Frame: TMovieReaderFrame;
   Pool: NSAutoreleasePool;
   Swap: TBgraImage;
   BaseSeconds: Double;
-  SpentCentiseconds: Int64;
-  LastDelay: Integer;
   HasPending: Boolean;
 begin
   Result := False;
@@ -345,34 +512,30 @@ begin
   if not FReader.StartPass(FStartSeconds, FRangeSeconds, AError) then
     Exit;
 
-  Encoder := TGifEncoder.Create(FReport.PixelWidth, FReport.PixelHeight,
-    APalette, FOptions.Dither);
+  Planner := TFrameDelayPlanner.Create(FOptions.FramesPerSecond,
+    ASink.TicksPerSecond, ASink.MinimumDelayTicks);
   try
-    if not Encoder.Open(FOptions.OutputPath, AError) then
+    if not ASink.Open(FOptions.OutputPath, AError) then
       Exit;
     HasPending := False;
     BaseSeconds := 0;
-    SpentCentiseconds := 0;
-    LastDelay := GifClampDelay(Round(100 / FOptions.FramesPerSecond));
     Pool := NSAutoreleasePool(NSAutoreleasePool.alloc.init);
     try
       while NextEmittedFrame(Frame) do
       begin
+        EnsureTargetSize(Integer(CVPixelBufferGetWidth(Frame.PixelBuffer)),
+          Integer(CVPixelBufferGetHeight(Frame.PixelBuffer)));
         if not ScaleFrame(Frame, FScaled, AError) then
           Exit;
         if HasPending then
         begin
-          // Delays are whole centiseconds, which cannot express 30 fps
-          // (3.33) at all. Rounding each gap on its own would lose 10%
-          // of the running time, so each delay is measured against the
-          // centisecond grid the first frame started on and the error
-          // never accumulates.
-          LastDelay := GifClampDelay(
-            Round((Frame.Seconds - BaseSeconds) * 100) - SpentCentiseconds);
-          if not Encoder.AddFrame(@FPending.Pixels[0], FPending.BytesPerRow,
-            LastDelay, AError) then
+          // Whole ticks cannot express 30 fps at all, and the stamps of
+          // a 30 fps source straddle every 20 fps slot; the planner is
+          // what turns both into a smooth, drift-free run of delays
+          // (Knips.Export.Timing).
+          if not ASink.AddFrame(@FPending.Pixels[0], FPending.BytesPerRow,
+            Planner.NextDelay(Frame.Seconds - BaseSeconds), AError) then
             Exit;
-          Inc(SpentCentiseconds, LastDelay);
         end
         else
           BaseSeconds := Frame.Seconds;
@@ -380,11 +543,11 @@ begin
         FPending := FScaled;
         FScaled := Swap;
         HasPending := True;
-        if (Encoder.FrameCount > 0)
-          and (Encoder.FrameCount mod ProgressEveryFrames = 0) then
+        if (ASink.FrameCount > 0)
+          and (ASink.FrameCount mod ProgressEveryFrames = 0) then
         begin
-          WriteLn(Format('  %d frames, %d kB', [Encoder.FrameCount,
-            Encoder.BytesWritten div 1024]));
+          WriteLn(Format('  %d frames, %d kB', [ASink.FrameCount,
+            ASink.BytesWritten div 1024]));
           Flush(Output);
         end;
         if FEmitted mod PoolDrainEveryFrames = 0 then
@@ -407,32 +570,35 @@ begin
       AError := 'the selected range holds no frames';
       Exit;
     end;
-    // The last frame has no successor to measure against, so it keeps
-    // the delay of the one before it.
-    if not Encoder.AddFrame(@FPending.Pixels[0], FPending.BytesPerRow,
-      LastDelay, AError) then
+    // The last frame has no successor to measure against, so it is shown
+    // for one interval of the requested rate.
+    if not ASink.AddFrame(@FPending.Pixels[0], FPending.BytesPerRow,
+      Planner.TrailingDelay, AError) then
       Exit;
-    Inc(SpentCentiseconds, LastDelay);
-    if not Encoder.Finish(AError) then
+    if not ASink.Finish(AError) then
       Exit;
-    FReport.FramesWritten := Encoder.FrameCount;
-    FReport.OutputBytes := Encoder.BytesWritten;
-    FReport.DurationSeconds := SpentCentiseconds / 100;
+    FReport.FramesWritten := ASink.FrameCount;
+    FReport.OutputBytes := ASink.BytesWritten;
+    FReport.DurationSeconds := Planner.SpentTicks / Planner.TicksPerSecond;
     Result := True;
   finally
-    Encoder.Free;
+    Planner.Free;
   end;
 end;
 
-function TGifExportSession.Run(out AError: string): Boolean;
+function TExportSession.Run(out AError: string): Boolean;
 var
   Palette: TGifPalette;
+  Sink: TExportSink;
+  Written: Boolean;
 begin
   Result := False;
   AError := '';
-  FReport := Default(TGifExportReport);
+  FReport := Default(TExportReport);
+  FReport.Format := FOptions.Format;
   FReport.InputPath := FOptions.InputPath;
   FReport.OutputPath := FOptions.OutputPath;
+  FReport.ExactPalette := True;
 
   FReader := TMovieReader.Create(FOptions.InputPath);
   if not FReader.Open(AError) then
@@ -440,17 +606,45 @@ begin
   if not ResolveRange(AError) then
     Exit;
 
-  BeginPass;
-  if not CollectPalette(Palette, AError) then
-    Exit;
+  Palette := Default(TGifPalette);
+  if FOptions.Format = efGif then
+  begin
+    BeginPass;
+    if not CollectPalette(Palette, AError) then
+      Exit;
+  end
+  else
+    // APNG quantises nothing, so there is nothing to learn from a first
+    // pass; the size comes from the track the reader already opened.
+    EnsureTargetSize(FReader.PixelWidth, FReader.PixelHeight);
 
-  WriteLn(Format('exporting %dx%d at up to %d fps (%d colours) to %s',
-    [FReport.PixelWidth, FReport.PixelHeight, FOptions.FramesPerSecond,
-    FReport.PaletteColors, FOptions.OutputPath]));
+  if FOptions.Format = efGif then
+    WriteLn(Format('exporting %dx%d at up to %d fps (%d colours) to %s',
+      [FReport.PixelWidth, FReport.PixelHeight, FOptions.FramesPerSecond,
+      FReport.PaletteColors, FOptions.OutputPath]))
+  else
+    WriteLn(Format('exporting %dx%d at up to %d fps (truecolour) to %s',
+      [FReport.PixelWidth, FReport.PixelHeight, FOptions.FramesPerSecond,
+      FOptions.OutputPath]));
   Flush(Output);
 
-  BeginPass;
-  if not WriteFrames(Palette, AError) then
+  if FOptions.Format = efGif then
+    Sink := TGifSink.Create(FReport.PixelWidth, FReport.PixelHeight, Palette,
+      FOptions.Dither)
+  else
+    Sink := TApngSink.Create(FReport.PixelWidth, FReport.PixelHeight);
+  Written := False;
+  try
+    BeginPass;
+    Written := WriteFrames(Sink, AError);
+  finally
+    // The sink owns the output stream, so it has to go before the file
+    // is removed: deleting a path a stream still holds open leaves the
+    // partial file alive until the process exits on some volumes, and
+    // the close would then write into a deleted inode.
+    Sink.Free;
+  end;
+  if not Written then
   begin
     DeleteFile(FOptions.OutputPath);
     Exit;

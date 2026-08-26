@@ -58,7 +58,7 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | Path | Role |
 | --- | --- |
 | `source/knips.pas` | Program: CLI surface (`app`, `record`, `export`, `displays`, `windows`, `probe`), signals |
-| `source/Knips.Options.pas` | Platform-neutral recording + export option models and validation (tested) |
+| `source/Knips.Options.pas` | Platform-neutral recording + export option models, validation, large-export advice (tested) |
 | `source/Knips.App.State.pas` | Platform-neutral app state machine, titles, paths, selection maths (tested) |
 | `source/Knips.App.pas` | Menu-bar app: status item, menu, runtime-built `KnipsAppTarget` |
 | `source/Knips.App.Overlay.pas` | Region selection overlay; runtime-built `KnipsOverlayView`/`KnipsOverlayWindow` |
@@ -69,20 +69,24 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | `source/Knips.Export.MovieWriter.pas` | AVAssetWriter bindings + the movie sink |
 | `source/Knips.Export.MovieReader.pas` | AVAssetReader bindings; BGRA frames + presentation stamps, with a trim range |
 | `source/Knips.Export.Bitmap.pas` | Platform-neutral BGRA buffer + box/bilinear resampling (tested) |
-| `source/Knips.Export.Gif.pas` | Platform-neutral GIF89a: median cut, dithering, LZW (tested) |
-| `source/Knips.Export.GifPipeline.pas` | Orchestrator: reader → decimate → scale → palette → GIF |
+| `source/Knips.Export.Gif.pas` | Platform-neutral GIF89a: exact-colour histogram, median cut, dithering, LZW (tested) |
+| `source/Knips.Export.Apng.pas` | Platform-neutral APNG: acTL/fcTL/fdAT, PNG filters, paszlib, truecolour (tested) |
+| `source/Knips.Export.Timing.pas` | Platform-neutral frame-delay planning: grid-snapped, drift-free (tested) |
+| `source/Knips.Export.MovieTrim.pas` | AVAssetExportSession passthrough trim (no decode, no re-encode) |
+| `source/Knips.Export.Pipeline.pas` | Orchestrator: reader → decimate → scale → GIF or APNG sink |
 | `source/Knips.Recording.pas` | Orchestrator: target → geometry → writer → stream → finish |
 | `source/capture/` | Vendored bindings: CoreMedia/CoreVideo/VideoToolbox/GCD, ScreenCaptureKit, pthread mutex |
 | `docs/` | Architecture, quick-start, tooling, code style, deployment, porting notes, spikes, ADRs |
 
 Layering: `knips.pas` → {`Knips.App`, `Knips.Recording`,
-`Knips.Export.GifPipeline`} → {`Knips.Capture.*`,
+`Knips.Export.Pipeline`, `Knips.Export.MovieTrim`} → {`Knips.Capture.*`,
 `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`,
-`Knips.Export.Gif`} → {`Knips.ObjC.*`, `Knips.Export.Bitmap`,
-`source/capture/*`}. `Knips.Options` is used by every layer and depends
-on nothing; `Knips.App.State` depends only on it. The GIF encoder is
-deliberately below the Darwin line: it has no `{$IFDEF DARWIN}` at all
-and is tested on every host.
+`Knips.Export.Gif`, `Knips.Export.Apng`, `Knips.Export.Timing`} →
+{`Knips.ObjC.*`, `Knips.Export.Bitmap`, `source/capture/*`}.
+`Knips.Options` is used by every layer and depends on nothing;
+`Knips.App.State` depends only on it. The GIF encoder, the APNG encoder
+and the delay planner are deliberately below the Darwin line: they have
+no `{$IFDEF DARWIN}` at all and are tested on every host.
 
 ## Testing
 
