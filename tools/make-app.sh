@@ -8,11 +8,15 @@
 # process that actually asks, which here is Contents/MacOS/knips-bin, not
 # the bundle. See docs/deployment.md.
 #
-# NSMicrophoneUsageDescription is the one key TCC does read from this
-# plist: a bundled process that asks for the microphone without it is
-# killed rather than prompted. The plain CLI binary has no Info.plist, so
-# it inherits the mic grant of whichever app is responsible for it (the
-# terminal).
+# NSMicrophoneUsageDescription and NSCameraUsageDescription are the keys
+# TCC reads from this plist: a bundled process asking for the microphone
+# without its key is killed rather than prompted, and the camera key is
+# what lets macOS prompt for Knips by name when the camera window is
+# switched on. Measured on device (docs/spikes/0001): a bundle-less
+# binary without the camera key is NOT killed — it is silently refused,
+# which is worse to debug. The plain CLI binary has no Info.plist, so it
+# inherits the grants of whichever app is responsible for it (the
+# terminal). Screen Recording needs no usage key.
 #
 # CFBundleExecutable is the binary itself, NOT a launcher script: a
 # script that execs the binary breaks the LaunchServices handshake
@@ -76,6 +80,8 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <string>13.0</string>
   <key>LSUIElement</key>
   <true/>
+  <key>NSCameraUsageDescription</key>
+  <string>Knips shows your camera in a floating window so it can be part of your recording.</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSMicrophoneUsageDescription</key>

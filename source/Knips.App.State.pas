@@ -32,7 +32,44 @@ const
   MaxErrorTitleLength = 60;
   ErrorTitlePrefix = 'Last error: ';
 
+  // The camera picture-in-picture window. Points, not pixels: the window
+  // is placed in screen coordinates and the layer scales itself.
+  CameraWindowWidth = 240;
+  CameraWindowHeight = 180;
+  // Inset from the bottom-right corner of the main screen's visible frame
+  // (so the Dock does not sit on top of the first placement).
+  CameraWindowMargin = 24;
+  CameraCornerRadius = 8;
+  // A restored position has to leave at least this much of the window on
+  // a screen's *visible* frame, or it is thrown away — the display it was
+  // dragged onto may be gone since the last launch, and a position under
+  // the Dock is unreachable because the camera window floats at level 3
+  // while the Dock sits at 20.
+  MinVisibleCameraExtent = 40;
+  // One stable title with a checkmark, not a verb that flips: "Hide
+  // Camera ✓" reads as a contradiction, and a checked item already says
+  // which way the toggle is.
+  CameraMenuTitle = 'Camera';
+  // NSControlStateValueOn / Off (NSCell.h). Spelled out rather than taken
+  // from CocoaAll, which is where the wrong NSWindowLevel values live.
+  MenuItemStateOn = 1;
+  MenuItemStateOff = 0;
+  // NSUserDefaults keys. Prefixed because a shell-run binary shares the
+  // defaults domain with whatever launched it.
+  CameraVisibleDefaultsKey = 'KnipsCameraVisible';
+  CameraOriginXDefaultsKey = 'KnipsCameraOriginX';
+  CameraOriginYDefaultsKey = 'KnipsCameraOriginY';
+
 type
+  // A window origin in AppKit's screen coordinates: bottom-left origin,
+  // y growing upwards, the same space NSWindow.frame lives in. Nothing
+  // here is flipped — unlike a capture region, the camera window is only
+  // ever handed back to AppKit.
+  TCameraOrigin = record
+    X: Double;
+    Y: Double;
+  end;
+
   TAppState = (asIdle, asSelecting, asRecording);
 
   TAppCommand = (
@@ -82,6 +119,23 @@ function ClampSelection(const ASelection: TCaptureRegion;
 function IsSelectionUsable(const ASelection: TCaptureRegion): Boolean;
 
 function ErrorMenuTitle(const AMessage: string): string;
+
+// The camera item's checkmark: on when the window is up.
+function CameraMenuState(AVisible: Boolean): Integer;
+
+// Bottom-right of the given visible frame, inset by CameraWindowMargin.
+// The frame is a screen's visibleFrame, so the result already clears the
+// menu bar and the Dock.
+function DefaultCameraOrigin(AVisibleX, AVisibleY, AVisibleWidth,
+  AVisibleHeight: Double): TCameraOrigin;
+
+// Whether a restored origin still puts a usable amount of the window on
+// the given screen's *visible* frame. The caller ORs this over every
+// screen; a False everywhere means the saved position belonged to a
+// display that is no longer attached — or to space the Dock has since
+// taken — and the default placement is used instead.
+function IsCameraOriginUsable(const AOrigin: TCameraOrigin; AVisibleX,
+  AVisibleY, AVisibleWidth, AVisibleHeight: Double): Boolean;
 
 implementation
 
@@ -236,6 +290,57 @@ begin
   if Length(Text) > MaxErrorTitleLength then
     Text := Copy(Text, 1, MaxErrorTitleLength - 1) + '…';
   Result := ErrorTitlePrefix + Text;
+end;
+
+function CameraMenuState(AVisible: Boolean): Integer;
+begin
+  if AVisible then
+    Result := MenuItemStateOn
+  else
+    Result := MenuItemStateOff;
+end;
+
+function DefaultCameraOrigin(AVisibleX, AVisibleY, AVisibleWidth,
+  AVisibleHeight: Double): TCameraOrigin;
+begin
+  Result.X := AVisibleX + AVisibleWidth - CameraWindowWidth
+    - CameraWindowMargin;
+  Result.Y := AVisibleY + CameraWindowMargin;
+  // A screen narrower or shorter than the window plus its margins would
+  // push the origin off the near edge instead of the far one.
+  if Result.X < AVisibleX then
+    Result.X := AVisibleX;
+  if Result.Y + CameraWindowHeight > AVisibleY + AVisibleHeight then
+    Result.Y := AVisibleY;
+end;
+
+function IsCameraOriginUsable(const AOrigin: TCameraOrigin; AVisibleX,
+  AVisibleY, AVisibleWidth, AVisibleHeight: Double): Boolean;
+var
+  OverlapWidth, OverlapHeight: Double;
+
+  function Overlap(AStart, AExtent, AOtherStart, AOtherExtent: Double): Double;
+  var
+    Low, High: Double;
+  begin
+    Low := AStart;
+    if AOtherStart > Low then
+      Low := AOtherStart;
+    High := AStart + AExtent;
+    if AOtherStart + AOtherExtent < High then
+      High := AOtherStart + AOtherExtent;
+    Result := High - Low;
+    if Result < 0 then
+      Result := 0;
+  end;
+
+begin
+  OverlapWidth := Overlap(AOrigin.X, CameraWindowWidth, AVisibleX,
+    AVisibleWidth);
+  OverlapHeight := Overlap(AOrigin.Y, CameraWindowHeight, AVisibleY,
+    AVisibleHeight);
+  Result := (OverlapWidth >= MinVisibleCameraExtent)
+    and (OverlapHeight >= MinVisibleCameraExtent);
 end;
 
 end.

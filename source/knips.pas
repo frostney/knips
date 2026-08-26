@@ -33,6 +33,7 @@ uses
   CLI.Subcommands,
   {$IFDEF DARWIN}
   Knips.App,
+  Knips.App.Camera,
   Knips.App.Overlay,
   Knips.Capture.ShareableContent,
   Knips.Capture.Stream,
@@ -383,6 +384,11 @@ begin
     Exit;
   if not HasMethod(OverlayWindowClassName, 'canBecomeKeyWindow') then
     Exit;
+  // Without acceptsFirstMouse: the camera window still appears — it just
+  // takes two clicks to drag, which is the kind of failure nobody
+  // reports and everybody blames on themselves.
+  if not HasMethod(CameraViewClassName, 'acceptsFirstMouse:') then
+    Exit;
   Selector := 'stopRecording:';
   Instance := InstantiateClass(LookUpClass(AppTargetClassName));
   if Instance = nil then
@@ -400,8 +406,8 @@ begin
     ReleaseInstance(Instance);
   end;
   WriteLn('runtime classes ', AppTargetClassName, ', ',
-    OverlayViewClassName, ', ', OverlayWindowClassName,
-    ': registered and answering');
+    OverlayViewClassName, ', ', OverlayWindowClassName, ', ',
+    CameraViewClassName, ': registered and answering');
   Result := True;
 end;
 

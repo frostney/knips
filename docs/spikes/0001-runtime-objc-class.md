@@ -103,6 +103,65 @@ and any dropped leading frames are the unknown. **Gate:** the recorded
 file's duration and frame timing match wall-clock capture within a frame
 or two.
 
+## Camera (added with the picture-in-picture window)
+
+The camera window reuses the same primitive — `KnipsCameraView` is a
+runtime-built `NSView` whose only method is `acceptsFirstMouse:` — so it
+does not reopen gate 1. What it *did* add were platform facts about TCC
+that the design leans on, and those were measured rather than assumed.
+
+### Proven on device (Darwin 25.5.0, Apple silicon, 2026-08-26)
+
+- **Registration.** `KnipsCameraView` registers and answers
+  `acceptsFirstMouse:`; `knips probe` gates on it and names it in the
+  "registered and answering" line, alongside the three existing classes.
+- **Bindings and linkage.** Every AVFoundation binding used
+  (`AVCaptureSession`, `AVCaptureDevice`, `AVCaptureDeviceInput`,
+  `AVCaptureVideoPreviewLayer`, and the `AVMediaTypeVideo`,
+  `AVLayerVideoGravityResizeAspectFill`,
+  `AVCaptureSessionPreset640x480` constants) resolves in the flag-free
+  default build; a session, a preview layer, `canSetSessionPreset:`,
+  `cornerRadius` and `isKindOfClass: CALayer` all behave.
+- **A bundle-less binary is NOT killed by TCC.** This was the load-bearing
+  unknown: if a missing `NSCameraUsageDescription` aborted the process,
+  switching the camera on during a recording would destroy the file. It
+  does not. Run as `./build/knips` (no bundle identifier, no usage
+  description), the process survived `requestAccessForMediaType:`,
+  `deviceInputWithDevice:error:` — which returned a real input, not an
+  error — and `startRunning`, and exited 0.
+- **A denied grant is invisible to the session.** In that same run,
+  `requestAccess` came back `granted = NO` without a prompt the user
+  could answer, `authorizationStatusForMediaType:` stayed
+  `NotDetermined` afterwards, and yet `startRunning` succeeded and
+  `isRunning` answered YES. A session with no access does not fail; it
+  delivers no frames. That is precisely the black rectangle
+  `TCameraPreview.Show` refuses to put on screen, and the only thing
+  preventing it is consulting the authorization status first.
+
+The second and third facts together are why the *bundle-less* binary
+cannot show the camera at all in this environment, and why the camera is
+in practice a `Knips.app` feature: `tools/make-app.sh` writes the
+`NSCameraUsageDescription` that lets TCC prompt properly.
+
+### Still pending a human on device
+
+Nothing here is load-bearing for correctness — all of it is "does it look
+and feel right":
+
+1. A granted camera actually renders in the window (rounded corners,
+   shadow, `resize-aspect-fill` crop).
+2. One click drags it (`acceptsFirstMouse:` plus
+   `movableByWindowBackground`), and level 3 puts it above ordinary
+   windows but below the menu bar and the selection overlay.
+3. A region recording that contains the window has the camera in the
+   played-back file — the whole premise, and unprovable without a grant.
+4. Position and visibility survive a relaunch; a bundled launch shows the
+   usage string in the prompt.
+5. Whether a *Terminal*-launched bundle-less binary prompts (attributed
+   to Terminal's own camera grant) rather than being silently refused.
+   The measured run was launched from a parent without a camera grant, so
+   only the no-kill and silent-refusal halves generalise.
+
 ## Out of scope
 
 Menu bar, region overlay, microphone capture, and any second recording
