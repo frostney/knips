@@ -135,6 +135,13 @@ const
   IndexIvarName = 'opnameIndex';
   // Kap dims the rest of the screen rather than hiding it.
   DimAlpha = 0.35;
+  // kCGScreenSaverWindowLevel: above every normal window, the Dock, and
+  // the menu bar, which is where a selection overlay belongs. NOT the
+  // CocoaAll constant: FPC 3.2.2's NSScreenSaverWindowLevel evaluates to
+  // -1 — *below* the desktop — which put the overlay behind everything
+  // (seen on device; Apple's CGWindowLevelForKey(kCGScreenSaverWindowLevelKey)
+  // is 1000).
+  OverlayWindowLevel = 1000;
   LabelBackdropAlpha = 0.75;
   LabelFontSize = 11;
   LabelPadding = 4;
@@ -433,7 +440,7 @@ begin
     end;
     Window.setOpaque(False);
     Window.setBackgroundColor(NSColor.clearColor);
-    Window.setLevel(NSScreenSaverWindowLevel);
+    Window.setLevel(OverlayWindowLevel);
     Window.setIgnoresMouseEvents(False);
     Window.setHasShadow(False);
     Window.setReleasedWhenClosed(False);
