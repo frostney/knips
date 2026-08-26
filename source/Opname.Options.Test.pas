@@ -28,6 +28,15 @@ type
     procedure TestUnknownExtension;
   end;
 
+  TAudioModeTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestParsesNone;
+    procedure TestParsesSystemCaseInsensitive;
+    procedure TestRejectsUnknownMode;
+    procedure TestNamesRoundTrip;
+  end;
+
   TValidationTests = class(TTestSuite)
   private
     function Valid: TRecordingOptions;
@@ -42,6 +51,13 @@ type
     procedure TestRejectsZeroWindowId;
     procedure TestRejectsRectSmallerThanAlignment;
     procedure TestFillsContainer;
+    procedure TestDefaultsHaveNoAudio;
+    procedure TestSystemAudioFillsFormatDefaults;
+    procedure TestNoAudioLeavesFormatUntouched;
+    procedure TestKeepsExplicitAudioFormat;
+    procedure TestRejectsAudioSampleRateOutOfRange;
+    procedure TestRejectsAudioChannelCountOutOfRange;
+    procedure TestRejectsAudioBitRateOutOfRange;
   end;
 
   TDerivedValueTests = class(TTestSuite)
@@ -148,6 +164,50 @@ begin
   Expect<Boolean>(ContainerForPath('demo', Container)).ToBe(False);
 end;
 
+{ TAudioModeTests }
+
+procedure TAudioModeTests.SetupTests;
+begin
+  Test('"none" parses to amNone', TestParsesNone);
+  Test('"System" parses regardless of case', TestParsesSystemCaseInsensitive);
+  Test('unknown modes are rejected', TestRejectsUnknownMode);
+  Test('names round-trip through the parser', TestNamesRoundTrip);
+end;
+
+procedure TAudioModeTests.TestParsesNone;
+var
+  Mode: TAudioMode;
+begin
+  Expect<Boolean>(ParseAudioMode('none', Mode)).ToBe(True);
+  Expect<Boolean>(Mode = amNone).ToBe(True);
+end;
+
+procedure TAudioModeTests.TestParsesSystemCaseInsensitive;
+var
+  Mode: TAudioMode;
+begin
+  Expect<Boolean>(ParseAudioMode(' System ', Mode)).ToBe(True);
+  Expect<Boolean>(Mode = amSystem).ToBe(True);
+end;
+
+procedure TAudioModeTests.TestRejectsUnknownMode;
+var
+  Mode: TAudioMode;
+begin
+  Expect<Boolean>(ParseAudioMode('microphone', Mode)).ToBe(False);
+  Expect<Boolean>(ParseAudioMode('', Mode)).ToBe(False);
+end;
+
+procedure TAudioModeTests.TestNamesRoundTrip;
+var
+  Mode: TAudioMode;
+begin
+  Expect<string>(AudioModeName(amNone)).ToBe('none');
+  Expect<string>(AudioModeName(amSystem)).ToBe('system');
+  Expect<Boolean>(ParseAudioMode(AudioModeName(amSystem), Mode)).ToBe(True);
+  Expect<Boolean>(Mode = amSystem).ToBe(True);
+end;
+
 { TValidationTests }
 
 function TValidationTests.Valid: TRecordingOptions;
@@ -168,6 +228,18 @@ begin
   Test('rect smaller than the alignment is rejected',
     TestRejectsRectSmallerThanAlignment);
   Test('validation fills the container from the path', TestFillsContainer);
+  Test('audio is off by default', TestDefaultsHaveNoAudio);
+  Test('system audio fills 48 kHz stereo 128 kbit/s',
+    TestSystemAudioFillsFormatDefaults);
+  Test('audio off leaves the format fields alone',
+    TestNoAudioLeavesFormatUntouched);
+  Test('an explicit audio format is kept', TestKeepsExplicitAudioFormat);
+  Test('audio sample rate outside the range is rejected',
+    TestRejectsAudioSampleRateOutOfRange);
+  Test('audio channel count outside 1..2 is rejected',
+    TestRejectsAudioChannelCountOutOfRange);
+  Test('audio bit rate outside the range is rejected',
+    TestRejectsAudioBitRateOutOfRange);
 end;
 
 procedure TValidationTests.TestDefaultsPlusOutputAreValid;
@@ -274,6 +346,92 @@ begin
   Expect<Boolean>(Options.Container = ocQuickTime).ToBe(True);
 end;
 
+procedure TValidationTests.TestDefaultsHaveNoAudio;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(True);
+  Expect<Boolean>(Options.AudioMode = amNone).ToBe(True);
+end;
+
+procedure TValidationTests.TestSystemAudioFillsFormatDefaults;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.AudioMode := amSystem;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(True);
+  Expect<Integer>(Options.AudioSampleRate).ToBe(DefaultAudioSampleRate);
+  Expect<Integer>(Options.AudioChannelCount).ToBe(DefaultAudioChannelCount);
+  Expect<Integer>(Options.AudioBitRate).ToBe(DefaultAudioBitRate);
+end;
+
+procedure TValidationTests.TestNoAudioLeavesFormatUntouched;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(True);
+  Expect<Integer>(Options.AudioSampleRate).ToBe(0);
+  Expect<Integer>(Options.AudioChannelCount).ToBe(0);
+  Expect<Integer>(Options.AudioBitRate).ToBe(0);
+end;
+
+procedure TValidationTests.TestKeepsExplicitAudioFormat;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.AudioMode := amSystem;
+  Options.AudioSampleRate := 44100;
+  Options.AudioChannelCount := 1;
+  Options.AudioBitRate := 64000;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(True);
+  Expect<Integer>(Options.AudioSampleRate).ToBe(44100);
+  Expect<Integer>(Options.AudioChannelCount).ToBe(1);
+  Expect<Integer>(Options.AudioBitRate).ToBe(64000);
+end;
+
+procedure TValidationTests.TestRejectsAudioSampleRateOutOfRange;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.AudioMode := amSystem;
+  Options.AudioSampleRate := MinAudioSampleRate - 1;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+  Options.AudioSampleRate := MaxAudioSampleRate + 1;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+end;
+
+procedure TValidationTests.TestRejectsAudioChannelCountOutOfRange;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.AudioMode := amSystem;
+  Options.AudioChannelCount := MaxAudioChannelCount + 1;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+end;
+
+procedure TValidationTests.TestRejectsAudioBitRateOutOfRange;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.AudioMode := amSystem;
+  Options.AudioBitRate := MaxAudioBitRate + 1;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+end;
+
 { TDerivedValueTests }
 
 procedure TDerivedValueTests.SetupTests;
@@ -315,6 +473,7 @@ end;
 begin
   TestRunnerProgram.AddSuite(TRegionTests.Create('ParseCaptureRegion'));
   TestRunnerProgram.AddSuite(TContainerTests.Create('ContainerForPath'));
+  TestRunnerProgram.AddSuite(TAudioModeTests.Create('ParseAudioMode'));
   TestRunnerProgram.AddSuite(TValidationTests.Create('ValidateRecordingOptions'));
   TestRunnerProgram.AddSuite(TDerivedValueTests.Create('derived values'));
   TestRunnerProgram.Run;

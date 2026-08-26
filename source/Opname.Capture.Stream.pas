@@ -5,6 +5,10 @@ unit Opname.Capture.Stream;
 // a private dispatch queue and are handed to OnSample after the frame
 // status attachment says they are complete.
 //
+// With CapturesAudio set, the same output object is registered a second
+// time for SCStreamOutputTypeAudio on its own queue; those buffers reach
+// OnSample as skAudio without the frame-status filter, which is video-only.
+//
 // The SCStreamOutput object is assembled at run time (Opname.ObjC.Runtime)
 // rather than declared as an objcclass — see ADR-0002. Its one method is
 // the plain cdecl routine StreamOutputSampleBuffer below.
@@ -46,6 +50,10 @@ type
     HasSourceRect: Boolean;
     // Points, relative to the filtered content's origin.
     SourceRect: CGRect;
+    // System audio: SCK mixes it and delivers it on the audio output.
+    CapturesAudio: Boolean;
+    AudioSampleRate: Integer;
+    AudioChannelCount: Integer;
   end;
 
   TScreenStream = class
@@ -55,6 +63,7 @@ type
     FStream: SCStream;
     FOutput: id;
     FQueue: dispatch_queue_t;
+    FAudioQueue: dispatch_queue_t;
     FActive: Boolean;
     FOnSample: TSampleHandler;
     FLastError: string;
@@ -95,6 +104,10 @@ const
   OwnerIvarName = 'opnameOwner';
   SampleSelector = 'stream:didOutputSampleBuffer:ofType:';
   VideoQueueLabel = 'opname.capture.video';
+  // SCK delivers audio on its own output; giving it its own queue keeps
+  // audio delivery from waiting behind a video append. The two appends
+  // still serialise on the writer's mutex, but only for the append itself.
+  AudioQueueLabel = 'opname.capture.audio';
   // Frames SCK may hold while the writer catches up during a keyframe.
   QueueDepth = 5;
   CompletionTimeoutSlices = 5000;
@@ -208,11 +221,25 @@ end;
 destructor TScreenStream.Destroy;
 begin
   if FActive then
-    Stop;
+    Stop
+  else if FStream <> nil then
+  begin
+    // Start failed after the output was attached (addStreamOutput or
+    // startCapture error/timeout). A capture start may still be in
+    // flight — permission granted just after the timeout, say — so
+    // detach the owner first: a late callback on either queue finds nil
+    // and returns, instead of calling into this freed object.
+    if FOutput <> nil then
+      SetPointerIvar(FOutput, OwnerIvarName, nil);
+    FStream.release;
+    FStream := nil;
+  end;
   if FOutput <> nil then
     ReleaseInstance(FOutput);
   if FQueue <> nil then
     dispatch_release(FQueue);
+  if FAudioQueue <> nil then
+    dispatch_release(FAudioQueue);
   if FFilter <> nil then
     FFilter.release;
   inherited Destroy;
@@ -257,6 +284,12 @@ begin
     Configuration.setPixelFormat(kCVPixelFormatType_32BGRA);
     Configuration.setShowsCursor(ObjCBOOL(FGeometry.ShowsCursor));
     Configuration.setQueueDepth(QueueDepth);
+    if FGeometry.CapturesAudio then
+    begin
+      Configuration.setCapturesAudio(ObjCBOOL(True));
+      Configuration.setSampleRate(FGeometry.AudioSampleRate);
+      Configuration.setChannelCount(FGeometry.AudioChannelCount);
+    end;
     if FGeometry.HasSourceRect then
     begin
       Configuration.setSourceRect(FGeometry.SourceRect);
@@ -294,6 +327,22 @@ begin
     else
       FLastError := 'addStreamOutput failed';
     Exit;
+  end;
+
+  if FGeometry.CapturesAudio then
+  begin
+    FAudioQueue := dispatch_queue_create(AudioQueueLabel, nil);
+    Error := nil;
+    if not FStream.addStreamOutput_type_sampleHandlerQueue_error(FOutput,
+      SCStreamOutputTypeAudio, FAudioQueue, @Error) then
+    begin
+      if Error <> nil then
+        FLastError := 'addStreamOutput (audio): '
+          + string(Error.localizedDescription.UTF8String)
+      else
+        FLastError := 'addStreamOutput (audio) failed';
+      Exit;
+    end;
   end;
 
   GStartError := nil;

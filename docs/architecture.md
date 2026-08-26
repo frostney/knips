@@ -5,6 +5,8 @@
 - One binary: ScreenCaptureKit stream → complete-frame filter →
   AVAssetWriter input (hardware H.264) → `.mp4`/`.mov`. opname never
   touches pixels or NAL units; it moves sample buffers.
+- `--audio=system` adds SCK's audio output and a second AVAssetWriter
+  input (AAC) to the same file; see [System audio](#system-audio).
 - The `SCStreamOutput` object the framework calls back into is a
   **runtime-built Objective-C class** — one plain `cdecl` Pascal routine
   registered with `class_addMethod` — so the build needs no linker flags
@@ -83,7 +85,9 @@ rejects.
   (shareable-content query, start/stop capture, finish writing) can fire.
 - **Capture queue** (`opname.capture.video`, created for the stream) runs
   `StreamOutputSampleBuffer` → `DeliverSample` → `OnSample` →
-  `AppendVideoSample`. Rules on that path, carried from the prototype:
+  `AppendVideoSample`. With audio on, a second queue
+  (`opname.capture.audio`) runs the same path into `AppendAudioSample`.
+  Rules on that path, carried from the prototype:
   no exceptions or `try..finally` (no `cthreads`, so the exception frame
   chain is process-global), no `WriteLn`, no managed-type writes outside
   `FLock`.
@@ -120,6 +124,32 @@ at real speed — the opposite of a frame-counting encoder.
 Frames arriving while the input reports `isReadyForMoreMediaData ==
 NO` are dropped and counted; that is the back-pressure path during
 keyframe spikes, mirrored by the stream's `queueDepth`.
+
+## System audio
+
+`--audio=system` (macOS 13+) sets `capturesAudio`, `sampleRate` and
+`channelCount` on the stream configuration (48 kHz stereo by default) and
+registers the *same* runtime-built output object a second time, for
+`SCStreamOutputTypeAudio` on its own dispatch queue. Audio buffers reach
+`OnSample` as `skAudio`, skipping the complete-frame filter, which is a
+video-only attachment. `TMovieWriter` adds a second `AVAssetWriterInput`
+— AAC at 128 kbit/s (`AVFormatIDKey` = `kAudioFormatMPEG4AAC`), also
+`expectsMediaDataInRealTime` — and the one AVAssetWriter muxes both
+tracks into the same file.
+
+The writer's session still starts at the first *video* frame's PTS, so
+audio delivered before that has no timeline to sit on: it is dropped and
+counted separately, as are audio buffers arriving while the audio input
+is not ready. Both appends take the same `FLock`, which is what keeps
+SCK's two queues from touching the writer at once; every capture-queue
+rule above applies unchanged to the audio path. Microphone capture is a
+third SCK output type (macOS 15) and is not wired up.
+
+One rejected buffer fails AVAssetWriter terminally — every later append
+on every input returns NO. Both append paths therefore check the
+writer's status first (audio buffers additionally
+`CMSampleBufferDataIsReady`), flag the failure, and the main loop aborts
+the recording rather than streaming minutes into a dead file.
 
 ## Geometry
 

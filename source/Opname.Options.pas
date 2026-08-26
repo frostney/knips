@@ -26,6 +26,19 @@ const
   // 0 = detect the display's backing scale factor at capture time.
   ScaleAuto = 0;
   MaxScale = 2;
+  // Audio defaults. ScreenCaptureKit delivers system audio at whatever
+  // sample rate and channel count the stream configuration asks for;
+  // 48 kHz stereo is what the mixer runs at, so nothing is resampled.
+  DefaultAudioSampleRate = 48000;
+  MinAudioSampleRate = 8000;
+  MaxAudioSampleRate = 192000;
+  DefaultAudioChannelCount = 2;
+  MinAudioChannelCount = 1;
+  MaxAudioChannelCount = 2;
+  // 128 kbit/s AAC: transparent enough for narration and interface sound.
+  DefaultAudioBitRate = 128000;
+  MinAudioBitRate = 32000;
+  MaxAudioBitRate = 320000;
   // Bumped once per release that changes the CLI surface.
   OpnameVersion = '0.1.0';
 
@@ -40,6 +53,11 @@ type
   TCaptureTargetKind = (ctkDisplay, ctkWindow);
 
   TOutputContainer = (ocMPEG4, ocQuickTime);
+
+  // What, if anything, is recorded onto the movie's audio track.
+  // amSystem is the audio ScreenCaptureKit delivers alongside video;
+  // microphone capture is a separate SCK output and not modelled here.
+  TAudioMode = (amNone, amSystem);
 
   TRecordingOptions = record
     TargetKind: TCaptureTargetKind;
@@ -58,6 +76,11 @@ type
     BitRate: Integer;
     OutputPath: string;
     Container: TOutputContainer;
+    AudioMode: TAudioMode;
+    // 0 = derive the default when audio is on; ignored when it is off.
+    AudioSampleRate: Integer;
+    AudioChannelCount: Integer;
+    AudioBitRate: Integer;
   end;
 
 function DefaultRecordingOptions: TRecordingOptions;
@@ -66,11 +89,17 @@ function DefaultRecordingOptions: TRecordingOptions;
 function ParseCaptureRegion(const AText: string;
   out ARegion: TCaptureRegion): Boolean;
 
+// "none" or "system", case-insensitively. False for anything else.
+function ParseAudioMode(const AText: string; out AMode: TAudioMode): Boolean;
+
+function AudioModeName(AMode: TAudioMode): string;
+
 // Container from the output path's extension; False for unknown ones.
 function ContainerForPath(const APath: string;
   out AContainer: TOutputContainer): Boolean;
 
-// Checks ranges and cross-field rules; fills derived fields (Container).
+// Checks ranges and cross-field rules; fills derived fields (Container,
+// the audio format when audio is on).
 // Returns False with a one-line human message when the options can't
 // start a recording.
 function ValidateRecordingOptions(var AOptions: TRecordingOptions;
@@ -96,6 +125,31 @@ begin
   Result.Scale := ScaleAuto;
   Result.ShowsCursor := True;
   Result.Container := ocMPEG4;
+  Result.AudioMode := amNone;
+end;
+
+function ParseAudioMode(const AText: string; out AMode: TAudioMode): Boolean;
+var
+  Normalized: string;
+begin
+  Result := True;
+  AMode := amNone;
+  Normalized := LowerCase(Trim(AText));
+  if Normalized = 'none' then
+    AMode := amNone
+  else if Normalized = 'system' then
+    AMode := amSystem
+  else
+    Result := False;
+end;
+
+function AudioModeName(AMode: TAudioMode): string;
+begin
+  case AMode of
+    amSystem: Result := 'system';
+  else
+    Result := 'none';
+  end;
 end;
 
 function ParseCaptureRegion(const AText: string;
@@ -219,6 +273,36 @@ begin
     AError := Format('--rect must be at least %dx%d points',
       [DimensionAlignment, DimensionAlignment]);
     Exit;
+  end;
+  if AOptions.AudioMode <> amNone then
+  begin
+    if AOptions.AudioSampleRate = 0 then
+      AOptions.AudioSampleRate := DefaultAudioSampleRate;
+    if AOptions.AudioChannelCount = 0 then
+      AOptions.AudioChannelCount := DefaultAudioChannelCount;
+    if AOptions.AudioBitRate = 0 then
+      AOptions.AudioBitRate := DefaultAudioBitRate;
+    if (AOptions.AudioSampleRate < MinAudioSampleRate)
+      or (AOptions.AudioSampleRate > MaxAudioSampleRate) then
+    begin
+      AError := Format('audio sample rate must be between %d and %d Hz',
+        [MinAudioSampleRate, MaxAudioSampleRate]);
+      Exit;
+    end;
+    if (AOptions.AudioChannelCount < MinAudioChannelCount)
+      or (AOptions.AudioChannelCount > MaxAudioChannelCount) then
+    begin
+      AError := Format('audio channel count must be %d or %d',
+        [MinAudioChannelCount, MaxAudioChannelCount]);
+      Exit;
+    end;
+    if (AOptions.AudioBitRate < MinAudioBitRate)
+      or (AOptions.AudioBitRate > MaxAudioBitRate) then
+    begin
+      AError := Format('audio bit rate must be between %d and %d bits/s',
+        [MinAudioBitRate, MaxAudioBitRate]);
+      Exit;
+    end;
   end;
   Result := True;
 end;
