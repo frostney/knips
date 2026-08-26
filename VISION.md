@@ -34,12 +34,13 @@ and none of them drags `-ld_classic` into the build.
    Option-click pause.*
 3. **Exports:** GIF (Kap's signature output; palette + LZW in pure
    Pascal, testable on Linux), APNG, WebM via a post-process step; trim
-   before export. *GIF and trim have landed as `knips export`; APNG and
-   WebM have not.*
-4. **Audio:** system audio and microphone as a second AVAssetWriter input
-   (SCK already delivers system audio buffers). *System audio landed as
-   `record --audio=system`; microphone (SCK's macOS 15 output type) has
+   before export. *GIF, APNG and trim have landed as `knips export` —
+   including a passthrough movie trim that never re-encodes; WebM has
    not.*
+4. **Audio:** system audio and microphone as a second AVAssetWriter input
+   (SCK already delivers system audio buffers). *Landed: `record
+   --audio=system|mic|both` — mic via SCK's macOS 15 output type, `both`
+   as two tracks.*
 5. **Polish:** highlight clicks, keystroke overlay, Retina toggle, share
    destinations.
 

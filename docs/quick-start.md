@@ -9,7 +9,9 @@
   rectangle, click again to stop. **Camera** adds a draggable floating
   camera window that gets recorded along with everything else.
 - `./build/knips export --in=demo.mp4 --out=demo.gif` turns the
-  recording into an animated GIF, optionally trimmed and scaled.
+  recording into an animated GIF, optionally trimmed and scaled;
+  `--out=demo.apng` writes truecolour APNG instead, and `--out=cut.mp4
+  --trim=1.5,3.5` trims without re-encoding.
 - Grant Screen Recording on first run; a rebuilt binary re-prompts.
 - `lwpt test` runs the neutral suites on any OS, including Linux CI.
 
@@ -120,32 +122,54 @@ Two known limits, both cheap to work around:
 - The position is written when the camera is switched off or Knips quits
   from the menu. Force-quitting loses the last move.
 
-## Exporting a GIF
+## Exporting
+
+The `--out` extension picks what gets written.
 
 ```sh
 ./build/knips export --in=demo.mp4 --out=demo.gif
 ./build/knips export --in=demo.mp4 --out=demo.gif --width=800 --fps=15
 ./build/knips export --in=demo.mp4 --out=demo.gif --trim=1.5,4
+./build/knips export --in=demo.mp4 --out=demo.apng --width=800
+./build/knips export --in=demo.mp4 --out=cut.mp4 --trim=1.5,3.5
 ```
 
-`export` reads the movie twice: once to sample colours for a single
+**`.gif`** reads the movie twice: once to sample colours for a single
 global palette, once to write the frames. The last line reports the size,
 frame count, playback length, file size, and how many colours the palette
-ended up with.
+ended up with. If it says `6-bit histogram`, the source held more than a
+million distinct colours and the palette fell back to a coarser one —
+unusual for a screen recording.
+
+**`.apng`** reads it once and quantises nothing: truecolour, so the
+result is exactly what the scaler produced. Expect roughly ten to twenty
+times a GIF's size for a few dB of quality, which is the trade the format
+exists to offer. `--no-dither` has no meaning here.
+
+**`.mp4` / `.mov`** with `--trim` is a passthrough trim: the same coded
+samples copied into a new container, no decode and no re-encode, so the
+picture is bit-identical to the source and the export takes about as long
+as a file copy. `--fps`, `--width` and `--no-dither` do not apply and say
+so. `--trim` is required — without a range it would only be a copy — and
+the input must already be a movie: there is no path from a `.gif`.
 
 `--trim=start,end` takes seconds with an optional decimal part, and
 either side may be left out: `--trim=2,` keeps everything from two
 seconds on, `--trim=,5` keeps the first five. `--width` scales down and
 keeps the aspect ratio; a width above the movie's own is treated as "the
-movie's". Frame delays come from the recording's own presentation
-stamps, so an idle stretch stays idle instead of being padded out.
+movie's". Frame delays come from the recording's own presentation stamps
+snapped to the requested rate, so an idle stretch stays idle instead of
+being padded out, and a steady one gets a steady cadence instead of
+alternating delays.
 
-Only `.gif` is accepted for `--out` in this release, and trimming an
-`.mp4` into another `.mp4` is not supported — that would need a
-re-encoder, and Knips is not an editor. A source whose video track
-carries a rotation or mirroring matrix — a phone recording held
-sideways, say — is refused rather than exported the wrong way up;
-Knips's own recordings never carry one.
+A big export prints one line of advice to stderr — a canvas at or past
+1280×720, or a file past 20 MB. It suggests `--width=800` or `--fps=15`
+when those would help, and a shorter `--trim` when you are already at
+both. The file is still written and the exit code is still 0.
+
+A source whose video track carries a rotation or mirroring matrix — a
+phone recording held sideways, say — is refused rather than exported the
+wrong way up; Knips's own recordings never carry one.
 
 ## Flags
 
@@ -162,11 +186,13 @@ knips record --out=<file>       .mp4 or .mov (required; replaced if present)
               [--audio=none|system|mic|both]
                                  one AAC track per source (default none)
 knips export --in=<file>        .mp4 or .mov (required)
-              --out=<file>       .gif (required; replaced if present)
-              [--fps=N]          1–50 (default 20)
+              --out=<file>       .gif, .apng, or .mp4/.mov for a passthrough
+                                 trim (required; replaced if present)
+              [--fps=N]          1–50 (default 20); GIF and APNG only
               [--width=N]        16–4096; scales down, keeps the aspect ratio
               [--trim=start,end] seconds, decimals allowed, either side optional
-              [--no-dither]      skip Floyd–Steinberg dithering
+                                 (required for a movie --out)
+              [--no-dither]      skip Floyd–Steinberg dithering; GIF only
 knips displays
 knips windows
 knips probe
@@ -221,13 +247,17 @@ lwpt format --check && lwpt build && lwpt test
 # Ctrl-C after ~5 s, then:
 open /tmp/check.mp4
 ./build/knips export --in=/tmp/check.mp4 --out=/tmp/check.gif --width=640
-open /tmp/check.gif
+./build/knips export --in=/tmp/check.mp4 --out=/tmp/check.apng --width=640
+./build/knips export --in=/tmp/check.mp4 --out=/tmp/cut.mp4 --trim=1,3
+open /tmp/check.gif /tmp/check.apng /tmp/cut.mp4
 ```
 
 Check the reported size (1280x720 at scale 2), the duration against the
-wall clock, and that dropped frames are near zero. For the GIF, check
-that the playback length matches the trimmed range and that Preview
-loops it rather than stopping at the last frame.
+wall clock, and that dropped frames are near zero. For the GIF and the
+APNG, check that the playback length matches the trimmed range and that
+Preview loops rather than stopping at the last frame. For the trim,
+`ffprobe /tmp/cut.mp4` should report the same codec, profile and
+dimensions as the source and a duration of 2 s.
 
 ## Development loop
 

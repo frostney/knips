@@ -8,8 +8,12 @@ unit Knips.Export.Gif;
 //
 // Memory shape: the encoder never holds more than the current frame's
 // palette indices and the previous frame's, so a long movie streams.
-// The quantiser holds one fixed 6-bits-per-channel histogram (4 MB) and
-// nothing else.
+// The quantiser holds one sparse histogram of *exact* colours (a 16 MB
+// open-addressed table capped at 2^20 distinct colours, plus 8 MB while
+// median cut sorts them) and falls back to a fixed 6-bits-per-channel
+// histogram (4 MB) if a source ever exceeds the cap. The encoder adds a
+// 6 MB nearest-colour memo. None of it grows with the length of the
+// movie.
 //
 // Frames are written full-canvas the first time and as the changed
 // rectangle afterwards, with disposal left at "leave in place". A
@@ -40,14 +44,25 @@ const
   // One index is reserved to mean "unchanged since the last frame", so
   // this is what a palette for an animation may actually hold.
   GifMaxOpaqueColors = GifMaxColors - 1;
-  // 6 bits per channel: colours within 4/255 of each other share a
-  // histogram cell, far below what 256 palette slots can resolve.
+  // The fallback histogram: 6 bits per channel, so colours within 4/255
+  // of each other share a cell. Only reached when a source holds more
+  // distinct colours than the exact table may hold.
   GifHistogramBits = 6;
   GifHistogramLevels = 1 shl GifHistogramBits;
   GifHistogramCells = GifHistogramLevels * GifHistogramLevels
     * GifHistogramLevels;
-  // The histogram sums 8-bit channels into 32-bit counters, so the total
-  // number of sampled pixels has to stay below 2^32 / 255.
+  // The exact histogram: an open-addressed table keyed by the packed
+  // 24-bit colour. Half-full at the cap, which is what keeps the linear
+  // probe short.
+  GifExactTableBits = 21;
+  GifExactTableSlots = 1 shl GifExactTableBits;
+  GifExactMaxColors = 1 shl 20;
+  // Direct-mapped memo for nearest-colour queries: an exact key per
+  // slot, so a collision costs a search and never an answer.
+  GifMemoBits = 20;
+  GifMemoSlots = 1 shl GifMemoBits;
+  // Both histograms sum 8-bit channels into 32-bit counters, so the
+  // total number of sampled pixels has to stay below 2^32 / 255.
   GifMaxSampledPixels = 8000000;
   GifMaxSampledPixelsPerFrame = 250000;
   // Browsers clamp 0 and 1 centisecond delays to 10; 2 is the smallest
@@ -82,16 +97,40 @@ type
   // Colour statistics over a set of frames, reduced to a palette by
   // median cut. Sampling and reduction are separate so the pipeline can
   // feed it a spread of frames from a first pass over the movie.
+  //
+  // Colours are counted exactly — one hash-table entry per distinct
+  // 24-bit colour — so median cut splits boxes at real medians rather
+  // than at the corners of a 4-unit lattice. A source that exceeds
+  // GifExactMaxColors distinct colours folds what it has collected into
+  // the 6-bit histogram and carries on there; screen recordings sit two
+  // orders of magnitude below the cap, photographic noise does not.
   TGifQuantizer = class
   private
+    FExactKeys: array of Int32;
+    FExactCounts: array of UInt32;
+    FExactColors: Integer;
+    FExact: Boolean;
     FCells: array of TGifHistogramCell;
-    FOrder: array of Int32;
-    FSampledPixels: Int64;
     FDistinctCells: Integer;
+    FSampledPixels: Int64;
+    // The histogram compacted into a sortable list: one key per distinct
+    // colour (exact mode) or per occupied cell (fallback), with its
+    // count alongside. FLevelBits says how wide a channel is in a key.
+    FKeys: array of Int32;
+    FCounts: array of UInt32;
+    FEntries: Integer;
+    FLevelBits: Integer;
+    procedure EnsureExactTable;
+    procedure EnsureCells;
+    procedure AddExact(AKey: Int32);
+    procedure AddCell(ARed, AGreen, ABlue: Integer);
+    procedure FoldExactIntoCells;
+    procedure BuildEntries;
     procedure SortRange(AFirst, ALast, AChannel: Integer);
     procedure RangeStatistics(AFirst, ALast: Integer; out ACount: Int64;
       out ASumRed, ASumGreen, ASumBlue: Int64;
-      out ASpanRed, ASpanGreen, ASpanBlue: Integer);
+      out AErrorRed, AErrorGreen, AErrorBlue: Double);
+    function GetDistinctColors: Integer;
   public
     constructor Create;
     procedure Reset;
@@ -100,11 +139,15 @@ type
     procedure SampleFrame(const APixels: PByte; ABytesPerRow, AWidth,
       AHeight: Integer);
     // Median cut down to at most AMaxColors representatives. Each one is
-    // the count-weighted mean of the exact colours in its box, so the
-    // histogram's 6-bit cells only decide membership, never precision.
+    // the count-weighted mean of the exact colours in its box.
     function BuildPalette(AMaxColors: Integer): TGifPalette;
     function IsEmpty: Boolean;
-    property DistinctCells: Integer read FDistinctCells;
+    // Distinct histogram entries: exact colours, or occupied 6-bit cells
+    // once the exact table has overflowed.
+    property DistinctColors: Integer read GetDistinctColors;
+    // False once the exact table overflowed and the 6-bit fallback took
+    // over — the pipeline reports it, because it changes the quality.
+    property IsExactHistogram: Boolean read FExact;
     property SampledPixels: Int64 read FSampledPixels;
   end;
 
@@ -135,7 +178,13 @@ type
     FIndices: TBytes;
     FPrevious: TBytes;
     FHasPrevious: Boolean;
-    FLookup: array of SmallInt;
+    // Exact nearest-colour memo, direct-mapped: the key is the colour
+    // itself, so a hit is the answer and a miss is a search.
+    FMemoKey: array of Int32;
+    FMemoValue: array of SmallInt;
+    // Palette indices ordered by green, which is what lets the search
+    // stop as soon as the green difference alone is too large.
+    FByGreen: array of SmallInt;
     FErrorCurrent: array of Integer;
     FErrorNext: array of Integer;
     FBlock: array[0..254] of Byte;
@@ -161,6 +210,8 @@ type
     procedure WriteGraphicControl(ADelayCentiseconds: Integer;
       ATransparent: Boolean);
     procedure WriteImageDescriptor(ALeft, ATop, AWidth, AHeight: Integer);
+    procedure BuildGreenOrder;
+    function GreenLowerBound(AGreen: Integer): Integer;
     function NearestIndex(ARed, AGreen, ABlue: Integer): Integer;
     procedure QuantizeFrame(const APixels: PByte; ABytesPerRow: Integer);
     function ChangedRectangle(out ALeft, ATop, ARight,
@@ -190,13 +241,11 @@ type
     property TransparentIndex: Integer read FTransparentIndex;
   end;
 
-// The 8-bit value a GifHistogramBits-wide level stands for, by bit
-// replication: the level's own bits shifted up and the top bits folded
-// into the gap. That maps the top level to 255 and level zero to 0, and
-// puts every other level on the low corner of its cell.
-function GifExpandLevel(ALevel: Integer): Byte; inline;
+// The packed 24-bit key an 8-bit colour has in the exact histogram and
+// in the encoder's nearest-colour memo.
+function GifColorKey(ARed, AGreen, ABlue: Integer): Integer; inline;
 
-// Histogram cell index for an 8-bit colour.
+// Histogram cell index for an 8-bit colour (the 6-bit fallback).
 function GifCellIndex(ARed, AGreen, ABlue: Integer): Integer; inline;
 
 function GifClampDelay(ACentiseconds: Integer): Integer;
@@ -214,10 +263,18 @@ const
   DitherDownRight = 1;
   DitherTotal = 16;
 
-function GifExpandLevel(ALevel: Integer): Byte;
+function GifColorKey(ARed, AGreen, ABlue: Integer): Integer;
 begin
-  Result := Byte((ALevel shl (8 - GifHistogramBits))
-    or (ALevel shr (2 * GifHistogramBits - 8)));
+  Result := (ARed shl 16) or (AGreen shl 8) or ABlue;
+end;
+
+// Fibonacci hashing on the packed colour, kept in 64-bit so no product
+// ever wraps: the top bits of a 24-bit key alone would put every shade
+// of one hue in the same run of slots.
+function GifHashSlot(AKey: Integer; ABits, AShift: Integer): Integer; inline;
+begin
+  Result := Integer((Int64(AKey) * 2654435761) shr AShift)
+    and ((1 shl ABits) - 1);
 end;
 
 function GifCellIndex(ARed, AGreen, ABlue: Integer): Integer;
@@ -260,33 +317,137 @@ end;
 constructor TGifQuantizer.Create;
 begin
   inherited Create;
-  SetLength(FCells, GifHistogramCells);
   Reset;
 end;
 
 procedure TGifQuantizer.Reset;
 begin
-  FillChar(FCells[0], Length(FCells) * SizeOf(TGifHistogramCell), 0);
-  SetLength(FOrder, 0);
+  // Both tables are allocated on first use: a quantiser that is created
+  // and never sampled — the empty-range path — costs nothing.
+  if Length(FExactKeys) > 0 then
+    FillChar(FExactKeys[0], Length(FExactKeys) * SizeOf(Int32), $FF);
+  if Length(FCells) > 0 then
+    FillChar(FCells[0], Length(FCells) * SizeOf(TGifHistogramCell), 0);
+  SetLength(FKeys, 0);
+  SetLength(FCounts, 0);
+  FEntries := 0;
+  FLevelBits := 8;
+  FExact := True;
+  FExactColors := 0;
   FSampledPixels := 0;
   FDistinctCells := 0;
 end;
 
-function TGifQuantizer.IsEmpty: Boolean;
+procedure TGifQuantizer.EnsureExactTable;
 begin
-  Result := FDistinctCells = 0;
+  if Length(FExactKeys) > 0 then
+    Exit;
+  SetLength(FExactKeys, GifExactTableSlots);
+  SetLength(FExactCounts, GifExactTableSlots);
+  FillChar(FExactKeys[0], Length(FExactKeys) * SizeOf(Int32), $FF);
+end;
+
+procedure TGifQuantizer.EnsureCells;
+begin
+  if Length(FCells) > 0 then
+    Exit;
+  SetLength(FCells, GifHistogramCells);
+  FillChar(FCells[0], Length(FCells) * SizeOf(TGifHistogramCell), 0);
+end;
+
+function TGifQuantizer.GetDistinctColors: Integer;
+begin
+  if FExact then
+    Result := FExactColors
+  else
+    Result := FDistinctCells;
+end;
+
+procedure TGifQuantizer.AddCell(ARed, AGreen, ABlue: Integer);
+var
+  Cell: Integer;
+begin
+  Cell := GifCellIndex(ARed, AGreen, ABlue);
+  if FCells[Cell].Count = 0 then
+    Inc(FDistinctCells);
+  Inc(FCells[Cell].Count);
+  Inc(FCells[Cell].SumRed, UInt32(ARed));
+  Inc(FCells[Cell].SumGreen, UInt32(AGreen));
+  Inc(FCells[Cell].SumBlue, UInt32(ABlue));
+end;
+
+procedure TGifQuantizer.AddExact(AKey: Int32);
+var
+  Slot: Integer;
+begin
+  Slot := GifHashSlot(AKey, GifExactTableBits, 20);
+  while FExactKeys[Slot] <> -1 do
+  begin
+    if FExactKeys[Slot] = AKey then
+    begin
+      Inc(FExactCounts[Slot]);
+      Exit;
+    end;
+    Slot := (Slot + 1) and (GifExactTableSlots - 1);
+  end;
+  if FExactColors >= GifExactMaxColors then
+  begin
+    // One colour past the cap: everything counted so far moves into the
+    // 6-bit histogram, and so does this pixel.
+    FoldExactIntoCells;
+    AddCell((AKey shr 16) and $FF, (AKey shr 8) and $FF, AKey and $FF);
+    Exit;
+  end;
+  FExactKeys[Slot] := AKey;
+  FExactCounts[Slot] := 1;
+  Inc(FExactColors);
+end;
+
+// Exact counts fold into 6-bit cells without loss: the cell keeps the
+// real 8-bit channel sums, so the palette a folded histogram produces is
+// the one sampling in 6-bit mode from the start would have produced.
+procedure TGifQuantizer.FoldExactIntoCells;
+var
+  I, Cell, Red, Green, Blue: Integer;
+  Count: UInt32;
+begin
+  EnsureCells;
+  for I := 0 to GifExactTableSlots - 1 do
+    if FExactKeys[I] <> -1 then
+    begin
+      Count := FExactCounts[I];
+      Red := (FExactKeys[I] shr 16) and $FF;
+      Green := (FExactKeys[I] shr 8) and $FF;
+      Blue := FExactKeys[I] and $FF;
+      Cell := GifCellIndex(Red, Green, Blue);
+      if FCells[Cell].Count = 0 then
+        Inc(FDistinctCells);
+      Inc(FCells[Cell].Count, Count);
+      Inc(FCells[Cell].SumRed, UInt32(Red) * Count);
+      Inc(FCells[Cell].SumGreen, UInt32(Green) * Count);
+      Inc(FCells[Cell].SumBlue, UInt32(Blue) * Count);
+    end;
+  SetLength(FExactKeys, 0);
+  SetLength(FExactCounts, 0);
+  FExactColors := 0;
+  FExact := False;
 end;
 
 procedure TGifQuantizer.SampleFrame(const APixels: PByte; ABytesPerRow,
   AWidth, AHeight: Integer);
 var
-  X, Y, Stride, Start, Cell: Integer;
-  Source: PByte;
+  X, Y, Stride, Start: Integer;
+  Red, Green, Blue: Integer;
+  Source, Pixel: PByte;
 begin
   if (APixels = nil) or (AWidth <= 0) or (AHeight <= 0) then
     Exit;
   if FSampledPixels >= GifMaxSampledPixels then
     Exit;
+  if FExact then
+    EnsureExactTable
+  else
+    EnsureCells;
   Stride := 1;
   while (AWidth * AHeight) div Stride > GifMaxSampledPixelsPerFrame do
     Inc(Stride);
@@ -299,23 +460,60 @@ begin
     X := Start;
     while X < AWidth do
     begin
-      Cell := GifCellIndex((Source + X * BgraBytesPerPixel
-        + BgraRedOffset)^, (Source + X * BgraBytesPerPixel
-        + BgraGreenOffset)^, (Source + X * BgraBytesPerPixel
-        + BgraBlueOffset)^);
-      if FCells[Cell].Count = 0 then
-        Inc(FDistinctCells);
-      Inc(FCells[Cell].Count);
-      Inc(FCells[Cell].SumRed, (Source + X * BgraBytesPerPixel
-        + BgraRedOffset)^);
-      Inc(FCells[Cell].SumGreen, (Source + X * BgraBytesPerPixel
-        + BgraGreenOffset)^);
-      Inc(FCells[Cell].SumBlue, (Source + X * BgraBytesPerPixel
-        + BgraBlueOffset)^);
+      Pixel := Source + X * BgraBytesPerPixel;
+      Red := (Pixel + BgraRedOffset)^;
+      Green := (Pixel + BgraGreenOffset)^;
+      Blue := (Pixel + BgraBlueOffset)^;
+      if FExact then
+        AddExact(GifColorKey(Red, Green, Blue))
+      else
+        AddCell(Red, Green, Blue);
       Inc(FSampledPixels);
       Inc(X, Stride);
     end;
   end;
+end;
+
+function TGifQuantizer.IsEmpty: Boolean;
+begin
+  Result := DistinctColors = 0;
+end;
+
+// Compacts whichever histogram is live into the parallel key/count
+// arrays median cut sorts. Channels sit at FLevelBits each in the key,
+// which is the one thing that differs between the two modes.
+procedure TGifQuantizer.BuildEntries;
+var
+  I, Filled: Integer;
+begin
+  Filled := 0;
+  if FExact then
+  begin
+    SetLength(FKeys, FExactColors);
+    SetLength(FCounts, FExactColors);
+    for I := 0 to GifExactTableSlots - 1 do
+      if FExactKeys[I] <> -1 then
+      begin
+        FKeys[Filled] := FExactKeys[I];
+        FCounts[Filled] := FExactCounts[I];
+        Inc(Filled);
+      end;
+    FLevelBits := 8;
+  end
+  else
+  begin
+    SetLength(FKeys, FDistinctCells);
+    SetLength(FCounts, FDistinctCells);
+    for I := 0 to GifHistogramCells - 1 do
+      if FCells[I].Count > 0 then
+      begin
+        FKeys[Filled] := I;
+        FCounts[Filled] := FCells[I].Count;
+        Inc(Filled);
+      end;
+    FLevelBits := GifHistogramBits;
+  end;
+  FEntries := Filled;
 end;
 
 procedure TGifQuantizer.SortRange(AFirst, ALast, AChannel: Integer);
@@ -323,26 +521,30 @@ var
   Low, High, Swap: Integer;
   Pivot: Integer;
   Shift, Mask: Integer;
+  SwapCount: UInt32;
 begin
-  Shift := (2 - AChannel) * GifHistogramBits;
-  Mask := GifHistogramLevels - 1;
+  Shift := (2 - AChannel) * FLevelBits;
+  Mask := (1 shl FLevelBits) - 1;
   // Recurse into the smaller half and loop on the larger, so the stack
-  // stays logarithmic however the cells happen to be ordered.
+  // stays logarithmic however the entries happen to be ordered.
   while AFirst < ALast do
   begin
     Low := AFirst;
     High := ALast;
-    Pivot := (FOrder[(AFirst + ALast) div 2] shr Shift) and Mask;
+    Pivot := (FKeys[(AFirst + ALast) div 2] shr Shift) and Mask;
     repeat
-      while ((FOrder[Low] shr Shift) and Mask) < Pivot do
+      while ((FKeys[Low] shr Shift) and Mask) < Pivot do
         Inc(Low);
-      while ((FOrder[High] shr Shift) and Mask) > Pivot do
+      while ((FKeys[High] shr Shift) and Mask) > Pivot do
         Dec(High);
       if Low <= High then
       begin
-        Swap := FOrder[Low];
-        FOrder[Low] := FOrder[High];
-        FOrder[High] := Swap;
+        Swap := FKeys[Low];
+        FKeys[Low] := FKeys[High];
+        FKeys[High] := Swap;
+        SwapCount := FCounts[Low];
+        FCounts[Low] := FCounts[High];
+        FCounts[High] := SwapCount;
         Inc(Low);
         Dec(High);
       end;
@@ -360,43 +562,69 @@ begin
   end;
 end;
 
+// Sums for a run of entries, plus the squared error each channel would
+// still carry if the whole run collapsed onto its own mean. That error
+// is what the export is judged on, so it is also what decides which box
+// to split next and along which channel — the span-based heuristic this
+// replaced spent slots on wide boxes that almost nothing lived in.
 procedure TGifQuantizer.RangeStatistics(AFirst, ALast: Integer;
   out ACount: Int64; out ASumRed, ASumGreen, ASumBlue: Int64;
-  out ASpanRed, ASpanGreen, ASpanBlue: Integer);
+  out AErrorRed, AErrorGreen, AErrorBlue: Double);
 var
-  I, Cell, Red, Green, Blue: Integer;
-  LowRed, HighRed, LowGreen, HighGreen, LowBlue, HighBlue: Integer;
+  I, Key, Red, Green, Blue: Integer;
+  Count: Int64;
+  SquareRed, SquareGreen, SquareBlue: Double;
 begin
   ACount := 0;
   ASumRed := 0;
   ASumGreen := 0;
   ASumBlue := 0;
-  LowRed := GifHistogramLevels;
-  LowGreen := GifHistogramLevels;
-  LowBlue := GifHistogramLevels;
-  HighRed := -1;
-  HighGreen := -1;
-  HighBlue := -1;
+  SquareRed := 0;
+  SquareGreen := 0;
+  SquareBlue := 0;
   for I := AFirst to ALast do
   begin
-    Cell := FOrder[I];
-    Inc(ACount, FCells[Cell].Count);
-    Inc(ASumRed, FCells[Cell].SumRed);
-    Inc(ASumGreen, FCells[Cell].SumGreen);
-    Inc(ASumBlue, FCells[Cell].SumBlue);
-    Red := Cell shr (2 * GifHistogramBits);
-    Green := (Cell shr GifHistogramBits) and (GifHistogramLevels - 1);
-    Blue := Cell and (GifHistogramLevels - 1);
-    LowRed := Min(LowRed, Red);
-    HighRed := Max(HighRed, Red);
-    LowGreen := Min(LowGreen, Green);
-    HighGreen := Max(HighGreen, Green);
-    LowBlue := Min(LowBlue, Blue);
-    HighBlue := Max(HighBlue, Blue);
+    Key := FKeys[I];
+    Count := FCounts[I];
+    Inc(ACount, Count);
+    if FExact then
+    begin
+      Red := (Key shr 16) and $FF;
+      Green := (Key shr 8) and $FF;
+      Blue := Key and $FF;
+      Inc(ASumRed, Int64(Red) * Count);
+      Inc(ASumGreen, Int64(Green) * Count);
+      Inc(ASumBlue, Int64(Blue) * Count);
+    end
+    else
+    begin
+      // The cell's own 8-bit sums, so a fallback palette entry is still
+      // the mean of the real colours rather than of cell corners. The
+      // squares treat the cell as a point mass at that mean, which is
+      // accurate enough for a choice between boxes.
+      Inc(ASumRed, FCells[Key].SumRed);
+      Inc(ASumGreen, FCells[Key].SumGreen);
+      Inc(ASumBlue, FCells[Key].SumBlue);
+      Red := (FCells[Key].SumRed + Count div 2) div Count;
+      Green := (FCells[Key].SumGreen + Count div 2) div Count;
+      Blue := (FCells[Key].SumBlue + Count div 2) div Count;
+    end;
+    SquareRed := SquareRed + Int64(Red) * Red * Count;
+    SquareGreen := SquareGreen + Int64(Green) * Green * Count;
+    SquareBlue := SquareBlue + Int64(Blue) * Blue * Count;
   end;
-  ASpanRed := HighRed - LowRed;
-  ASpanGreen := HighGreen - LowGreen;
-  ASpanBlue := HighBlue - LowBlue;
+  if ACount > 0 then
+  begin
+    AErrorRed := Max(0, SquareRed - (ASumRed / ACount) * ASumRed);
+    AErrorGreen := Max(0, SquareGreen - (ASumGreen / ACount) * ASumGreen);
+    AErrorBlue := Max(0, SquareBlue - (ASumBlue / ACount) * ASumBlue);
+  end
+  else
+  begin
+    AErrorRed := 0;
+    AErrorGreen := 0;
+    AErrorBlue := 0;
+  end;
 end;
 
 function TGifQuantizer.BuildPalette(AMaxColors: Integer): TGifPalette;
@@ -408,41 +636,34 @@ type
     SumRed: Int64;
     SumGreen: Int64;
     SumBlue: Int64;
-    SpanRed: Integer;
-    SpanGreen: Integer;
-    SpanBlue: Integer;
+    ErrorRed: Double;
+    ErrorGreen: Double;
+    ErrorBlue: Double;
   end;
 var
   Boxes: array of TBox;
-  BoxCount, Filled, Chosen, Channel, Split, I: Integer;
-  Priority, BestPriority: Int64;
+  BoxCount, Chosen, Channel, Split, I: Integer;
+  Priority, BestPriority: Double;
   Running, Half: Int64;
   Left, Right: TBox;
 begin
   Result := Default(TGifPalette);
   AMaxColors := Max(1, Min(AMaxColors, GifMaxColors));
-  if FDistinctCells = 0 then
+  if IsEmpty then
   begin
     Result.Count := 1;
     Exit;
   end;
 
-  SetLength(FOrder, FDistinctCells);
-  Filled := 0;
-  for I := 0 to GifHistogramCells - 1 do
-    if FCells[I].Count > 0 then
-    begin
-      FOrder[Filled] := I;
-      Inc(Filled);
-    end;
+  BuildEntries;
 
   SetLength(Boxes, AMaxColors);
   BoxCount := 1;
   Boxes[0].First := 0;
-  Boxes[0].Last := High(FOrder);
+  Boxes[0].Last := FEntries - 1;
   RangeStatistics(Boxes[0].First, Boxes[0].Last, Boxes[0].Count,
-    Boxes[0].SumRed, Boxes[0].SumGreen, Boxes[0].SumBlue, Boxes[0].SpanRed,
-    Boxes[0].SpanGreen, Boxes[0].SpanBlue);
+    Boxes[0].SumRed, Boxes[0].SumGreen, Boxes[0].SumBlue, Boxes[0].ErrorRed,
+    Boxes[0].ErrorGreen, Boxes[0].ErrorBlue);
 
   while BoxCount < AMaxColors do
   begin
@@ -452,14 +673,11 @@ begin
     begin
       if Boxes[I].Last <= Boxes[I].First then
         Continue;
-      // Population first, then population weighted by colour spread:
-      // the early splits should follow where the pixels are, the later
-      // ones where the remaining error is.
-      if BoxCount * 2 <= AMaxColors then
-        Priority := Boxes[I].Count
-      else
-        Priority := Boxes[I].Count * (1 + Boxes[I].SpanRed
-          + Boxes[I].SpanGreen + Boxes[I].SpanBlue);
+      // Split wherever the most squared error is still sitting. A box
+      // that holds one colour has none, so a palette smaller than the
+      // limit means the source genuinely had fewer colours.
+      Priority := Boxes[I].ErrorRed + Boxes[I].ErrorGreen
+        + Boxes[I].ErrorBlue;
       if Priority > BestPriority then
       begin
         BestPriority := Priority;
@@ -469,10 +687,10 @@ begin
     if Chosen < 0 then
       Break;
 
-    if (Boxes[Chosen].SpanRed >= Boxes[Chosen].SpanGreen)
-      and (Boxes[Chosen].SpanRed >= Boxes[Chosen].SpanBlue) then
+    if (Boxes[Chosen].ErrorRed >= Boxes[Chosen].ErrorGreen)
+      and (Boxes[Chosen].ErrorRed >= Boxes[Chosen].ErrorBlue) then
       Channel := 0
-    else if Boxes[Chosen].SpanGreen >= Boxes[Chosen].SpanBlue then
+    else if Boxes[Chosen].ErrorGreen >= Boxes[Chosen].ErrorBlue then
       Channel := 1
     else
       Channel := 2;
@@ -483,7 +701,7 @@ begin
     Split := Boxes[Chosen].First;
     for I := Boxes[Chosen].First to Boxes[Chosen].Last - 1 do
     begin
-      Inc(Running, FCells[FOrder[I]].Count);
+      Inc(Running, FCounts[I]);
       Split := I;
       if Running >= Half then
         Break;
@@ -494,11 +712,11 @@ begin
     Right.First := Split + 1;
     Right.Last := Boxes[Chosen].Last;
     RangeStatistics(Left.First, Left.Last, Left.Count, Left.SumRed,
-      Left.SumGreen, Left.SumBlue, Left.SpanRed, Left.SpanGreen,
-      Left.SpanBlue);
+      Left.SumGreen, Left.SumBlue, Left.ErrorRed, Left.ErrorGreen,
+      Left.ErrorBlue);
     RangeStatistics(Right.First, Right.Last, Right.Count, Right.SumRed,
-      Right.SumGreen, Right.SumBlue, Right.SpanRed, Right.SpanGreen,
-      Right.SpanBlue);
+      Right.SumGreen, Right.SumBlue, Right.ErrorRed, Right.ErrorGreen,
+      Right.ErrorBlue);
     Boxes[Chosen] := Left;
     Boxes[BoxCount] := Right;
     Inc(BoxCount);
@@ -542,8 +760,10 @@ begin
   SetLength(FBuffer, OutputBufferSize);
   SetLength(FIndices, FWidth * FHeight);
   SetLength(FPrevious, FWidth * FHeight);
-  SetLength(FLookup, GifHistogramCells);
-  FillChar(FLookup[0], Length(FLookup) * SizeOf(SmallInt), $FF);
+  SetLength(FMemoKey, GifMemoSlots);
+  SetLength(FMemoValue, GifMemoSlots);
+  FillChar(FMemoKey[0], Length(FMemoKey) * SizeOf(Int32), $FF);
+  BuildGreenOrder;
   SetLength(FErrorCurrent, (FWidth + 2) * 3);
   SetLength(FErrorNext, (FWidth + 2) * 3);
   SetLength(FHashKey, HashSlots);
@@ -694,43 +914,109 @@ begin
   EmitByte(0);
 end;
 
-function TGifEncoder.NearestIndex(ARed, AGreen, ABlue: Integer): Integer;
+// Insertion sort over at most 255 entries, once per encoder.
+procedure TGifEncoder.BuildGreenOrder;
 var
-  Key, I, Best, Distance, BestDistance: Integer;
-  Red, Green, Blue, DeltaRed, DeltaGreen, DeltaBlue: Integer;
+  I, J, Value: Integer;
 begin
-  Key := GifCellIndex(ARed, AGreen, ABlue);
-  Result := FLookup[Key];
-  if Result >= 0 then
-    Exit;
-  // Match the colour the cell key expands back to — bit replication,
-  // so the cell's low corner — rather than whichever pixel happened to
-  // reach the cell first. The answer is then a property of the cell,
-  // which is what keeps the memo from making the output depend on the
-  // order pixels arrive in; the up-to-3-per-channel offset from the
-  // querying pixel is far below the spacing of a 256-colour palette.
-  Red := GifExpandLevel(Key shr (2 * GifHistogramBits));
-  Green := GifExpandLevel((Key shr GifHistogramBits)
-    and (GifHistogramLevels - 1));
-  Blue := GifExpandLevel(Key and (GifHistogramLevels - 1));
-  Best := 0;
-  BestDistance := MaxInt;
+  SetLength(FByGreen, FPalette.Count);
   for I := 0 to FPalette.Count - 1 do
   begin
-    DeltaRed := Red - FPalette.Colors[I].Red;
-    DeltaGreen := Green - FPalette.Colors[I].Green;
-    DeltaBlue := Blue - FPalette.Colors[I].Blue;
+    Value := I;
+    J := I - 1;
+    while (J >= 0)
+      and (FPalette.Colors[FByGreen[J]].Green > FPalette.Colors[Value].Green) do
+    begin
+      FByGreen[J + 1] := FByGreen[J];
+      Dec(J);
+    end;
+    FByGreen[J + 1] := SmallInt(Value);
+  end;
+end;
+
+// First position in FByGreen whose palette entry is at least AGreen.
+function TGifEncoder.GreenLowerBound(AGreen: Integer): Integer;
+var
+  Low, High, Middle: Integer;
+begin
+  Low := 0;
+  High := FPalette.Count;
+  while Low < High do
+  begin
+    Middle := (Low + High) div 2;
+    if FPalette.Colors[FByGreen[Middle]].Green < AGreen then
+      Low := Middle + 1
+    else
+      High := Middle;
+  end;
+  Result := Low;
+end;
+
+// The exact nearest palette entry for a colour, memoised on the colour
+// itself. The old memo was keyed by 6-bit cell and answered for the
+// cell's corner rather than for the pixel, which put a floor of a couple
+// of units per channel under every mapped pixel — visible as banding on
+// gradients and, once dithering added its own error on top, as the
+// difference between a 37 dB and a 44 dB export.
+//
+// Exact keys mean far more distinct queries, so the scan they fall back
+// to walks the palette outwards from the entry closest in green and
+// stops as soon as the green difference alone exceeds the best distance
+// found. That is the same answer a full scan gives, for a fraction of
+// the comparisons.
+function TGifEncoder.NearestIndex(ARed, AGreen, ABlue: Integer): Integer;
+var
+  Key, Slot, Position, I, Index, Best: Integer;
+  Distance, BestDistance: Integer;
+  DeltaRed, DeltaGreen, DeltaBlue: Integer;
+begin
+  Key := GifColorKey(ARed, AGreen, ABlue);
+  Slot := GifHashSlot(Key, GifMemoBits, 17);
+  if FMemoKey[Slot] = Key then
+    Exit(FMemoValue[Slot]);
+
+  Best := 0;
+  BestDistance := MaxInt;
+  Position := GreenLowerBound(AGreen);
+  I := Position;
+  while I < FPalette.Count do
+  begin
+    Index := FByGreen[I];
+    DeltaGreen := FPalette.Colors[Index].Green - AGreen;
+    if DeltaGreen * DeltaGreen >= BestDistance then
+      Break;
+    DeltaRed := ARed - FPalette.Colors[Index].Red;
+    DeltaBlue := ABlue - FPalette.Colors[Index].Blue;
     Distance := DeltaRed * DeltaRed + DeltaGreen * DeltaGreen
       + DeltaBlue * DeltaBlue;
     if Distance < BestDistance then
     begin
       BestDistance := Distance;
-      Best := I;
-      if Distance = 0 then
-        Break;
+      Best := Index;
     end;
+    Inc(I);
   end;
-  FLookup[Key] := SmallInt(Best);
+  I := Position - 1;
+  while I >= 0 do
+  begin
+    Index := FByGreen[I];
+    DeltaGreen := AGreen - FPalette.Colors[Index].Green;
+    if DeltaGreen * DeltaGreen >= BestDistance then
+      Break;
+    DeltaRed := ARed - FPalette.Colors[Index].Red;
+    DeltaBlue := ABlue - FPalette.Colors[Index].Blue;
+    Distance := DeltaRed * DeltaRed + DeltaGreen * DeltaGreen
+      + DeltaBlue * DeltaBlue;
+    if Distance < BestDistance then
+    begin
+      BestDistance := Distance;
+      Best := Index;
+    end;
+    Dec(I);
+  end;
+
+  FMemoKey[Slot] := Key;
+  FMemoValue[Slot] := SmallInt(Best);
   Result := Best;
 end;
 

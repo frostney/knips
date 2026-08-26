@@ -47,7 +47,8 @@ const
   KnipsVersion = '0.1.0';
 
   // GIF delays are whole centiseconds, so anything above 50 fps cannot
-  // be represented and 20 is what Kap-sized clips actually want.
+  // be represented and 20 is what Kap-sized clips actually want. APNG
+  // could go faster, but sharing the bound keeps one --fps rule.
   DefaultGifFramesPerSecond = 20;
   MinGifFramesPerSecond = 1;
   MaxGifFramesPerSecond = 50;
@@ -55,6 +56,15 @@ const
   GifWidthFromSource = 0;
   MinGifWidth = 16;
   MaxGifWidth = 4096;
+  // What counts as a big animation. The area is 1280x720, past which a
+  // GIF stops being something to paste into a chat window; the byte
+  // ceiling catches a small canvas that simply ran too long.
+  LargeExportAreaPixels = 1280 * 720;
+  LargeExportBytes = Int64(20) * 1024 * 1024;
+  // What the advice offers instead. Both are what a chat-window clip
+  // usually wants anyway.
+  SuggestedNarrowWidth = 800;
+  SuggestedSlowFramesPerSecond = 15;
 
 type
   TCaptureRegion = record
@@ -98,9 +108,10 @@ type
     AudioBitRate: Integer;
   end;
 
-  // GIF is the only export in this milestone; APNG and WebM join the
-  // enumeration rather than the record when they arrive.
-  TExportFormat = (efGif);
+  // What `knips export` writes. efMovie is not a re-encode: it is the
+  // passthrough trim, where the same coded samples are copied into a new
+  // container between two stamps.
+  TExportFormat = (efGif, efApng, efMovie);
 
   TExportOptions = record
     InputPath: string;
@@ -108,9 +119,15 @@ type
     Format: TExportFormat;
     // The container the input is read from, filled by validation.
     InputContainer: TOutputContainer;
+    // The container the output is written to when Format is efMovie;
+    // meaningless otherwise. Also filled by validation.
+    OutputContainer: TOutputContainer;
     FramesPerSecond: Integer;
     // Target width in pixels; GifWidthFromSource keeps the movie's own.
     Width: Integer;
+    // Whether --trim was given at all. A passthrough trim with no range
+    // is a copy, which is not what the command is for.
+    HasTrim: Boolean;
     TrimStartSeconds: Double;
     // False runs to the end of the movie. A separate flag rather than a
     // sentinel value, so an explicit --trim=3,0 is an empty range and
@@ -164,6 +181,16 @@ function DefaultExportOptions: TExportOptions;
 // Export format from the output path's extension; False for unknown ones.
 function ExportFormatForPath(const APath: string;
   out AFormat: TExportFormat): Boolean;
+
+function ExportFormatName(AFormat: TExportFormat): string;
+
+// One line of advice when an export is going to be awkwardly large, or
+// '' when it is not. Both triggers are checked: the canvas alone (known
+// before a byte is written) and the size the file actually reached. The
+// advice only names knobs that would actually move — telling someone to
+// pass --width=800 when they already did is noise.
+function LargeExportWarning(AFormat: TExportFormat; APixelWidth,
+  APixelHeight, AFramesPerSecond: Integer; AOutputBytes: Int64): string;
 
 // "start,end" in seconds with an optional decimal part; either side may
 // be left empty ("2," keeps everything from 2 s on, ",5" keeps the first
@@ -392,8 +419,10 @@ begin
   Result := Default(TExportOptions);
   Result.Format := efGif;
   Result.InputContainer := ocMPEG4;
+  Result.OutputContainer := ocMPEG4;
   Result.FramesPerSecond := DefaultGifFramesPerSecond;
   Result.Width := GifWidthFromSource;
+  Result.HasTrim := False;
   Result.TrimStartSeconds := 0;
   Result.HasTrimEnd := False;
   Result.TrimEndSeconds := 0;
@@ -402,9 +431,62 @@ end;
 
 function ExportFormatForPath(const APath: string;
   out AFormat: TExportFormat): Boolean;
+var
+  Extension: string;
 begin
+  Result := True;
   AFormat := efGif;
-  Result := LowerCase(ExtractFileExt(APath)) = '.gif';
+  Extension := LowerCase(ExtractFileExt(APath));
+  if Extension = '.gif' then
+    AFormat := efGif
+  else if Extension = '.apng' then
+    AFormat := efApng
+  else if (Extension = '.mp4') or (Extension = '.mov') then
+    AFormat := efMovie
+  else
+    Result := False;
+end;
+
+function ExportFormatName(AFormat: TExportFormat): string;
+begin
+  case AFormat of
+    efApng: Result := 'APNG';
+    efMovie: Result := 'movie';
+  else
+    Result := 'GIF';
+  end;
+end;
+
+function LargeExportWarning(AFormat: TExportFormat; APixelWidth,
+  APixelHeight, AFramesPerSecond: Integer; AOutputBytes: Int64): string;
+var
+  Reason, Advice: string;
+begin
+  Result := '';
+  // A passthrough trim writes whatever the source already weighed;
+  // there is no --width or --fps to suggest.
+  if AFormat = efMovie then
+    Exit;
+  if Int64(APixelWidth) * APixelHeight >= LargeExportAreaPixels then
+    Reason := Format('%dx%d is a large canvas for %s',
+      [APixelWidth, APixelHeight, ExportFormatName(AFormat)])
+  else if AOutputBytes >= LargeExportBytes then
+    Reason := Format('%d MB is a large %s',
+      [AOutputBytes div (1024 * 1024), ExportFormatName(AFormat)])
+  else
+    Exit;
+  Advice := '';
+  if APixelWidth > SuggestedNarrowWidth then
+    Advice := Format('--width=%d', [SuggestedNarrowWidth]);
+  if AFramesPerSecond > SuggestedSlowFramesPerSecond then
+  begin
+    if Advice <> '' then
+      Advice := Advice + ' or ';
+    Advice := Advice + Format('--fps=%d', [SuggestedSlowFramesPerSecond]);
+  end;
+  if Advice = '' then
+    Advice := 'a shorter --trim';
+  Result := Reason + ' — consider ' + Advice;
 end;
 
 // A fixed decimal point: --trim is a machine-readable flag, not a
@@ -466,7 +548,8 @@ begin
   if not ExportFormatForPath(AOptions.OutputPath, AOptions.Format) then
   begin
     AError := 'unsupported output extension "'
-      + ExtractFileExt(AOptions.OutputPath) + '" (use .gif)';
+      + ExtractFileExt(AOptions.OutputPath)
+      + '" (use .gif, .apng, .mp4, or .mov)';
     Exit;
   end;
   if SameText(ExpandFileName(AOptions.InputPath),
@@ -475,10 +558,32 @@ begin
     AError := '--in and --out are the same file';
     Exit;
   end;
+  if AOptions.Format = efMovie then
+  begin
+    // A movie out of `export` is the passthrough trim and nothing else:
+    // the coded samples are copied, so there is no rate to change and no
+    // frame to scale, and without a range it would only be a copy.
+    ContainerForPath(AOptions.OutputPath, AOptions.OutputContainer);
+    if not AOptions.HasTrim then
+    begin
+      AError := 'a movie output is a passthrough trim, so --trim is '
+        + 'required (--trim=1.5,3.5)';
+      Exit;
+    end;
+    // `--trim=0,` parses, and it is a range — of the whole movie. It
+    // would satisfy the rule above while being exactly the file copy the
+    // rule exists to refuse, so it is named as such rather than run.
+    if (AOptions.TrimStartSeconds <= 0) and not AOptions.HasTrimEnd then
+    begin
+      AError := 'that --trim is the whole movie, which would only copy '
+        + 'the file; give an end (--trim=0,3.5) or a later start';
+      Exit;
+    end;
+  end;
   if (AOptions.FramesPerSecond < MinGifFramesPerSecond)
     or (AOptions.FramesPerSecond > MaxGifFramesPerSecond) then
   begin
-    AError := Format('--fps must be between %d and %d for a GIF',
+    AError := Format('--fps must be between %d and %d',
       [MinGifFramesPerSecond, MaxGifFramesPerSecond]);
     Exit;
   end;

@@ -6,8 +6,10 @@ program knips;
 //   knips record --out=demo.mp4 [--display=N | --window=ID] [--rect=x,y,w,h]
 //                 [--fps=30] [--scale=auto|1|2] [--no-cursor] [--bitrate=N]
 //                 [--audio=none|system|mic|both]
-//   knips export --in=demo.mp4 --out=demo.gif [--fps=20] [--width=N]
+//   knips export --in=demo.mp4 --out=demo.gif|.apng [--fps=20] [--width=N]
 //                 [--trim=start,end] [--no-dither]
+//   knips export --in=demo.mp4 --out=cut.mp4 --trim=1.5,3.5
+//                               passthrough trim: no decode, no re-encode
 //   knips displays              list capturable displays
 //   knips windows               list capturable on-screen windows
 //   knips probe                 verify the ObjC runtime + framework path
@@ -37,8 +39,9 @@ uses
   Knips.App.Overlay,
   Knips.Capture.ShareableContent,
   Knips.Capture.Stream,
-  Knips.Export.GifPipeline,
+  Knips.Export.MovieTrim,
   Knips.Export.MovieWriter,
+  Knips.Export.Pipeline,
   Knips.ObjC.Runtime,
   Knips.Recording,
   {$ENDIF}
@@ -160,6 +163,7 @@ begin
 
   Trim := StringValue(AOptions, 'trim', '');
   if Trim <> '' then
+  begin
     if not ParseTrimRange(Trim, AExport.TrimStartSeconds,
       AExport.TrimEndSeconds, AExport.HasTrimEnd) then
     begin
@@ -167,6 +171,8 @@ begin
         + 'empty (--trim=2, or --trim=,5)';
       Exit;
     end;
+    AExport.HasTrim := True;
+  end;
 
   Result := ValidateExportOptions(AExport, AError);
 end;
@@ -259,30 +265,85 @@ begin
   Result := ExitOk;
 end;
 
-function HandleExport(const APositionals: TStringList;
-  const AOptions: TOptionArray): Integer;
+// A passthrough trim: same samples, new container, no decode at all.
+function HandleTrimExport(const AOptions: TExportOptions;
+  const AParsed: TOptionArray): Integer;
 var
-  Options: TExportOptions;
-  Session: TGifExportSession;
+  Session: TMovieTrimSession;
   Error: string;
 begin
-  if not BuildExportOptions(AOptions, Options, Error) then
+  if FlagPresent(AParsed, 'fps') or FlagPresent(AParsed, 'width')
+    or FlagPresent(AParsed, 'no-dither') then
   begin
-    WriteLn(ProgramName, ' export: ', Error);
-    Exit(ExitUsage);
+    WriteLn(ErrOutput, ProgramName, ' export: --fps, --width and '
+      + '--no-dither do not apply to a passthrough trim and are ignored');
+    Flush(ErrOutput);
   end;
-  Session := TGifExportSession.Create(Options);
+  Session := TMovieTrimSession.Create(AOptions);
   try
     if not Session.Run(Error) then
     begin
       WriteLn(ProgramName, ' export: ', Error);
       Exit(ExitFailure);
     end;
-    WriteLn(Format('wrote %s: %dx%d, %d frames, %.1fs, %d kB (%d colours)',
+    WriteLn(Format('wrote %s: %.2fs–%.2fs of %.2fs, %d kB (streams copied)',
+      [Session.Report.OutputPath, Session.Report.StartSeconds,
+      Session.Report.EndSeconds, Session.Report.SourceDurationSeconds,
+      Session.Report.OutputBytes div 1024]));
+    Result := ExitOk;
+  finally
+    Session.Free;
+  end;
+end;
+
+function HandleExport(const APositionals: TStringList;
+  const AOptions: TOptionArray): Integer;
+var
+  Options: TExportOptions;
+  Session: TExportSession;
+  Error, Warning, Palette: string;
+begin
+  if not BuildExportOptions(AOptions, Options, Error) then
+  begin
+    WriteLn(ProgramName, ' export: ', Error);
+    Exit(ExitUsage);
+  end;
+  if Options.Format = efMovie then
+    Exit(HandleTrimExport(Options, AOptions));
+  Session := TExportSession.Create(Options);
+  try
+    if not Session.Run(Error) then
+    begin
+      WriteLn(ProgramName, ' export: ', Error);
+      Exit(ExitFailure);
+    end;
+    if Session.Report.Format = efGif then
+    begin
+      Palette := Format(' (%d colours', [Session.Report.PaletteColors]);
+      if not Session.Report.ExactPalette then
+        Palette := Palette + ', 6-bit histogram';
+      Palette := Palette + ')';
+    end
+    else
+      Palette := ' (truecolour)';
+    WriteLn(Format('wrote %s: %dx%d, %d frames, %.1fs, %d kB%s',
       [Session.Report.OutputPath, Session.Report.PixelWidth,
       Session.Report.PixelHeight, Session.Report.FramesWritten,
       Session.Report.DurationSeconds, Session.Report.OutputBytes div 1024,
-      Session.Report.PaletteColors]));
+      Palette]));
+    // Advice, not a failure: the file is written and usable either way,
+    // so this goes to stderr and the exit code stays zero. Stdout is
+    // flushed first, or the two streams interleave and the advice lands
+    // above the line it is about.
+    Flush(Output);
+    Warning := LargeExportWarning(Session.Report.Format,
+      Session.Report.PixelWidth, Session.Report.PixelHeight,
+      Options.FramesPerSecond, Session.Report.OutputBytes);
+    if Warning <> '' then
+    begin
+      WriteLn(ErrOutput, ProgramName, ' export: ', Warning);
+      Flush(ErrOutput);
+    end;
     Result := ExitOk;
   finally
     Session.Free;
@@ -586,7 +647,7 @@ begin
   Result[0] := TStringOption.Create('in',
     'Input movie; .mp4 or .mov (required)');
   Result[1] := TStringOption.Create('out',
-    'Output file; .gif (required)');
+    'Output file; .gif, .apng, or .mp4/.mov for a passthrough trim (required)');
   Result[2] := TIntegerOption.Create('fps',
     Format('Frames per second, %d-%d (default %d)',
     [MinGifFramesPerSecond, MaxGifFramesPerSecond,
@@ -597,7 +658,7 @@ begin
   Result[4] := TStringOption.Create('trim',
     'Seconds to keep: start,end — either side may be empty');
   Result[5] := TFlagOption.Create('no-dither',
-    'Skip Floyd-Steinberg dithering (smaller file, visible banding)');
+    'Skip Floyd-Steinberg dithering; GIF only (smaller file, banding)');
 end;
 
 // The cli package's top-level help carries lwpt's own tagline, so the
@@ -672,8 +733,8 @@ begin
       '--out=<file> [--display=N|--window=ID] [--rect=x,y,w,h] [--fps=N] [--audio=system|mic|both]',
       @HandleRecord, RecordOptions));
     Registry.Add(TSubcommand.Create('export',
-      'Convert a recording to an animated GIF',
-      '--in=<movie> --out=<file.gif> [--fps=N] [--width=N] [--trim=start,end]',
+      'Convert a recording to a GIF or APNG, or trim it without re-encoding',
+      '--in=<movie> --out=<file.gif|.apng|.mp4> [--fps=N] [--width=N] [--trim=start,end]',
       @HandleExport, ExportOptions));
     Registry.Add(TSubcommand.Create('displays',
       'List capturable displays', '', @HandleDisplays, NoOptions));
@@ -691,8 +752,8 @@ begin
       '--out=<file> [--display=N|--window=ID] [--rect=x,y,w,h] [--fps=N] [--audio=system|mic|both]',
       @HandleUnsupported, RecordOptions));
     Registry.Add(TSubcommand.Create('export',
-      'Convert a recording to an animated GIF (macOS only)',
-      '--in=<movie> --out=<file.gif> [--fps=N] [--width=N] [--trim=start,end]',
+      'Convert a recording to a GIF or APNG, or trim it (macOS only)',
+      '--in=<movie> --out=<file.gif|.apng|.mp4> [--fps=N] [--width=N] [--trim=start,end]',
       @HandleExportUnsupported, ExportOptions));
     Registry.Add(TSubcommand.Create('displays',
       'List capturable displays (macOS only)', '', @HandleUnsupported,

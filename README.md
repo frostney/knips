@@ -3,9 +3,10 @@
 Native macOS screen recorder in FreePascal — *Knips*, from the German
 *knipsen*, to snap a picture: the shutter sound, borrowed for a tool that
 catches what is on your screen. Pick a display, a region, or a window;
-get an `.mp4` or `.mov` back, or an animated GIF. Capture is
+get an `.mp4` or `.mov` back, an animated GIF, or a truecolour APNG —
+or trim the movie itself without re-encoding a frame. Capture is
 ScreenCaptureKit, the file is written by AVAssetWriter with hardware
-H.264, the GIF encoder is pure Pascal, and the whole thing is one
+H.264, the GIF and APNG encoders are pure Pascal, and the whole thing is one
 dependency-light binary built with
 [lwpt](https://github.com/frostney/lwpt). It grows out of the
 [lantaarn](https://github.com/frostney/lantaarn) capture core toward what
@@ -28,6 +29,8 @@ lwpt install && lwpt build    # produces build/knips
 ./build/knips record --out=app.mov --window=<id>      # id from `knips windows`
 ./build/knips export --in=demo.mp4 --out=demo.gif     # animated GIF, 20 fps
 ./build/knips export --in=demo.mp4 --out=demo.gif --width=800 --trim=1.5,4
+./build/knips export --in=demo.mp4 --out=demo.apng    # truecolour APNG, no palette
+./build/knips export --in=demo.mp4 --out=cut.mp4 --trim=1.5,3.5   # passthrough trim
 ```
 
 `tools/make-app.sh` wraps the built binary in a menu-bar-only
