@@ -3,6 +3,7 @@ program Knips.App.State.Test;
 {$I Shared.inc}
 
 uses
+  StrUtils,
   SysUtils,
 
   Knips.App.State,
@@ -14,6 +15,8 @@ type
   public
     procedure SetupTests; override;
     procedure TestIdleStartsSelectionOrDisplay;
+    procedure TestIdleStartsWindowOrLastRegion;
+    procedure TestSystemAudioTogglesOnlyWhileIdle;
     procedure TestIdleRejectsStop;
     procedure TestSelectingCommitsOrCancels;
     procedure TestCancelSelectionOnlyAppliesWhileSelecting;
@@ -48,6 +51,9 @@ type
     procedure TestClampKeepsTheRegionOnTheDisplay;
     procedure TestClampPullsANegativeOriginIn;
     procedure TestUsableNeedsTwoPointsEachWay;
+    procedure TestStoredRegionSurvivesARoundTrip;
+    procedure TestStoredNegativeOriginIsPulledIn;
+    procedure TestStoredNonsenseIsRejected;
   end;
 
   TErrorTitleTests = class(TTestSuite)
@@ -71,12 +77,42 @@ type
     procedure TestAnOriginUnderTheDockIsNot;
   end;
 
+  TExportTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestGifPathSitsBesideTheRecording;
+    procedure TestGifPathNeverOverwritesTheMovie;
+    procedure TestGifPathOfNothingIsNothing;
+    procedure TestWidthKeepsSmallRecordings;
+    procedure TestWidthCapsWideRecordings;
+    procedure TestPercentSpansBothPasses;
+    procedure TestPercentSurvivesABadTotal;
+    procedure TestProgressTitleClamps;
+  end;
+
+  TWindowMenuTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestTitleJoinsApplicationAndWindow;
+    procedure TestTitleFallsBackToWhatThereIs;
+    procedure TestTitleIsElided;
+    procedure TestElisionKeepsUtf8Whole;
+    procedure TestOrdinaryWindowIsRecordable;
+    procedure TestOffScreenAndOtherLayersAreSkipped;
+    procedure TestTinyAndUntitledWindowsAreSkipped;
+    procedure TestOurOwnWindowsAreSkipped;
+  end;
+
 { TTransitionTests }
 
 procedure TTransitionTests.SetupTests;
 begin
   Test('idle accepts region and display recording',
     TestIdleStartsSelectionOrDisplay);
+  Test('idle accepts a window and a repeat of the last region',
+    TestIdleStartsWindowOrLastRegion);
+  Test('the system-audio checkbox only toggles while idle',
+    TestSystemAudioTogglesOnlyWhileIdle);
   Test('idle rejects stop', TestIdleRejectsStop);
   Test('selecting commits or cancels', TestSelectingCommitsOrCancels);
   Test('the menu''s cancel only applies while selecting',
@@ -96,6 +132,39 @@ begin
   Expect<Integer>(Ord(Next)).ToBe(Ord(asSelecting));
   Expect<Boolean>(NextAppState(asIdle, acRecordDisplay, Next)).ToBe(True);
   Expect<Integer>(Ord(Next)).ToBe(Ord(asRecording));
+end;
+
+procedure TTransitionTests.TestIdleStartsWindowOrLastRegion;
+var
+  Next: TAppState;
+begin
+  Expect<Boolean>(NextAppState(asIdle, acRecordWindow, Next)).ToBe(True);
+  Expect<Integer>(Ord(Next)).ToBe(Ord(asRecording));
+  Expect<Boolean>(NextAppState(asIdle, acRecordLastRegion, Next)).ToBe(True);
+  Expect<Integer>(Ord(Next)).ToBe(Ord(asRecording));
+  // Neither is a way out of a recording or a selection.
+  Expect<Boolean>(NextAppState(asRecording, acRecordWindow, Next)).ToBe(False);
+  Expect<Boolean>(NextAppState(asSelecting, acRecordLastRegion, Next))
+    .ToBe(False);
+end;
+
+// The stream configuration is fixed once the capture has started, so the
+// checkbox is a legal command in exactly one state — and it leaves that
+// state where it found it.
+procedure TTransitionTests.TestSystemAudioTogglesOnlyWhileIdle;
+var
+  Next: TAppState;
+begin
+  Next := asRecording;
+  Expect<Boolean>(NextAppState(asIdle, acToggleSystemAudio, Next)).ToBe(True);
+  Expect<Integer>(Ord(Next)).ToBe(Ord(asIdle));
+  Expect<Boolean>(NextAppState(asRecording, acToggleSystemAudio, Next))
+    .ToBe(False);
+  Expect<Boolean>(NextAppState(asSelecting, acToggleSystemAudio, Next))
+    .ToBe(False);
+  Expect<Boolean>(IsCommandEnabled(asIdle, acToggleSystemAudio)).ToBe(True);
+  Expect<Boolean>(IsCommandEnabled(asRecording, acToggleSystemAudio))
+    .ToBe(False);
 end;
 
 procedure TTransitionTests.TestIdleRejectsStop;
@@ -249,6 +318,11 @@ begin
     TestClampPullsANegativeOriginIn);
   Test('a region below the alignment is not usable',
     TestUsableNeedsTwoPointsEachWay);
+  Test('a stored region survives a round trip unchanged',
+    TestStoredRegionSurvivesARoundTrip);
+  Test('a stored negative origin is pulled in',
+    TestStoredNegativeOriginIsPulledIn);
+  Test('stored nonsense is rejected outright', TestStoredNonsenseIsRejected);
 end;
 
 procedure TSelectionTests.TestDragDownRight;
@@ -304,6 +378,61 @@ begin
     .ToBe(False);
   Expect<Boolean>(IsSelectionUsable(NormalizeSelection(10, 10, 40, 40)))
     .ToBe(True);
+end;
+
+function StoredRegion(ALeft, ATop, AWidth, AHeight: Integer): TCaptureRegion;
+begin
+  Result.Left := ALeft;
+  Result.Top := ATop;
+  Result.Width := AWidth;
+  Result.Height := AHeight;
+end;
+
+procedure TSelectionTests.TestStoredRegionSurvivesARoundTrip;
+var
+  Region: TCaptureRegion;
+begin
+  Expect<Boolean>(SanitizeStoredRegion(StoredRegion(100, 200, 640, 480),
+    Region)).ToBe(True);
+  Expect<Integer>(Region.Left).ToBe(100);
+  Expect<Integer>(Region.Top).ToBe(200);
+  Expect<Integer>(Region.Width).ToBe(640);
+  Expect<Integer>(Region.Height).ToBe(480);
+end;
+
+// `defaults write knips KnipsLastRegionLeft -- -500` must not reach
+// ScreenCaptureKit's sourceRect.
+procedure TSelectionTests.TestStoredNegativeOriginIsPulledIn;
+var
+  Region: TCaptureRegion;
+begin
+  Expect<Boolean>(SanitizeStoredRegion(StoredRegion(-40, -10, 640, 480),
+    Region)).ToBe(True);
+  Expect<Integer>(Region.Left).ToBe(0);
+  Expect<Integer>(Region.Top).ToBe(0);
+  Expect<Integer>(Region.Width).ToBe(600);
+  Expect<Integer>(Region.Height).ToBe(470);
+end;
+
+procedure TSelectionTests.TestStoredNonsenseIsRejected;
+var
+  Region: TCaptureRegion;
+begin
+  // Nothing written at all.
+  Expect<Boolean>(SanitizeStoredRegion(StoredRegion(0, 0, 0, 0), Region))
+    .ToBe(False);
+  // An origin so negative the region is consumed entirely.
+  Expect<Boolean>(SanitizeStoredRegion(StoredRegion(-800, 0, 640, 480),
+    Region)).ToBe(False);
+  Expect<Integer>(Region.Width).ToBe(0);
+  // Absurd extents, and absurd origins.
+  Expect<Boolean>(SanitizeStoredRegion(StoredRegion(0, 0,
+    MaxStoredRegionExtent + 1, 480), Region)).ToBe(False);
+  Expect<Boolean>(SanitizeStoredRegion(StoredRegion(
+    MaxStoredRegionExtent + 1, 0, 640, 480), Region)).ToBe(False);
+  // Too small to align to anything, exactly as a stray click is.
+  Expect<Boolean>(SanitizeStoredRegion(StoredRegion(10, 10, 1, 1), Region))
+    .ToBe(False);
 end;
 
 { TErrorTitleTests }
@@ -445,6 +574,213 @@ begin
   Expect<Boolean>(IsCameraOriginUsable(Origin, 0, 70, 1440, 805)).ToBe(False);
 end;
 
+{ TExportTests }
+
+procedure TExportTests.SetupTests;
+begin
+  Test('the GIF sits beside the recording', TestGifPathSitsBesideTheRecording);
+  Test('a movie with no extension still exports to a .gif',
+    TestGifPathNeverOverwritesTheMovie);
+  Test('no recording means no GIF path', TestGifPathOfNothingIsNothing);
+  Test('a narrow recording keeps its own width',
+    TestWidthKeepsSmallRecordings);
+  Test('a wide recording is capped', TestWidthCapsWideRecordings);
+  Test('the percentage spans both passes', TestPercentSpansBothPasses);
+  Test('the percentage survives an estimate that was too low',
+    TestPercentSurvivesABadTotal);
+  Test('the progress title clamps to 0..100', TestProgressTitleClamps);
+end;
+
+procedure TExportTests.TestGifPathSitsBesideTheRecording;
+begin
+  Expect<string>(GifPathForRecording('/Users/x/Movies/knips/clip.mp4'))
+    .ToBe('/Users/x/Movies/knips/clip.gif');
+  Expect<string>(GifPathForRecording('/Users/x/clip.mov'))
+    .ToBe('/Users/x/clip.gif');
+end;
+
+procedure TExportTests.TestGifPathNeverOverwritesTheMovie;
+var
+  Path: string;
+begin
+  Path := GifPathForRecording('/Users/x/clip');
+  Expect<Boolean>(Path <> '/Users/x/clip').ToBe(True);
+  Expect<Boolean>(ExtractFileExt(Path) = GifFileExtension).ToBe(True);
+end;
+
+procedure TExportTests.TestGifPathOfNothingIsNothing;
+begin
+  Expect<string>(GifPathForRecording('')).ToBe('');
+end;
+
+procedure TExportTests.TestWidthKeepsSmallRecordings;
+begin
+  // GifWidthFromSource is the exporter's "keep the movie's own width".
+  Expect<Integer>(AppGifWidth(640)).ToBe(GifWidthFromSource);
+  Expect<Integer>(AppGifWidth(MaxAppGifWidth)).ToBe(GifWidthFromSource);
+  Expect<Integer>(AppGifWidth(0)).ToBe(GifWidthFromSource);
+end;
+
+procedure TExportTests.TestWidthCapsWideRecordings;
+begin
+  Expect<Integer>(AppGifWidth(MaxAppGifWidth + 1)).ToBe(MaxAppGifWidth);
+  Expect<Integer>(AppGifWidth(2560)).ToBe(MaxAppGifWidth);
+end;
+
+procedure TExportTests.TestPercentSpansBothPasses;
+begin
+  Expect<Integer>(ExportPercent(True, 0, 100)).ToBe(0);
+  Expect<Integer>(ExportPercent(True, 100, 100)).ToBe(PaletteProgressPercent);
+  Expect<Integer>(ExportPercent(False, 0, 100)).ToBe(PaletteProgressPercent);
+  Expect<Integer>(ExportPercent(False, 100, 100)).ToBe(100);
+  Expect<Integer>(ExportPercent(False, 50, 100))
+    .ToBe(PaletteProgressPercent + Round((100 - PaletteProgressPercent) / 2));
+end;
+
+procedure TExportTests.TestPercentSurvivesABadTotal;
+begin
+  // The total is an estimate; overshooting it must not read as 118%.
+  Expect<Integer>(ExportPercent(False, 118, 100)).ToBe(100);
+  Expect<Integer>(ExportPercent(True, 5, 0)).ToBe(0);
+  Expect<Integer>(ExportPercent(False, -3, 100)).ToBe(PaletteProgressPercent);
+end;
+
+procedure TExportTests.TestProgressTitleClamps;
+begin
+  Expect<string>(ExportProgressTitle(0)).ToBe(ExportingTitlePrefix + '0%');
+  Expect<string>(ExportProgressTitle(42)).ToBe(ExportingTitlePrefix + '42%');
+  Expect<string>(ExportProgressTitle(-1)).ToBe(ExportingTitlePrefix + '0%');
+  Expect<string>(ExportProgressTitle(101)).ToBe(ExportingTitlePrefix + '100%');
+end;
+
+{ TWindowMenuTests }
+
+procedure TWindowMenuTests.SetupTests;
+begin
+  Test('a menu title reads "Application — Window"',
+    TestTitleJoinsApplicationAndWindow);
+  Test('a missing half leaves the other one', TestTitleFallsBackToWhatThereIs);
+  Test('a long menu title is elided', TestTitleIsElided);
+  Test('elision never splits a UTF-8 character',
+    TestElisionKeepsUtf8Whole);
+  Test('an ordinary on-screen window is recordable',
+    TestOrdinaryWindowIsRecordable);
+  Test('off-screen windows and other layers are skipped',
+    TestOffScreenAndOtherLayersAreSkipped);
+  Test('tiny and untitled windows are skipped',
+    TestTinyAndUntitledWindowsAreSkipped);
+  Test('our own windows are skipped', TestOurOwnWindowsAreSkipped);
+end;
+
+procedure TWindowMenuTests.TestTitleJoinsApplicationAndWindow;
+begin
+  Expect<string>(WindowMenuItemTitle('Safari', 'Apple'))
+    .ToBe('Safari' + WindowMenuSeparator + 'Apple');
+end;
+
+procedure TWindowMenuTests.TestTitleFallsBackToWhatThereIs;
+begin
+  Expect<string>(WindowMenuItemTitle('Safari', '')).ToBe('Safari');
+  Expect<string>(WindowMenuItemTitle('', 'Apple')).ToBe('Apple');
+  Expect<Boolean>(WindowMenuItemTitle('  ', '  ') <> '').ToBe(True);
+end;
+
+procedure TWindowMenuTests.TestTitleIsElided;
+var
+  Title: string;
+begin
+  Title := WindowMenuItemTitle('App',
+    StringOfChar('x', MaxWindowMenuTitleLength * 2));
+  Expect<Boolean>(Length(Title) <= MaxWindowMenuTitleLength).ToBe(True);
+  Expect<Boolean>(Pos('App', Title) = 1).ToBe(True);
+end;
+
+// NSString.stringWithUTF8String: hands back nil for an ill-formed
+// sequence, and a nil menu title is an exception inside AppKit — so this
+// checks the property that matters, not the byte count.
+function IsWellFormedUtf8(const AText: string): Boolean;
+var
+  I, J, Extra: Integer;
+  First: Byte;
+begin
+  Result := False;
+  I := 1;
+  while I <= Length(AText) do
+  begin
+    First := Ord(AText[I]);
+    if First < $80 then
+      Extra := 0
+    else if First and $E0 = $C0 then
+      Extra := 1
+    else if First and $F0 = $E0 then
+      Extra := 2
+    else if First and $F8 = $F0 then
+      Extra := 3
+    else
+      Exit;
+    if I + Extra > Length(AText) then
+      Exit;
+    for J := 1 to Extra do
+      if Ord(AText[I + J]) and $C0 <> $80 then
+        Exit;
+    Inc(I, Extra + 1);
+  end;
+  Result := True;
+end;
+
+procedure TWindowMenuTests.TestElisionKeepsUtf8Whole;
+var
+  Title: string;
+begin
+  // 'AB' plus the three-byte separator puts the cut point in the middle
+  // of a three-byte character, which is exactly the case that used to
+  // produce half a character.
+  Title := WindowMenuItemTitle('AB', StringOfChar('x', 0)
+    + DupeString('★', MaxWindowMenuTitleLength));
+  Expect<Boolean>(Length(Title) <= MaxWindowMenuTitleLength).ToBe(True);
+  Expect<Boolean>(IsWellFormedUtf8(Title)).ToBe(True);
+  // And the same for the error line, which shares the elision.
+  Expect<Boolean>(IsWellFormedUtf8(ErrorMenuTitle(
+    DupeString('★', MaxErrorTitleLength)))).ToBe(True);
+end;
+
+procedure TWindowMenuTests.TestOrdinaryWindowIsRecordable;
+begin
+  Expect<Boolean>(IsWindowRecordable(True, RecordableWindowLayer, 800, 600,
+    'Apple', False)).ToBe(True);
+end;
+
+procedure TWindowMenuTests.TestOffScreenAndOtherLayersAreSkipped;
+begin
+  Expect<Boolean>(IsWindowRecordable(False, RecordableWindowLayer, 800, 600,
+    'Apple', False)).ToBe(False);
+  // 1000 is where this app's own overlay and border windows live.
+  Expect<Boolean>(IsWindowRecordable(True, 1000, 800, 600, 'Apple', False))
+    .ToBe(False);
+end;
+
+procedure TWindowMenuTests.TestTinyAndUntitledWindowsAreSkipped;
+begin
+  Expect<Boolean>(IsWindowRecordable(True, RecordableWindowLayer,
+    MinRecordableWindowSize - 1, 600, 'Apple', False)).ToBe(False);
+  Expect<Boolean>(IsWindowRecordable(True, RecordableWindowLayer, 800,
+    MinRecordableWindowSize - 1, 'Apple', False)).ToBe(False);
+  Expect<Boolean>(IsWindowRecordable(True, RecordableWindowLayer, 800, 600,
+    '   ', False)).ToBe(False);
+end;
+
+// The own-process flag comes from the owning pid, never from the
+// application name — that reads 'Knips' under the bundle and 'knips-bin'
+// from the shell, so a name comparison silently stopped matching and the
+// playback window was offered as something to record.
+procedure TWindowMenuTests.TestOurOwnWindowsAreSkipped;
+begin
+  Expect<Boolean>(IsWindowRecordable(True, RecordableWindowLayer, 800, 600,
+    'clip.mp4', True)).ToBe(False);
+  Expect<Boolean>(IsWindowRecordable(True, RecordableWindowLayer, 800, 600,
+    'clip.mp4', False)).ToBe(True);
+end;
+
 begin
   TestRunnerProgram.AddSuite(TTransitionTests.Create('NextAppState'));
   TestRunnerProgram.AddSuite(TTitleTests.Create('StatusItemTitle'));
@@ -452,6 +788,8 @@ begin
   TestRunnerProgram.AddSuite(TSelectionTests.Create('selection geometry'));
   TestRunnerProgram.AddSuite(TErrorTitleTests.Create('ErrorMenuTitle'));
   TestRunnerProgram.AddSuite(TCameraTests.Create('camera window placement'));
+  TestRunnerProgram.AddSuite(TExportTests.Create('one-click GIF export'));
+  TestRunnerProgram.AddSuite(TWindowMenuTests.Create('Record Window submenu'));
   TestRunnerProgram.Run;
   ExitCode := TestResultToExitCode;
 end.

@@ -69,7 +69,8 @@ only checked for a non-nil image buffer; Knips also requires
 ### Bindings added to the SCK unit
 
 `SCDisplay.frame`, `SCWindow.frame/owningApplication/isOnScreen/
-windowLayer`, `SCContentFilter.initWithDesktopIndependentWindow:`,
+windowLayer`, `SCRunningApplication.processID`,
+`SCContentFilter.initWithDesktopIndependentWindow:`,
 `SCStreamConfiguration.setSourceRect:/setScalesToFit:`, the frame-status
 key and values. `TSCKOutputHandler`, `TSCKCapture`, and the
 `SCStreamOutputProtocol` declaration are removed. The block types and
@@ -84,6 +85,12 @@ the `SCStreamOutputType` `NS_ENUM` lists `Screen`, `Audio`,
 `Microphone` with no explicit initialisers, so `Microphone` is 2. It
 sits in the `knips additions` const block with that derivation written
 down, because a future SDK inserting a case would silently change it.
+`processID` is declared `cint32`, which is what `pid_t` is on Darwin
+(verified against the SDK's `SCShareableContent.h`). It is the only
+reliable way to recognise this process's own windows: `applicationName`
+is a display name and reads `Knips` under the app bundle but `knips-bin`
+from the shell, so the Record Window submenu's own-window filter cannot
+be built on it.
 
 ### The rename reached the vendored units too
 

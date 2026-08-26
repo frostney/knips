@@ -68,6 +68,11 @@ function InstantiateClass(AClass: pobjc_class): id;
 // own external binding after casting the result.
 function AllocateInstance(AClass: pobjc_class): id;
 procedure ReleaseInstance(AInstance: id);
+// The deferred release, for an instance being let go from inside a
+// callback running on that very instance — a window delegate handling
+// windowWillClose:, say. A plain release there frees the receiver while
+// the framework is still dispatching on it.
+procedure AutoreleaseInstance(AInstance: id);
 procedure SetPointerIvar(AInstance: id; const AIvarName: string;
   AValue: Pointer);
 function GetPointerIvar(AInstance: id; const AIvarName: string): Pointer;
@@ -196,6 +201,13 @@ procedure ReleaseInstance(AInstance: id);
 begin
   if AInstance <> nil then
     MessageSendVoid(AInstance, Selector('release'));
+end;
+
+procedure AutoreleaseInstance(AInstance: id);
+begin
+  // -autorelease returns the receiver; nothing here wants it back.
+  if AInstance <> nil then
+    MessageSendId(AInstance, Selector('autorelease'));
 end;
 
 procedure SetPointerIvar(AInstance: id; const AIvarName: string;

@@ -61,6 +61,18 @@ const
   GridEpsilon = 1E-6;
 
 type
+  // Which of the export's passes over the movie is reporting. APNG makes
+  // a single pass, so only gesEncode fires for it.
+  TGifExportStage = (gesPalette, gesEncode);
+
+  // Per-frame progress, for a caller that has a window to update. Runs on
+  // the thread that called Run — the main thread, since AVAssetReader is
+  // driven from there — so an AppKit setter is a legal thing to do in
+  // one. AFramesTotal is the estimate from the range and the target rate,
+  // so AFramesDone can overshoot it by a frame or two near the end.
+  TGifExportProgressEvent = procedure(AStage: TGifExportStage;
+    AFramesDone, AFramesTotal: Int64) of object;
+
   TExportReport = record
     Format: TExportFormat;
     InputPath: string;
@@ -150,6 +162,9 @@ type
     FBaseSeconds: Double;
     FLastSlot: Int64;
     FEmitted: Int64;
+    FVerbose: Boolean;
+    FOnProgress: TGifExportProgressEvent;
+    procedure Progress(AStage: TGifExportStage; AFramesDone: Int64);
     procedure BeginPass;
     function NextEmittedFrame(out AFrame: TMovieReaderFrame): Boolean;
     procedure EnsureTargetSize(ASourceWidth, ASourceHeight: Integer);
@@ -167,6 +182,12 @@ type
     // file is removed.
     function Run(out AError: string): Boolean;
     property Report: TExportReport read FReport;
+    // Progress on standard output, as the CLI wants it. The menu-bar app
+    // has no console — under an app bundle standard output is not even a
+    // terminal — so it turns this off and takes OnProgress instead.
+    property Verbose: Boolean read FVerbose write FVerbose;
+    property OnProgress: TGifExportProgressEvent read FOnProgress
+      write FOnProgress;
   end;
 
 {$ENDIF}
@@ -282,6 +303,14 @@ constructor TExportSession.Create(const AOptions: TExportOptions);
 begin
   inherited Create;
   FOptions := AOptions;
+  FVerbose := True;
+end;
+
+procedure TExportSession.Progress(AStage: TGifExportStage;
+  AFramesDone: Int64);
+begin
+  if Assigned(FOnProgress) then
+    FOnProgress(AStage, AFramesDone, ExpectedFrameCount);
 end;
 
 destructor TExportSession.Destroy;
@@ -466,6 +495,7 @@ begin
           Inc(FReport.SampledFrames);
         end;
         Inc(Index);
+        Progress(gesPalette, Index);
         if Index mod PoolDrainEveryFrames = 0 then
         begin
           Pool.release;
@@ -543,7 +573,8 @@ begin
         FPending := FScaled;
         FScaled := Swap;
         HasPending := True;
-        if (ASink.FrameCount > 0)
+        Progress(gesEncode, ASink.FrameCount);
+        if FVerbose and (ASink.FrameCount > 0)
           and (ASink.FrameCount mod ProgressEveryFrames = 0) then
         begin
           WriteLn(Format('  %d frames, %d kB', [ASink.FrameCount,
@@ -618,15 +649,18 @@ begin
     // pass; the size comes from the track the reader already opened.
     EnsureTargetSize(FReader.PixelWidth, FReader.PixelHeight);
 
-  if FOptions.Format = efGif then
-    WriteLn(Format('exporting %dx%d at up to %d fps (%d colours) to %s',
-      [FReport.PixelWidth, FReport.PixelHeight, FOptions.FramesPerSecond,
-      FReport.PaletteColors, FOptions.OutputPath]))
-  else
-    WriteLn(Format('exporting %dx%d at up to %d fps (truecolour) to %s',
-      [FReport.PixelWidth, FReport.PixelHeight, FOptions.FramesPerSecond,
-      FOptions.OutputPath]));
-  Flush(Output);
+  if FVerbose then
+  begin
+    if FOptions.Format = efGif then
+      WriteLn(Format('exporting %dx%d at up to %d fps (%d colours) to %s',
+        [FReport.PixelWidth, FReport.PixelHeight, FOptions.FramesPerSecond,
+        FReport.PaletteColors, FOptions.OutputPath]))
+    else
+      WriteLn(Format('exporting %dx%d at up to %d fps (truecolour) to %s',
+        [FReport.PixelWidth, FReport.PixelHeight, FOptions.FramesPerSecond,
+        FOptions.OutputPath]));
+    Flush(Output);
+  end;
 
   if FOptions.Format = efGif then
     Sink := TGifSink.Create(FReport.PixelWidth, FReport.PixelHeight, Palette,

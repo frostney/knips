@@ -8,6 +8,9 @@
 - `./build/knips app` is the menu-bar version: click the icon, drag a
   rectangle, click again to stop. **Camera** adds a draggable floating
   camera window that gets recorded along with everything else.
+  rectangle, click again to stop. A red frame marks the region while it
+  records, and the finished clip opens in a playback window with a
+  one-click GIF export.
 - `./build/knips export --in=demo.mp4 --out=demo.gif` turns the
   recording into an animated GIF, optionally trimmed and scaled;
   `--out=demo.apng` writes truecolour APNG instead, and `--out=cut.mp4
@@ -61,9 +64,12 @@ A `◉` appears in the menu bar. Clicking it opens:
 | --- | --- |
 | Record Region… | Dims every screen, crosshair; drag a rectangle, release to start. **Esc** cancels. |
 | Record Display | Records the main display straight away. |
+| Record Window ▸ | Up to 20 on-screen application windows as *Application — Title*, refreshed at most once every five seconds. Knips's own windows are never listed. If the list cannot be read within a second the submenu says so instead of stalling. |
+| Record Last Region | Repeats the last region recording — same display, same rectangle. Survives a relaunch. |
 | Stop Recording | Enabled only while recording. |
 | Cancel selection | Enabled only while selecting. The overlay covers the menu bar, so this only matters if the overlay failed to open. |
 | Camera | Floating camera window; checked while it is up. Available in every state, recording included. |
+| Record System Audio | A checkbox. On, recordings get an AAC track of the system mix. Remembered between launches; not changeable mid-recording. |
 | Recordings folder | Opens `~/Movies/knips/` in Finder. |
 | Last error: … | Only visible after a failure; the full text is in Console.app. |
 | Quit Knips | Stops a running recording first. |
@@ -72,7 +78,43 @@ While recording the title reads `⏺ 0:07` and ticks once a second, and the
 menu is detached so **one click on the icon stops** — Kap's gesture. The
 price of that gesture is that Quit is unreachable until you stop; one
 click does it. The finished file lands in
-`~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4` and is revealed in Finder.
+`~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4`.
+
+**The recording frame.** A region recording puts a red frame around the
+rectangle for as long as it runs, so there is never a doubt about what is
+being captured. The frame is a passthrough window — clicks go straight
+through it — and it is kept out of the file twice over: it is stroked in
+the two points *outside* the recorded rectangle, and its window id is
+passed to ScreenCaptureKit's `excludingWindows:` so the compositor never
+draws it into the stream at all. Display and window recordings get no
+frame.
+
+**The playback window.** When a recording finishes, it opens in a normal
+window with AVKit's transport controls and three buttons:
+
+| Button | What it does |
+| --- | --- |
+| Export as GIF… | Writes `<recording>.gif` beside the movie at 20 fps, at the recording's own width or 800 px, whichever is smaller, and reveals it in Finder. |
+| Reveal in Finder | Shows the `.mp4`. |
+| Close | Closes the window and releases the player. |
+
+The export runs on the main thread, so nothing responds while it is
+going: the title counts up (`Exporting… 42%`), the buttons are disabled,
+every menu item is a no-op, and **Quit is refused** until it finishes
+(it says so under `Last error: …`). The buttons come back when it is
+done and the `.gif` is revealed in Finder. For anything the button's
+defaults do not cover — a different rate, a width, a trim — use
+`knips export` (below).
+
+**Remembered settings.** Record System Audio and the last region live in
+`NSUserDefaults` under `KnipsRecordSystemAudio` and `KnipsLastRegion*`.
+The bare binary and `Knips.app` keep separate domains (`knips` versus the
+bundle identifier), so a setting made in one is not seen by the other:
+
+```sh
+defaults read knips          # what ./build/knips app remembers
+defaults delete knips        # forget it
+```
 
 If Screen Recording has not been granted, the recording fails
 immediately, the icon goes back to `◉`, and the reason shows up as

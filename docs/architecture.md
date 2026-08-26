@@ -17,6 +17,10 @@
 - `knips app` is the same binary in a second shape: an Accessory-policy
   `NSApplication` with a status item, whose recording lifecycle is
   `TRecordingSession.StartCapture` … NSApp's run loop … `FinishCapture`.
+  A region recording is framed by a passthrough window that is both drawn
+  outside the recorded rectangle and excluded from the content filter;
+  the finished clip opens in an `AVPlayerView` window with a one-click
+  GIF export. See [Menu bar app](#menu-bar-app).
 - Timing is taken from each sample buffer's presentation stamp; the
   writer's session starts at the first appended frame. This is what makes
   SCK's change-driven frame delivery record at real speed.
@@ -62,6 +66,7 @@
 | --- | --- | --- |
 | CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `export`, `displays`, `windows`, `probe`; SIGINT/SIGTERM → `StopRequested` |
 | App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Camera`, `Knips.App.State` | Status item + menu, selection overlay, the camera picture-in-picture window, and the neutral state machine (tested) |
+| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, and the neutral state machine (tested) |
 | Recording | `Knips.Recording` | Target → filter + geometry → writer → stream; progress; report |
 | Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
 | Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.MovieTrim`, `Knips.Export.Pipeline` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; AVAssetExportSession passthrough trim; the shared GIF/APNG pipeline |
@@ -71,7 +76,10 @@
 | Vendored | `source/capture/*` | CoreMedia/CoreVideo/VideoToolbox/GCD, ScreenCaptureKit externals, pthread mutex |
 
 Nothing above the capture layer knows about `objcclass`; nothing below
-the recording layer knows about the CLI.
+the recording layer knows about the CLI. The one edge that crosses
+sideways is `Knips.App.Playback` → `Knips.Export.GifPipeline`: the
+playback window's *Export as GIF…* button runs the same session the
+`export` subcommand does, rather than a second implementation of it.
 
 ## The export pipeline
 
@@ -405,16 +413,23 @@ the thread to `NSApplication.run`. There is one state machine:
      │                        │ Esc / stray click / capture failed   │ click the
      │◀───────────────────────┘                                     │ item, or
      │                                                              │ Stop
-     │        Record Display ─────────────────────────────────▶     │
+     │  Record Display / Record Window / Record Last Region ───▶     │
      │◀─────────────────────────────────────────────────────────────┘
+
+  asIdle ──Record System Audio──▶ asIdle   (a self-transition: the command
+                                            is legal only where the stream
+                                            configuration is not yet fixed)
 ```
 
 `Knips.App.State` owns the transition table, the status-item title, the
-`~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4` naming, and the selection
-maths; it is platform-neutral and has a co-located suite, so the only
-untested part of the app is the Cocoa plumbing.
+`~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4` naming, the selection maths,
+the Record Window filter and menu titles, and the one-click GIF export's
+path/width/percentage arithmetic; it is platform-neutral and has a
+co-located suite, so the only untested part of the app is the Cocoa
+plumbing.
 
 Four more classes are built through `Knips.ObjC.Runtime`, none of them
+Five more classes are built through `Knips.ObjC.Runtime`, none of them
 an `objcclass`:
 
 | Runtime class | Superclass | Methods |
@@ -423,6 +438,11 @@ an `objcclass`:
 | `KnipsOverlayView` | `NSView` | `drawRect:`, `mouseDown:`, `mouseDragged:`, `mouseUp:`, `keyDown:`, `acceptsFirstResponder` |
 | `KnipsOverlayWindow` | `NSWindow` | `canBecomeKeyWindow` (a borderless window answers NO, and then Esc never reaches the view) |
 | `KnipsCameraView` | `NSView` | `acceptsFirstMouse:` (Knips is an Accessory app, so without it the first click on the camera window is eaten as the activating click and dragging takes two) |
+| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `recordWindow:`, `recordLastRegion:`, `toggleSystemAudio:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:`, `exportGif:`, `revealRecording:`, `closePlayback:`, `menuNeedsUpdate:` |
+| `KnipsOverlayView` | `NSView` | `drawRect:`, `mouseDown:`, `mouseDragged:`, `mouseUp:`, `keyDown:`, `acceptsFirstResponder` |
+| `KnipsOverlayWindow` | `NSWindow` | `canBecomeKeyWindow` (a borderless window answers NO, and then Esc never reaches the view) |
+| `KnipsBorderView` | `NSView` | `drawRect:` — the frame drawn around a region while it records |
+| `KnipsPlaybackDelegate` | `NSObject` | `windowWillClose:` — the one teardown path for the playback window |
 
 `KnipsCameraView` is the exception to what follows: it has no ivar and no
 `try..except`, because its one body returns a constant and never calls
@@ -432,6 +452,71 @@ goes away — the same rule as the stream output object.
 `KnipsOverlayView` adds an `knipsIndex`
 ivar holding the screen's index, so one overlay object serves every
 display.
+
+`KnipsAppTarget` is also the `NSMenuDelegate` of the Record Window
+submenu. A separate delegate class would carry no extra state, and the
+target is already the object every menu item points at. What that
+delegate is allowed to do inside menu tracking is spelled out under
+[Deferrals](#deferrals-1) below.
+
+**Which windows the submenu offers.** On screen, layer 0, at least 32
+points each way, titled, and **not owned by this process** — decided by
+comparing `SCRunningApplication.processID` against
+`NSProcessInfo.processIdentifier`, never by application name. The name is
+a display name: `Knips` under the bundle and `knips-bin` from the shell,
+so a name comparison quietly stops matching in exactly the shape that
+ships, and the app starts offering its own playback window as something
+to record.
+
+**The recording frame.** A region recording puts one borderless,
+passthrough (`ignoresMouseEvents`) window at window level 1000 around the
+rectangle for as long as the capture runs (`Knips.App.Border`). It is
+kept out of the file two independent ways, and the second is the backstop
+for the first:
+
+1. **Geometry.** The window is the region *outset* by the 2-point border
+   width, and the stroke runs along the window's own outer edge — a path
+   inset by half the line width, stroked at the full width. Every border
+   pixel is therefore outside the recorded rectangle. Proven on device by
+   recording the whole display with the frame up: 11 165 of the 11 264
+   pixels in the four-pixel ring outside the rectangle are red, and 0 of
+   the 480 000 inside it are.
+2. **Exclusion.** The window's `windowNumber` — which is its
+   `CGWindowID`, and is found by `SCShareableContent` immediately, with no
+   run-loop turn in between — goes into
+   `TRecordingOptions.ExcludedWindowIDs`, which `Knips.Recording` turns
+   into `SCWindow` objects for
+   `SCContentFilter.initWithDisplay:excludingWindows:`. Proven on device
+   by putting a solid-magenta window of the same shape over the region:
+   without the exclusion the recorded frame is 100 % magenta, with it
+   0 %.
+
+The frame is created *before* `StartCapture`, because the content filter
+is built inside it. A frame that cannot be shown is not an error: the
+recording runs without one, and rule 1 means there was nothing to exclude
+anyway. Display and window recordings get no frame.
+
+**The playback window** (`Knips.App.Playback`). A finished recording
+opens in an ordinary titled window with an `AVPlayerView` and three
+buttons whose target is the same `KnipsAppTarget`. *Export as GIF…* runs
+`TGifExportSession` inline on the main thread — nothing here may pump a
+nested run loop, so the window is unresponsive while it works and the
+title carries the progress instead (`Exporting… 42%`, from the pipeline's
+new per-frame `OnProgress`). The buttons are disabled first, which is
+what makes re-entry impossible; `CommandClose` refuses while an export is
+running for the same reason. The window is `activateIgnoringOtherApps`'d
+into the foreground, exactly as the overlay is — an Accessory process's
+titled window can become key on its own, which is why this one needs no
+runtime class for it.
+
+**Remembered settings.** Two, both in `NSUserDefaults`:
+`KnipsRecordSystemAudio` (the checkbox) and `KnipsLastRegion*` (the
+display id and rectangle behind *Record Last Region*). The region is
+written only once a capture has actually started, so a region whose
+display has gone never becomes the region to repeat. It is read back
+through `SanitizeStoredRegion`, because `defaults write` is a public
+interface and these keys are not private state: a negative origin would
+otherwise land in ScreenCaptureKit's `sourceRect` unexamined.
 
 **The click.** Idle, the status item has its menu; recording, the menu is
 detached and the button's action is `stopRecording:`, so a single click
@@ -476,7 +561,39 @@ AppKit dispatch that asked for it, by a zero-delay one-shot `NSTimer`:
 Quit is the exception: `terminate:` never returns, so it finalises any
 open session inline rather than deferring an unplayable file. Overlay
 windows are `autorelease`d rather than released for the same
-mid-dispatch reason.
+mid-dispatch reason — and so is `KnipsPlaybackDelegate` itself, which is
+let go from inside the `windowWillClose:` that is running *on* it.
+
+**Two places pump deliberately, and both are bounded.** The rule above is
+"never pump from inside an AppKit dispatch"; these two do, because there
+is no next turn to defer to.
+
+- **`menuNeedsUpdate:`** builds the Record Window submenu, and AppKit is
+  already tracking the menu when it asks. The `SCShareableContent` query
+  is asynchronous, so waiting for it means pumping `kCFRunLoopDefaultMode`
+  nested inside `NSEventTrackingRunLoopMode`. That works — the main
+  queue's port is in the common modes, so the completion is drained under
+  tracking — but the default five-second budget would freeze the menu on
+  every hover if the Screen Recording grant were missing. So this caller
+  gets `TShareableContent.CreateWithin(1.0)` and the result is cached for
+  five seconds: at most one query per interval however often the submenu
+  is opened, at most a second of waiting when the framework does not
+  answer, and a single disabled *window list unavailable* line instead of
+  an error when it does not. Nothing on this path may call `Fail` or
+  `RefreshStatusItem` — the status item's menu is on screen.
+- **The GIF export's progress.** `setTitle:` marks the titlebar dirty and
+  pushes the string to the window server, but the *drawn* title comes
+  from a CoreAnimation commit that runs as a run-loop observer. With the
+  export holding the main thread there is no such turn, and the title
+  never visibly changes — measured on device: five captures of the window
+  across a 4.2 s export were byte identical while the window server's
+  title property counted 0 % → 99 %. So the progress handler runs one
+  `CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, True)` slice per whole
+  percent. That is real event dispatch, so it comes with a hard lockout:
+  `TAppController.Transition` returns `False` for **every** command while
+  an export is running, the playback buttons are already disabled, and
+  Quit refuses with a `Last error: …` note rather than terminating over a
+  half-written GIF.
 
 **Exceptions never cross the boundary.** Every `cdecl` method body in
 `Knips.App` and `Knips.App.Overlay` is wrapped in `try..except`. There

@@ -41,8 +41,10 @@ uses
   SysUtils,
 
   CocoaAll,
+  Knips.App.Border,
   Knips.App.Camera,
   Knips.App.Overlay,
+  Knips.App.Playback,
   Knips.App.State,
   Knips.Capture.ShareableContent,
   Knips.ObjC.Runtime,
@@ -77,6 +79,9 @@ const
 
   RecordRegionSelector = 'recordRegion:';
   RecordDisplaySelector = 'recordDisplay:';
+  RecordWindowSelector = 'recordWindow:';
+  RecordLastRegionSelector = 'recordLastRegion:';
+  ToggleSystemAudioSelector = 'toggleSystemAudio:';
   StopRecordingSelector = 'stopRecording:';
   CancelSelectionSelector = 'cancelSelection:';
   RevealRecordingsSelector = 'revealRecordings:';
@@ -86,16 +91,37 @@ const
   StopPendingSelector = 'stopPending:';
   ToggleCameraSelector = 'toggleCamera:';
   RestoreCameraSelector = 'restoreCamera:';
+  // KnipsAppTarget doubles as the Record Window submenu's NSMenuDelegate;
+  // the list is rebuilt when AppKit is about to show it, so it is never
+  // stale and never costs a ScreenCaptureKit query the user did not ask
+  // for. A separate delegate class would carry no extra information.
+  MenuNeedsUpdateSelector = 'menuNeedsUpdate:';
 
   RecordRegionTitle = 'Record Region…';
   RecordDisplayTitle = 'Record Display';
+  RecordWindowTitle = 'Record Window';
+  RecordLastRegionTitle = 'Record Last Region';
+  SystemAudioTitle = 'Record System Audio';
   StopRecordingTitle = 'Stop Recording';
   CancelSelectionTitle = 'Cancel selection';
   RevealRecordingsTitle = 'Recordings folder';
   QuitTitle = 'Quit Knips';
   MenuTitle = 'Knips';
+  WindowMenuTitle = 'Windows';
+  NoWindowsTitle = 'No recordable windows';
+  NoWindowListTitle =
+    'window list unavailable — check Screen Recording permission';
   IdleToolTip = 'Knips — click for the menu';
   RecordingToolTip = 'Knips — click to stop recording';
+
+  // NSUserDefaults keys. The system-audio checkbox and the last region
+  // are the only two things the app remembers between launches.
+  SystemAudioKey = 'KnipsRecordSystemAudio';
+  LastRegionDisplayKey = 'KnipsLastRegionDisplay';
+  LastRegionLeftKey = 'KnipsLastRegionLeft';
+  LastRegionTopKey = 'KnipsLastRegionTop';
+  LastRegionWidthKey = 'KnipsLastRegionWidth';
+  LastRegionHeightKey = 'KnipsLastRegionHeight';
 
   ElapsedTimerSeconds = 1.0;
   // A zero-delay one-shot: the selection commits inside the overlay
@@ -108,7 +134,25 @@ const
   DeferredStartSeconds = 0.0;
   SecondsPerDay = 86400;
 
+  // The Record Window submenu is built inside AppKit's menu tracking,
+  // which is the one place in this app that pumps a nested run loop
+  // without being a deferred one-shot (see docs/architecture.md,
+  // "Deferrals"). Both numbers exist to make that bounded: at most one
+  // ScreenCaptureKit query per interval however often the submenu is
+  // hovered, and at most a second of waiting when the framework does not
+  // answer — a denied Screen Recording grant would otherwise freeze the
+  // menu for five seconds on every single hover.
+  WindowListTimeoutSeconds = 1.0;
+  WindowListCacheSeconds = 5.0;
+
 type
+  // One line of the Record Window submenu, cached between hovers so the
+  // framework query does not run on every one.
+  TWindowMenuEntry = record
+    WindowID: Cardinal;
+    Title: string;
+  end;
+
   TAppController = class
   private
     FState: TAppState;
@@ -117,6 +161,10 @@ type
     FMenu: NSMenu;
     FRegionItem: NSMenuItem;
     FDisplayItem: NSMenuItem;
+    FWindowItem: NSMenuItem;
+    FWindowMenu: NSMenu;
+    FLastRegionItem: NSMenuItem;
+    FSystemAudioItem: NSMenuItem;
     FStopItem: NSMenuItem;
     FCancelItem: NSMenuItem;
     FRevealItem: NSMenuItem;
@@ -126,17 +174,51 @@ type
     FTimer: NSTimer;
     FOverlay: TSelectionOverlay;
     FCamera: TCameraPreview;
+    FBorder: TRecordingBorder;
+    FPlayback: TPlaybackWindow;
     FSession: TRecordingSession;
     FStartedAt: TDateTime;
     FLastError: string;
+    // Own process id, so the Record Window submenu does not offer the
+    // playback window as something to record. The application name will
+    // not do: ScreenCaptureKit reports a display name, which is 'Knips'
+    // under the bundle and 'knips-bin' from the shell.
+    FProcessID: Integer;
+    // The Record Window submenu's contents and when they were read.
+    FWindowEntries: array of TWindowMenuEntry;
+    FWindowEntriesAt: TDateTime;
+    FWindowEntriesValid: Boolean;
+    FWindowListFailed: Boolean;
+    // Persisted preferences.
+    FSystemAudio: Boolean;
+    FHasLastRegion: Boolean;
+    FLastRegionDisplayID: UInt32;
+    FLastRegion: TCaptureRegion;
     // What StartPending will record. 0 selects the main display.
     FPendingDisplayID: UInt32;
     FPendingHasRegion: Boolean;
     FPendingRegion: TCaptureRegion;
+    FPendingWindowID: Cardinal;
     function AddMenuItem(const ATitle, ASelector: string): NSMenuItem;
     procedure BuildMenu;
+    procedure BuildWindowMenu;
+    procedure AddInertItem(AMenu: NSMenu; const ATitle: string);
+    function WindowEntriesFresh: Boolean;
+    procedure RefreshWindowEntries;
     function ElapsedSeconds: Int64;
     procedure RecordError(const AMessage: string);
+    procedure LoadPreferences;
+    procedure StoreSystemAudio;
+    procedure StoreLastRegion;
+    procedure ClearPending;
+    // Puts the frame on the region about to be recorded and returns the
+    // window id the capture must exclude. 0 when there is no region or
+    // the border could not be shown; the recording then runs without one.
+    function ShowBorderForPending: Cardinal;
+    procedure HideBorder;
+    procedure ShowPlayback(const APath: string; APixelWidth,
+      APixelHeight: Integer);
+    procedure HandlePlaybackError(const AMessage: string);
     function Transition(ACommand: TAppCommand): Boolean;
     function ResolveDisplayIndex(ADisplayID: UInt32; out AIndex: Integer;
       out AError: string): Boolean;
@@ -145,9 +227,14 @@ type
     procedure StartElapsedTimer;
     procedure StopElapsedTimer;
     procedure Reveal(const APath: string);
-    // Finalises the file and reveals it. Pumps the run loop, so it is
-    // only ever called from a deferred timer or from Quit.
-    procedure FinishRecording;
+    // Finalises the file and, unless the app is on its way out, opens it
+    // in the playback window. Pumps the run loop, so it is only ever
+    // called from a deferred timer or from Quit.
+    procedure FinishRecording(AShowPlayback: Boolean);
+    // True while the GIF export has the main thread. The export turns
+    // the run loop over to draw its progress, so AppKit can dispatch
+    // clicks in the middle of it; this is what makes them no-ops.
+    function Busy: Boolean;
     procedure HandleRegionSelected(ADisplayID: UInt32;
       const ARegion: TCaptureRegion);
     procedure HandleSelectionCancelled;
@@ -160,6 +247,9 @@ type
     procedure RefreshStatusItem;
     procedure CommandRecordRegion;
     procedure CommandRecordDisplay;
+    procedure CommandRecordWindow(AWindowID: Cardinal);
+    procedure CommandRecordLastRegion;
+    procedure CommandToggleSystemAudio;
     procedure CommandStop;
     procedure CommandCancelSelection;
     procedure CommandRevealRecordings;
@@ -168,6 +258,12 @@ type
     // status item is in the menu bar before the camera warms up.
     procedure CommandRestoreCamera;
     procedure CommandQuit;
+    // Playback-window actions; the buttons target this same object.
+    procedure CommandExportGif;
+    procedure CommandRevealRecording;
+    procedure CommandClosePlayback;
+    // NSMenuDelegate for the Record Window submenu.
+    procedure RebuildWindowMenu;
     procedure Tick;
     procedure StartPending;
     procedure StopPending;
@@ -246,6 +342,123 @@ begin
   except
     on E: Exception do
       HandleBodyException(Controller, RecordDisplaySelector, E);
+  end;
+end;
+
+// The submenu items carry their CGWindowID in the menu item's tag, which
+// is the only piece of the sender this body reads.
+procedure TargetRecordWindow(ASelf: id; ACommand: SEL; ASender: id); cdecl;
+var
+  Controller: TAppController;
+  WindowID: Cardinal;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller = nil then
+      Exit;
+    WindowID := 0;
+    if ASender <> nil then
+      WindowID := Cardinal(NSMenuItem(ASender).tag);
+    Controller.CommandRecordWindow(WindowID);
+  except
+    on E: Exception do
+      HandleBodyException(Controller, RecordWindowSelector, E);
+  end;
+end;
+
+procedure TargetRecordLastRegion(ASelf: id; ACommand: SEL;
+  ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandRecordLastRegion;
+  except
+    on E: Exception do
+      HandleBodyException(Controller, RecordLastRegionSelector, E);
+  end;
+end;
+
+procedure TargetToggleSystemAudio(ASelf: id; ACommand: SEL;
+  ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandToggleSystemAudio;
+  except
+    on E: Exception do
+      HandleBodyException(Controller, ToggleSystemAudioSelector, E);
+  end;
+end;
+
+// NSMenuDelegate. AppKit calls this on the Record Window submenu just
+// before showing it, which is the only moment the window list is worth
+// asking ScreenCaptureKit for.
+procedure TargetMenuNeedsUpdate(ASelf: id; ACommand: SEL; AMenu: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.RebuildWindowMenu;
+  except
+    on E: Exception do
+      HandleBodyException(Controller, MenuNeedsUpdateSelector, E);
+  end;
+end;
+
+procedure TargetExportGif(ASelf: id; ACommand: SEL; ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandExportGif;
+  except
+    on E: Exception do
+      HandleBodyException(Controller, ExportGifSelector, E);
+  end;
+end;
+
+procedure TargetRevealRecording(ASelf: id; ACommand: SEL; ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandRevealRecording;
+  except
+    on E: Exception do
+      HandleBodyException(Controller, RevealRecordingSelector, E);
+  end;
+end;
+
+procedure TargetClosePlayback(ASelf: id; ACommand: SEL; ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandClosePlayback;
+  except
+    on E: Exception do
+      HandleBodyException(Controller, ClosePlaybackSelector, E);
   end;
 end;
 
@@ -418,6 +631,8 @@ begin
   // probe` — which calls this — fails on a bad class_addMethod instead of
   // the user finding out from a camera window that will not drag.
   EnsureCameraClasses;
+  EnsureBorderClasses;
+  EnsurePlaybackClasses;
   if GTargetClass <> nil then
     Exit;
   GTargetClass := LookUpClass(TargetClassName);
@@ -430,6 +645,15 @@ begin
       raise EObjCRuntime.Create('class_addIvar failed for ' + OwnerIvarName);
     AddTargetMethod(Builder, RecordRegionSelector, @TargetRecordRegion);
     AddTargetMethod(Builder, RecordDisplaySelector, @TargetRecordDisplay);
+    AddTargetMethod(Builder, RecordWindowSelector, @TargetRecordWindow);
+    AddTargetMethod(Builder, RecordLastRegionSelector,
+      @TargetRecordLastRegion);
+    AddTargetMethod(Builder, ToggleSystemAudioSelector,
+      @TargetToggleSystemAudio);
+    AddTargetMethod(Builder, MenuNeedsUpdateSelector, @TargetMenuNeedsUpdate);
+    AddTargetMethod(Builder, ExportGifSelector, @TargetExportGif);
+    AddTargetMethod(Builder, RevealRecordingSelector, @TargetRevealRecording);
+    AddTargetMethod(Builder, ClosePlaybackSelector, @TargetClosePlayback);
     AddTargetMethod(Builder, StopRecordingSelector, @TargetStopRecording);
     AddTargetMethod(Builder, CancelSelectionSelector, @TargetCancelSelection);
     AddTargetMethod(Builder, RevealRecordingsSelector,
@@ -440,6 +664,9 @@ begin
     AddTargetMethod(Builder, StopPendingSelector, @TargetStopPending);
     AddTargetMethod(Builder, ToggleCameraSelector, @TargetToggleCamera);
     AddTargetMethod(Builder, RestoreCameraSelector, @TargetRestoreCamera);
+    // AppKit only asks respondsToSelector:, so a runtime without the
+    // protocol registered is not an error; claiming it is tidier.
+    Builder.AddProtocol('NSMenuDelegate');
     GTargetClass := Builder.Register;
   finally
     Builder.Free;
@@ -461,12 +688,22 @@ begin
     SetPointerIvar(FTarget, OwnerIvarName, nil);
   FreeAndNil(FOverlay);
   FreeAndNil(FCamera);
+  FreeAndNil(FBorder);
+  FreeAndNil(FPlayback);
   FreeAndNil(FSession);
   if FStatusItem <> nil then
   begin
     NSStatusBar.systemStatusBar.removeStatusItem(FStatusItem);
     FStatusItem.release;
     FStatusItem := nil;
+  end;
+  if FWindowMenu <> nil then
+  begin
+    // The target is about to go; a delegate call after that would find a
+    // nil owner, but clearing it is cheaper than relying on that.
+    FWindowMenu.setDelegate(nil);
+    FWindowMenu.release;
+    FWindowMenu := nil;
   end;
   if FMenu <> nil then
   begin
@@ -500,6 +737,31 @@ begin
   Result.release;
 end;
 
+// An inert line — a placeholder in the window submenu, or the "Last
+// error" item. Disabled, no action, and not added through AddMenuItem
+// because that one always targets the root menu.
+procedure TAppController.AddInertItem(AMenu: NSMenu; const ATitle: string);
+var
+  Item: NSMenuItem;
+begin
+  Item := NSMenuItem(NSMenuItem.alloc.initWithTitle_action_keyEquivalent(
+    PascalToNSString(ATitle), nil, PascalToNSString('')));
+  Item.setEnabled(False);
+  AMenu.addItem(Item);
+  Item.release;
+end;
+
+// The submenu is created empty and filled by RebuildWindowMenu when
+// AppKit is about to show it (menuNeedsUpdate:).
+procedure TAppController.BuildWindowMenu;
+begin
+  FWindowMenu := NSMenu(NSMenu.alloc.initWithTitle(
+    PascalToNSString(WindowMenuTitle)));
+  FWindowMenu.setAutoenablesItems(False);
+  FWindowMenu.setDelegate(NSMenuDelegateProtocol(FTarget));
+  AddInertItem(FWindowMenu, NoWindowsTitle);
+end;
+
 procedure TAppController.BuildMenu;
 begin
   FMenu := NSMenu(NSMenu.alloc.initWithTitle(PascalToNSString(MenuTitle)));
@@ -508,6 +770,13 @@ begin
   FMenu.setAutoenablesItems(False);
   FRegionItem := AddMenuItem(RecordRegionTitle, RecordRegionSelector);
   FDisplayItem := AddMenuItem(RecordDisplayTitle, RecordDisplaySelector);
+  // A submenu item carries no action of its own; opening it is what the
+  // click does, and the items inside carry recordWindow:.
+  FWindowItem := AddMenuItem(RecordWindowTitle, '');
+  BuildWindowMenu;
+  FWindowItem.setSubmenu(FWindowMenu);
+  FLastRegionItem := AddMenuItem(RecordLastRegionTitle,
+    RecordLastRegionSelector);
   FStopItem := AddMenuItem(StopRecordingTitle, StopRecordingSelector);
   // Only reachable when the overlay failed to come up — a live overlay
   // covers the menu bar, and inside it Esc or a stray click cancel.
@@ -518,12 +787,128 @@ begin
   // nothing the recorder owns — and mid-recording is exactly when the
   // user is most likely to want it on or off.
   FCameraItem := AddMenuItem(CameraMenuTitle, ToggleCameraSelector);
+  FSystemAudioItem := AddMenuItem(SystemAudioTitle, ToggleSystemAudioSelector);
+  FMenu.addItem(NSMenuItem.separatorItem);
   FRevealItem := AddMenuItem(RevealRecordingsTitle, RevealRecordingsSelector);
   FErrorItem := AddMenuItem(ErrorMenuTitle(''), '');
   FErrorItem.setEnabled(False);
   FErrorItem.setHidden(True);
   FMenu.addItem(NSMenuItem.separatorItem);
   FQuitItem := AddMenuItem(QuitTitle, QuitSelector);
+end;
+
+function TAppController.WindowEntriesFresh: Boolean;
+var
+  Age: Double;
+begin
+  if not FWindowEntriesValid then
+    Exit(False);
+  Age := (Now - FWindowEntriesAt) * SecondsPerDay;
+  // A clock that moved backwards reads as stale, not as fresh forever.
+  Result := (Age >= 0) and (Age < WindowListCacheSeconds);
+end;
+
+// The only ScreenCaptureKit query in the app that is not on a deferred
+// one-shot. It is bounded twice: WindowListTimeoutSeconds caps how long
+// menu tracking can be held up when the framework does not answer, and
+// the cache caps how often it happens at all.
+procedure TAppController.RefreshWindowEntries;
+var
+  Content: TShareableContent;
+  Info: TWindowInfo;
+  I, Added: Integer;
+begin
+  SetLength(FWindowEntries, 0);
+  FWindowEntriesAt := Now;
+  FWindowEntriesValid := True;
+  FWindowListFailed := False;
+  Content := nil;
+  try
+    // Every exception, not just EShareableContent: this runs inside
+    // AppKit's menu tracking, where the app's usual Fail path would
+    // rewrite the status item under an open menu.
+    try
+      Content := TShareableContent.CreateWithin(WindowListTimeoutSeconds);
+    except
+      on E: Exception do
+      begin
+        FWindowListFailed := True;
+        // The log is the full story; the menu gets one flat line.
+        LogMessage('window list: ' + E.Message);
+        Exit;
+      end;
+    end;
+    Added := 0;
+    for I := 0 to Content.WindowCount - 1 do
+    begin
+      if Added >= MaxWindowMenuEntries then
+        Break;
+      Info := Content.WindowAt(I);
+      if not IsWindowRecordable(Info.OnScreen, Info.Layer, Info.Width,
+        Info.Height, Info.Title, Info.ProcessID = FProcessID) then
+        Continue;
+      SetLength(FWindowEntries, Added + 1);
+      FWindowEntries[Added].WindowID := Info.WindowID;
+      FWindowEntries[Added].Title := WindowMenuItemTitle(
+        Info.ApplicationName, Info.Title);
+      Inc(Added);
+    end;
+  finally
+    Content.Free;
+  end;
+end;
+
+// Runs from menuNeedsUpdate:, just before AppKit shows the submenu.
+// Nothing in here may raise into AppKit, call Fail, or touch the status
+// item: the menu is open and being tracked.
+procedure TAppController.RebuildWindowMenu;
+var
+  Item: NSMenuItem;
+  I: Integer;
+begin
+  if FWindowMenu = nil then
+    Exit;
+  try
+    if not WindowEntriesFresh then
+      RefreshWindowEntries;
+    FWindowMenu.removeAllItems;
+    if FWindowListFailed then
+    begin
+      AddInertItem(FWindowMenu, NoWindowListTitle);
+      Exit;
+    end;
+    if Length(FWindowEntries) = 0 then
+    begin
+      AddInertItem(FWindowMenu, NoWindowsTitle);
+      Exit;
+    end;
+    for I := 0 to High(FWindowEntries) do
+    begin
+      Item := NSMenuItem(NSMenuItem.alloc.initWithTitle_action_keyEquivalent(
+        PascalToNSString(FWindowEntries[I].Title),
+        SelectorNamed(RecordWindowSelector), PascalToNSString('')));
+      Item.setTarget(FTarget);
+      // The tag is how recordWindow: learns which window was picked;
+      // a CGWindowID is 32-bit and an NSInteger is 64, so it fits.
+      Item.setTag(NSInteger(FWindowEntries[I].WindowID));
+      Item.setEnabled(True);
+      FWindowMenu.addItem(Item);
+      Item.release;
+    end;
+  except
+    on E: Exception do
+    begin
+      // Last resort. Reporting through Fail would rewrite the status
+      // item's menu while this one is on screen.
+      LogMessage('rebuilding the window menu: ' + E.Message);
+      try
+        FWindowMenu.removeAllItems;
+        AddInertItem(FWindowMenu, NoWindowListTitle);
+      except
+        // Nothing left to try.
+      end;
+    end;
+  end;
 end;
 
 function TAppController.Setup(out AError: string): Boolean;
@@ -548,6 +933,9 @@ begin
   end;
   SetPointerIvar(FTarget, OwnerIvarName, Self);
 
+  FProcessID := NSProcessInfo.processInfo.processIdentifier;
+  LoadPreferences;
+
   FStatusItem := NSStatusBar.systemStatusBar.statusItemWithLength(
     NSVariableStatusItemLength);
   if FStatusItem = nil then
@@ -567,6 +955,8 @@ begin
 
   FCamera := TCameraPreview.Create;
   FCamera.OnError := HandleCameraError;
+  FBorder := TRecordingBorder.Create;
+  FBorder.OnError := HandleOverlayError;
 
   RefreshStatusItem;
   // Deferred, not inline: starting an AVCaptureSession blocks for the
@@ -575,6 +965,114 @@ begin
   if TCameraPreview.ShouldRestore then
     ScheduleOneShot(RestoreCameraSelector);
   Result := True;
+end;
+
+{ Preferences. Two settings, both plain scalars, both written straight
+  through — NSUserDefaults flushes on its own schedule and the app has
+  nothing to lose if a crash beats it to disk. }
+
+procedure TAppController.LoadPreferences;
+var
+  Defaults: NSUserDefaults;
+  Stored: TCaptureRegion;
+begin
+  Defaults := NSUserDefaults.standardUserDefaults;
+  FSystemAudio := Defaults.boolForKey(PascalToNSString(SystemAudioKey));
+  FLastRegionDisplayID := UInt32(Defaults.integerForKey(
+    PascalToNSString(LastRegionDisplayKey)));
+  Stored.Left := Integer(Defaults.integerForKey(
+    PascalToNSString(LastRegionLeftKey)));
+  Stored.Top := Integer(Defaults.integerForKey(
+    PascalToNSString(LastRegionTopKey)));
+  Stored.Width := Integer(Defaults.integerForKey(
+    PascalToNSString(LastRegionWidthKey)));
+  Stored.Height := Integer(Defaults.integerForKey(
+    PascalToNSString(LastRegionHeightKey)));
+  // `defaults write` is a public interface and these keys are not this
+  // app's private business; whatever is under them has to be treated as
+  // input, not as something we wrote. A negative origin would otherwise
+  // reach ScreenCaptureKit's sourceRect unexamined.
+  FHasLastRegion := SanitizeStoredRegion(Stored, FLastRegion);
+  // A region without the display it was drawn on is unusable. Whether
+  // that display is still attached is settled at StartPending, which
+  // resolves it against ScreenCaptureKit like any other recording.
+  if FLastRegionDisplayID = 0 then
+  begin
+    FHasLastRegion := False;
+    FLastRegion := Default(TCaptureRegion);
+  end;
+end;
+
+procedure TAppController.StoreSystemAudio;
+begin
+  NSUserDefaults.standardUserDefaults.setBool_forKey(ObjCBOOL(FSystemAudio),
+    PascalToNSString(SystemAudioKey));
+end;
+
+procedure TAppController.StoreLastRegion;
+var
+  Defaults: NSUserDefaults;
+begin
+  Defaults := NSUserDefaults.standardUserDefaults;
+  Defaults.setInteger_forKey(NSInteger(FLastRegionDisplayID),
+    PascalToNSString(LastRegionDisplayKey));
+  Defaults.setInteger_forKey(FLastRegion.Left,
+    PascalToNSString(LastRegionLeftKey));
+  Defaults.setInteger_forKey(FLastRegion.Top,
+    PascalToNSString(LastRegionTopKey));
+  Defaults.setInteger_forKey(FLastRegion.Width,
+    PascalToNSString(LastRegionWidthKey));
+  Defaults.setInteger_forKey(FLastRegion.Height,
+    PascalToNSString(LastRegionHeightKey));
+end;
+
+procedure TAppController.ClearPending;
+begin
+  FPendingDisplayID := 0;
+  FPendingHasRegion := False;
+  FPendingRegion := Default(TCaptureRegion);
+  FPendingWindowID := 0;
+end;
+
+function TAppController.ShowBorderForPending: Cardinal;
+begin
+  Result := 0;
+  if (FBorder = nil) or not FPendingHasRegion or (FPendingDisplayID = 0) then
+    Exit;
+  // A border that will not come up is not worth failing a recording over;
+  // the recording simply runs without one.
+  if not FBorder.Show(FPendingDisplayID, FPendingRegion) then
+    Exit;
+  Result := FBorder.WindowID;
+end;
+
+procedure TAppController.HideBorder;
+begin
+  if (FBorder <> nil) and FBorder.Visible then
+    FBorder.Hide;
+end;
+
+procedure TAppController.ShowPlayback(const APath: string; APixelWidth,
+  APixelHeight: Integer);
+begin
+  if FPlayback = nil then
+  begin
+    FPlayback := TPlaybackWindow.Create;
+    FPlayback.OnError := HandlePlaybackError;
+  end;
+  // One window per recording: Show closes whatever was open first, so a
+  // second clip replaces the first rather than stacking players that all
+  // hold their files open.
+  if not FPlayback.Show(FTarget, APath, APixelWidth, APixelHeight) then
+    // Falling back to the old behaviour is better than a finished
+    // recording that never says so.
+    Reveal(APath);
+end;
+
+procedure TAppController.HandlePlaybackError(const AMessage: string);
+begin
+  RecordError(AMessage);
+  RefreshStatusItem;
 end;
 
 function TAppController.ElapsedSeconds: Int64;
@@ -600,6 +1098,16 @@ begin
 
   FRegionItem.setEnabled(IsCommandEnabled(FState, acRecordRegion));
   FDisplayItem.setEnabled(IsCommandEnabled(FState, acRecordDisplay));
+  FWindowItem.setEnabled(IsCommandEnabled(FState, acRecordWindow));
+  // The table says when the command could be legal; the region on file
+  // says whether there is anything to repeat.
+  FLastRegionItem.setEnabled(FHasLastRegion
+    and IsCommandEnabled(FState, acRecordLastRegion));
+  FSystemAudioItem.setEnabled(IsCommandEnabled(FState, acToggleSystemAudio));
+  if FSystemAudio then
+    FSystemAudioItem.setState(NSOnState)
+  else
+    FSystemAudioItem.setState(NSOffState);
   FStopItem.setEnabled(IsCommandEnabled(FState, acStopRecording));
   FCancelItem.setEnabled(IsCommandEnabled(FState, acCancelSelection));
 
@@ -653,6 +1161,9 @@ begin
   // would have no way back, since the failing command is the one the
   // user just tried.
   Transition(acCaptureFailed);
+  // A frame left on screen with no recording behind it is a lie about
+  // what the app is doing.
+  HideBorder;
   RefreshStatusItem;
 end;
 
@@ -671,10 +1182,22 @@ begin
   RefreshStatusItem;
 end;
 
+function TAppController.Busy: Boolean;
+begin
+  Result := (FPlayback <> nil) and FPlayback.Exporting;
+end;
+
 function TAppController.Transition(ACommand: TAppCommand): Boolean;
 var
   Next: TAppState;
 begin
+  // The single global lockout. The GIF export owns the main thread but
+  // turns the run loop over once per whole percent so its progress can
+  // actually be drawn, and that hands AppKit the chance to dispatch a
+  // menu click into a controller that is halfway through something. No
+  // command is legal until the export gives the thread back.
+  if Busy then
+    Exit(False);
   Result := NextAppState(FState, ACommand, Next);
   if Result then
     FState := Next;
@@ -765,6 +1288,10 @@ begin
   if not Transition(acRecordRegion) then
     Exit;
   FLastError := '';
+  // The window id of a previous Record Window would otherwise still be
+  // sitting there when the drag commits, and StartPending would record
+  // that window instead of the rectangle just drawn.
+  ClearPending;
   Shown := False;
   try
     Shown := FOverlay.Show;
@@ -787,11 +1314,67 @@ begin
   if not Transition(acRecordDisplay) then
     Exit;
   FLastError := '';
-  FPendingDisplayID := 0;
-  FPendingHasRegion := False;
-  FPendingRegion := Default(TCaptureRegion);
+  ClearPending;
   RefreshStatusItem;
   ScheduleOneShot(StartPendingSelector);
+end;
+
+procedure TAppController.CommandRecordWindow(AWindowID: Cardinal);
+begin
+  if AWindowID = 0 then
+    Exit;
+  if not Transition(acRecordWindow) then
+    Exit;
+  FLastError := '';
+  ClearPending;
+  FPendingWindowID := AWindowID;
+  RefreshStatusItem;
+  ScheduleOneShot(StartPendingSelector);
+end;
+
+procedure TAppController.CommandRecordLastRegion;
+begin
+  if not FHasLastRegion then
+    Exit;
+  if not Transition(acRecordLastRegion) then
+    Exit;
+  FLastError := '';
+  ClearPending;
+  FPendingDisplayID := FLastRegionDisplayID;
+  FPendingHasRegion := True;
+  FPendingRegion := FLastRegion;
+  RefreshStatusItem;
+  ScheduleOneShot(StartPendingSelector);
+end;
+
+procedure TAppController.CommandToggleSystemAudio;
+begin
+  // The stream configuration is fixed once a capture has started, so the
+  // checkbox is a no-op anywhere but idle — the table says so, and this
+  // makes a stray click on a disabled item a no-op too.
+  if not Transition(acToggleSystemAudio) then
+    Exit;
+  FSystemAudio := not FSystemAudio;
+  StoreSystemAudio;
+  RefreshStatusItem;
+end;
+
+procedure TAppController.CommandExportGif;
+begin
+  if FPlayback <> nil then
+    FPlayback.CommandExportGif;
+end;
+
+procedure TAppController.CommandRevealRecording;
+begin
+  if FPlayback <> nil then
+    FPlayback.CommandReveal;
+end;
+
+procedure TAppController.CommandClosePlayback;
+begin
+  if FPlayback <> nil then
+    FPlayback.CommandClose;
 end;
 
 procedure TAppController.CommandCancelSelection;
@@ -809,6 +1392,7 @@ end;
 procedure TAppController.HandleRegionSelected(ADisplayID: UInt32;
   const ARegion: TCaptureRegion);
 begin
+  ClearPending;
   FPendingDisplayID := ADisplayID;
   FPendingHasRegion := True;
   FPendingRegion := ARegion;
@@ -830,6 +1414,7 @@ var
   Options: TRecordingOptions;
   Error: string;
   DisplayIndex: Integer;
+  BorderWindowID: Cardinal;
 begin
   if FState <> asRecording then
     Exit;
@@ -856,8 +1441,26 @@ begin
   Options.DisplayIndex := DisplayIndex;
   Options.HasRegion := FPendingHasRegion;
   Options.Region := FPendingRegion;
+  if FPendingWindowID <> 0 then
+  begin
+    Options.TargetKind := ctkWindow;
+    Options.WindowID := FPendingWindowID;
+  end;
+  if FSystemAudio then
+    Options.AudioMode := amSystem;
+  // The border has to exist before the content filter is built: its
+  // window id is what StartCapture hands to
+  // initWithDisplay:excludingWindows:. The frame is stroked outside the
+  // region either way, so a failed exclusion still cannot reach the file.
+  BorderWindowID := ShowBorderForPending;
+  if BorderWindowID <> 0 then
+  begin
+    SetLength(Options.ExcludedWindowIDs, 1);
+    Options.ExcludedWindowIDs[0] := BorderWindowID;
+  end;
   if not PrepareOutputPath(Options.OutputPath, Error) then
   begin
+    HideBorder;
     Transition(acCaptureFailed);
     RecordError(Error);
     RefreshStatusItem;
@@ -865,6 +1468,7 @@ begin
   end;
   if not ValidateRecordingOptions(Options, Error) then
   begin
+    HideBorder;
     Transition(acCaptureFailed);
     RecordError(Error);
     RefreshStatusItem;
@@ -875,6 +1479,7 @@ begin
   FSession := TRecordingSession.Create(Options);
   if not FSession.StartCapture(Error) then
   begin
+    HideBorder;
     FreeAndNil(FSession);
     Transition(acCaptureFailed);
     // One shot: a denied Screen Recording grant fails the same way every
@@ -882,6 +1487,27 @@ begin
     RecordError(Error);
     RefreshStatusItem;
     Exit;
+  end;
+
+  // The frame is drawn outside the recorded rectangle either way, so a
+  // window ScreenCaptureKit did not resolve is not a failure — but it is
+  // the first thing worth knowing if a border ever does turn up in a
+  // file, and silence would make that unfindable.
+  if Length(Options.ExcludedWindowIDs) > FSession.Report.ExcludedWindows then
+    LogMessage(Format('the recording border was not excluded from the '
+      + 'capture (%d of %d windows resolved); the frame is drawn outside '
+      + 'the recorded region, so the file is unaffected',
+      [FSession.Report.ExcludedWindows, Length(Options.ExcludedWindowIDs)]));
+
+  // Only once the capture is really running, so a repeat of a region that
+  // no longer resolves does not become the region to repeat.
+  if FPendingHasRegion and (FPendingDisplayID <> 0) then
+  begin
+    FLastRegionDisplayID := FPendingDisplayID;
+    FLastRegion := FPendingRegion;
+    FHasLastRegion := IsSelectionUsable(FLastRegion);
+    if FHasLastRegion then
+      StoreLastRegion;
   end;
 
   FStartedAt := Now;
@@ -909,26 +1535,36 @@ begin
   // saw the idle state and did nothing. Nothing to finish, nothing to
   // report.
   if FSession <> nil then
-    FinishRecording;
+    FinishRecording(True);
 end;
 
-procedure TAppController.FinishRecording;
+procedure TAppController.FinishRecording(AShowPlayback: Boolean);
 var
   Error, Path: string;
   Finished: Boolean;
+  PixelWidth, PixelHeight: Integer;
 begin
   if FSession = nil then
     Exit;
+  // The frame goes first: it belongs to the recording, not to the
+  // finalisation, and finishing the writer pumps the run loop.
+  HideBorder;
   Path := FSession.Report.OutputPath;
+  PixelWidth := FSession.Report.PixelWidth;
+  PixelHeight := FSession.Report.PixelHeight;
   Finished := FSession.FinishCapture(Error);
   if not Finished then
     RecordError(Error);
   FreeAndNil(FSession);
   RefreshStatusItem;
-  // Revealing the file in Finder is the "done" signal; no notification
-  // permission, no extra framework.
-  if Finished and (Path <> '') then
-    Reveal(Path);
+  // Playing the clip back is the "done" signal, and the window is where
+  // the GIF export lives; a window that cannot be made falls back to
+  // revealing the file in Finder. On the way out there is no signal to
+  // give: Quit finalises the file and terminates, and a window (or a
+  // Finder window) flashing up on the last turn before terminate: is
+  // noise, not information.
+  if AShowPlayback and Finished and (Path <> '') then
+    ShowPlayback(Path, PixelWidth, PixelHeight);
 end;
 
 procedure TAppController.CommandRevealRecordings;
@@ -997,6 +1633,16 @@ end;
 
 procedure TAppController.CommandQuit;
 begin
+  // An export has the main thread and is only reachable here because it
+  // turns the run loop over to draw its progress. Tearing the process
+  // down underneath it would leave a half-written GIF; the user gets a
+  // reason and can quit again when it is done.
+  if Busy then
+  begin
+    RecordError('a GIF export is running; quit once it has finished');
+    RefreshStatusItem;
+    Exit;
+  end;
   if FState = asRecording then
   begin
     StopElapsedTimer;
@@ -1004,15 +1650,19 @@ begin
   end;
   // Quit cannot defer: terminate: does not come back, so an unfinished
   // writer would leave an unplayable file. Any session still open is
-  // finalised here, deferred start or not.
+  // finalised here, deferred start or not — silently: no playback
+  // window, no Finder, nothing that outlives the process by a frame.
   if FSession <> nil then
-    FinishRecording;
+    FinishRecording(False);
+  HideBorder;
   if (FOverlay <> nil) and FOverlay.Visible then
     FOverlay.Hide;
   // Hide writes the window's position back to NSUserDefaults, so quitting
   // from the menu is what makes "where I left it" survive a relaunch.
   if (FCamera <> nil) and FCamera.Visible then
     FCamera.Hide;
+  if FPlayback <> nil then
+    FPlayback.CommandClose;
   NSApplication.sharedApplication.terminate(nil);
 end;
 

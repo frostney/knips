@@ -35,8 +35,10 @@ uses
   CLI.Subcommands,
   {$IFDEF DARWIN}
   Knips.App,
+  Knips.App.Border,
   Knips.App.Camera,
   Knips.App.Overlay,
+  Knips.App.Playback,
   Knips.Capture.ShareableContent,
   Knips.Capture.Stream,
   Knips.Export.MovieTrim,
@@ -434,9 +436,19 @@ function CheckAppRuntimeClasses: Boolean;
       WriteLn(AClassName, ': no implementation for ', ASelector);
   end;
 
+const
+  // Every action AppKit will dispatch on the target: the menu items, the
+  // status-item button, the deferred one-shots, the playback window's
+  // buttons, and the Record Window submenu's delegate callback.
+  TargetSelectors: array[0..15] of string = (
+    'recordRegion:', 'recordDisplay:', 'recordWindow:', 'recordLastRegion:',
+    'toggleSystemAudio:', 'stopRecording:', 'cancelSelection:',
+    'revealRecordings:', 'quitKnips:', 'timerFired:', 'startPending:',
+    'stopPending:', 'menuNeedsUpdate:', 'exportGif:', 'revealRecording:',
+    'closePlayback:');
 var
   Instance: id;
-  Selector: string;
+  I: Integer;
 begin
   Result := False;
   if not HasMethod(OverlayViewClassName, 'drawRect:') then
@@ -450,7 +462,10 @@ begin
   // reports and everybody blames on themselves.
   if not HasMethod(CameraViewClassName, 'acceptsFirstMouse:') then
     Exit;
-  Selector := 'stopRecording:';
+  if not HasMethod(BorderViewClassName, 'drawRect:') then
+    Exit;
+  if not HasMethod(PlaybackDelegateClassName, 'windowWillClose:') then
+    Exit;
   Instance := InstantiateClass(LookUpClass(AppTargetClassName));
   if Instance = nil then
   begin
@@ -458,17 +473,20 @@ begin
     Exit;
   end;
   try
-    if not RespondsToSelector(Instance, Selector) then
-    begin
-      WriteLn(AppTargetClassName, ': does not respond to ', Selector);
-      Exit;
-    end;
+    for I := Low(TargetSelectors) to High(TargetSelectors) do
+      if not RespondsToSelector(Instance, TargetSelectors[I]) then
+      begin
+        WriteLn(AppTargetClassName, ': does not respond to ',
+          TargetSelectors[I]);
+        Exit;
+      end;
   finally
     ReleaseInstance(Instance);
   end;
   WriteLn('runtime classes ', AppTargetClassName, ', ',
     OverlayViewClassName, ', ', OverlayWindowClassName, ', ',
-    CameraViewClassName, ': registered and answering');
+    CameraViewClassName, ', ', BorderViewClassName, ', ',
+    PlaybackDelegateClassName, ': registered and answering');
   Result := True;
 end;
 

@@ -40,6 +40,9 @@ type
     DroppedFrames: Int64;
     FailedAppends: Int64;
     AudioMode: TAudioMode;
+    // How many of the requested ExcludedWindowIDs were still on screen
+    // and made it into the content filter.
+    ExcludedWindows: Integer;
     AppendedAudioSamples: Int64;
     DroppedAudioEarly: Int64;
     DroppedAudioStalled: Int64;
@@ -65,6 +68,10 @@ type
     function ResolveFilter(const AContent: TShareableContent;
       out AFilter: SCContentFilter; out AGeometry: TStreamGeometry;
       out AError: string): Boolean;
+    // The SCWindow objects behind FOptions.ExcludedWindowIDs, as the
+    // autoreleased array SCContentFilter wants. Empty when nothing was
+    // asked for, which is the array the filter took before.
+    function ExcludedWindows(const AContent: TShareableContent): NSArray;
     procedure ReleaseFilter;
     procedure RunUntilStopped;
   public
@@ -146,6 +153,33 @@ begin
     FWriter.AppendMicrophoneSample(ASampleBuffer);
 end;
 
+// A requested id that no longer names an on-screen window is skipped
+// rather than failing the recording: the window it stood for is gone, so
+// nothing of it can reach the capture anyway. The count that did make it
+// goes into the report, which is what the exclusion proof reads.
+function TRecordingSession.ExcludedWindows(
+  const AContent: TShareableContent): NSArray;
+var
+  Excluded: NSMutableArray;
+  Window: SCWindow;
+  I: Integer;
+begin
+  Excluded := NSMutableArray.arrayWithCapacity(
+    Length(FOptions.ExcludedWindowIDs));
+  FReport.ExcludedWindows := 0;
+  for I := 0 to High(FOptions.ExcludedWindowIDs) do
+  begin
+    Window := AContent.RetainWindow(FOptions.ExcludedWindowIDs[I]);
+    if Window = nil then
+      Continue;
+    // addObject: retains; this balances RetainWindow's own retain.
+    Excluded.addObject(id(Window));
+    Window.release;
+    Inc(FReport.ExcludedWindows);
+  end;
+  Result := Excluded;
+end;
+
 function TRecordingSession.ResolveFilter(const AContent: TShareableContent;
   out AFilter: SCContentFilter; out AGeometry: TStreamGeometry;
   out AError: string): Boolean;
@@ -219,7 +253,7 @@ begin
         end;
         AFilter := SCContentFilter(
           SCContentFilter.alloc.initWithDisplay_excludingWindows(Display,
-          NSArray.array_));
+          ExcludedWindows(AContent)));
       finally
         Display.release;
       end;
