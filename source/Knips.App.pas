@@ -41,6 +41,7 @@ uses
   SysUtils,
 
   CocoaAll,
+  Knips.App.Camera,
   Knips.App.Overlay,
   Knips.App.State,
   Knips.Capture.ShareableContent,
@@ -83,6 +84,8 @@ const
   TimerFiredSelector = 'timerFired:';
   StartPendingSelector = 'startPending:';
   StopPendingSelector = 'stopPending:';
+  ToggleCameraSelector = 'toggleCamera:';
+  RestoreCameraSelector = 'restoreCamera:';
 
   RecordRegionTitle = 'Record Region…';
   RecordDisplayTitle = 'Record Display';
@@ -117,10 +120,12 @@ type
     FStopItem: NSMenuItem;
     FCancelItem: NSMenuItem;
     FRevealItem: NSMenuItem;
+    FCameraItem: NSMenuItem;
     FErrorItem: NSMenuItem;
     FQuitItem: NSMenuItem;
     FTimer: NSTimer;
     FOverlay: TSelectionOverlay;
+    FCamera: TCameraPreview;
     FSession: TRecordingSession;
     FStartedAt: TDateTime;
     FLastError: string;
@@ -147,6 +152,7 @@ type
       const ARegion: TCaptureRegion);
     procedure HandleSelectionCancelled;
     procedure HandleOverlayError(const AMessage: string);
+    procedure HandleCameraError(const AMessage: string);
   public
     constructor Create;
     destructor Destroy; override;
@@ -157,6 +163,10 @@ type
     procedure CommandStop;
     procedure CommandCancelSelection;
     procedure CommandRevealRecordings;
+    procedure CommandToggleCamera;
+    // The launch-time restore, one run-loop turn after Setup, so the
+    // status item is in the menu bar before the camera warms up.
+    procedure CommandRestoreCamera;
     procedure CommandQuit;
     procedure Tick;
     procedure StartPending;
@@ -284,6 +294,53 @@ begin
   end;
 end;
 
+// The camera is passive UI: it never touches the recorder, so a failure
+// inside its two bodies is reported but must NOT drive the state machine
+// the way HandleBodyException does. Knocking a live recording to idle
+// because a preview layer refused to come up would lose the file.
+procedure HandleCameraBodyException(AController: TAppController;
+  const ASelector: string; E: Exception);
+begin
+  try
+    if AController <> nil then
+      AController.HandleCameraError(ASelector + ': ' + E.Message)
+    else
+      LogMessage(ASelector + ': ' + E.Message);
+  except
+    // Nothing left to try; swallowing beats unwinding into AppKit.
+  end;
+end;
+
+procedure TargetToggleCamera(ASelf: id; ACommand: SEL; ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandToggleCamera;
+  except
+    on E: Exception do
+      HandleCameraBodyException(Controller, ToggleCameraSelector, E);
+  end;
+end;
+
+procedure TargetRestoreCamera(ASelf: id; ACommand: SEL; ATimer: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandRestoreCamera;
+  except
+    on E: Exception do
+      HandleCameraBodyException(Controller, RestoreCameraSelector, E);
+  end;
+end;
+
 procedure TargetQuit(ASelf: id; ACommand: SEL; ASender: id); cdecl;
 var
   Controller: TAppController;
@@ -357,6 +414,10 @@ var
   Builder: TRuntimeClassBuilder;
 begin
   EnsureOverlayClasses;
+  // Registered here rather than lazily on the first Show, so `knips
+  // probe` — which calls this — fails on a bad class_addMethod instead of
+  // the user finding out from a camera window that will not drag.
+  EnsureCameraClasses;
   if GTargetClass <> nil then
     Exit;
   GTargetClass := LookUpClass(TargetClassName);
@@ -377,6 +438,8 @@ begin
     AddTargetMethod(Builder, TimerFiredSelector, @TargetTimerFired);
     AddTargetMethod(Builder, StartPendingSelector, @TargetStartPending);
     AddTargetMethod(Builder, StopPendingSelector, @TargetStopPending);
+    AddTargetMethod(Builder, ToggleCameraSelector, @TargetToggleCamera);
+    AddTargetMethod(Builder, RestoreCameraSelector, @TargetRestoreCamera);
     GTargetClass := Builder.Register;
   finally
     Builder.Free;
@@ -397,6 +460,7 @@ begin
   if FTarget <> nil then
     SetPointerIvar(FTarget, OwnerIvarName, nil);
   FreeAndNil(FOverlay);
+  FreeAndNil(FCamera);
   FreeAndNil(FSession);
   if FStatusItem <> nil then
   begin
@@ -449,6 +513,11 @@ begin
   // covers the menu bar, and inside it Esc or a stray click cancel.
   FCancelItem := AddMenuItem(CancelSelectionTitle, CancelSelectionSelector);
   FMenu.addItem(NSMenuItem.separatorItem);
+  // Legal in every state on purpose: the camera window is passive — it is
+  // captured by ScreenCaptureKit like any other window and touches
+  // nothing the recorder owns — and mid-recording is exactly when the
+  // user is most likely to want it on or off.
+  FCameraItem := AddMenuItem(CameraMenuTitle, ToggleCameraSelector);
   FRevealItem := AddMenuItem(RevealRecordingsTitle, RevealRecordingsSelector);
   FErrorItem := AddMenuItem(ErrorMenuTitle(''), '');
   FErrorItem.setEnabled(False);
@@ -496,7 +565,15 @@ begin
   FOverlay.OnCancelled := HandleSelectionCancelled;
   FOverlay.OnError := HandleOverlayError;
 
+  FCamera := TCameraPreview.Create;
+  FCamera.OnError := HandleCameraError;
+
   RefreshStatusItem;
+  // Deferred, not inline: starting an AVCaptureSession blocks for the
+  // better part of a second, and the status item should be in the menu
+  // bar before that happens.
+  if TCameraPreview.ShouldRestore then
+    ScheduleOneShot(RestoreCameraSelector);
   Result := True;
 end;
 
@@ -512,6 +589,7 @@ end;
 procedure TAppController.RefreshStatusItem;
 var
   Button: NSStatusBarButton;
+  CameraVisible: Boolean;
 begin
   if FStatusItem = nil then
     Exit;
@@ -524,6 +602,11 @@ begin
   FDisplayItem.setEnabled(IsCommandEnabled(FState, acRecordDisplay));
   FStopItem.setEnabled(IsCommandEnabled(FState, acStopRecording));
   FCancelItem.setEnabled(IsCommandEnabled(FState, acCancelSelection));
+
+  // Not part of the state machine — see BuildMenu. The title is constant;
+  // the checkmark is what says whether the window is up.
+  CameraVisible := (FCamera <> nil) and FCamera.Visible;
+  FCameraItem.setState(CameraMenuState(CameraVisible));
 
   if FLastError <> '' then
   begin
@@ -574,6 +657,15 @@ begin
 end;
 
 procedure TAppController.HandleOverlayError(const AMessage: string);
+begin
+  RecordError(AMessage);
+  RefreshStatusItem;
+end;
+
+// Deliberately not Fail: the camera has no bearing on whether a recording
+// can continue, so a refused grant becomes a "Last error" line and
+// nothing else.
+procedure TAppController.HandleCameraError(const AMessage: string);
 begin
   RecordError(AMessage);
   RefreshStatusItem;
@@ -854,6 +946,55 @@ begin
     PascalToNSString(Directory)));
 end;
 
+// The one command that is legal in every state. It does not go through
+// the transition table at all — there is no camera state to be in.
+procedure TAppController.CommandToggleCamera;
+begin
+  if FCamera = nil then
+    Exit;
+  FLastError := '';
+  if FCamera.Visible then
+  begin
+    FCamera.Hide;
+    TCameraPreview.RememberVisible(False);
+    RefreshStatusItem;
+    Exit;
+  end;
+
+  // Mid-recording, only an already-granted camera may be started. An
+  // undecided status would put a system permission prompt over the very
+  // thing being recorded, and asking for the camera is the one moment a
+  // recording could plausibly be interrupted — measured not to kill this
+  // binary (docs/spikes/0001, "Camera"), but a preview toggle has no
+  // business being anywhere near that risk while a file is open.
+  if (FState = asRecording) and not TCameraPreview.IsAuthorized then
+  begin
+    HandleCameraError('grant camera access before recording starts');
+    Exit;
+  end;
+
+  // Persist the *user's* answer either way. Remembering True after a
+  // refused Show would make every later launch re-attempt and re-fail —
+  // a revoked grant would put an error in the menu on every start with
+  // no way to stop it. One click always turns it back on.
+  TCameraPreview.RememberVisible(FCamera.Show);
+  RefreshStatusItem;
+end;
+
+procedure TAppController.CommandRestoreCamera;
+begin
+  if (FCamera = nil) or FCamera.Visible then
+    Exit;
+  // Authorized only. A NotDetermined status here would fire a permission
+  // prompt the user never asked for, seconds after login, and still not
+  // restore anything. The stored preference stays on, so the camera comes
+  // back by itself on the first launch after the grant is given.
+  if not TCameraPreview.IsAuthorized then
+    Exit;
+  FCamera.Show;
+  RefreshStatusItem;
+end;
+
 procedure TAppController.CommandQuit;
 begin
   if FState = asRecording then
@@ -868,6 +1009,10 @@ begin
     FinishRecording;
   if (FOverlay <> nil) and FOverlay.Visible then
     FOverlay.Hide;
+  // Hide writes the window's position back to NSUserDefaults, so quitting
+  // from the menu is what makes "where I left it" survive a relaunch.
+  if (FCamera <> nil) and FCamera.Visible then
+    FCamera.Hide;
   NSApplication.sharedApplication.terminate(nil);
 end;
 

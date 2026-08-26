@@ -8,6 +8,12 @@
 # process that actually asks, which here is Contents/MacOS/knips-bin, not
 # the bundle. See docs/deployment.md.
 #
+# NSCameraUsageDescription is what lets macOS prompt for Knips by name
+# when the menu bar's camera window is switched on. Measured on device
+# (docs/spikes/0001): a bundle-less binary without the key is NOT killed
+# — it is silently refused, which is worse to debug. Screen Recording
+# needs no such key; the camera does.
+#
 # CFBundleExecutable is the binary itself, NOT a launcher script: a
 # script that execs the binary breaks the LaunchServices handshake
 # AppKit needs before the menu bar will adopt a status item (seen on
@@ -70,6 +76,8 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <string>13.0</string>
   <key>LSUIElement</key>
   <true/>
+  <key>NSCameraUsageDescription</key>
+  <string>Knips shows your camera in a floating window so it can be part of your recording.</string>
   <key>NSHighResolutionCapable</key>
   <true/>
 </dict>

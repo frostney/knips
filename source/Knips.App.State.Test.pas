@@ -58,6 +58,19 @@ type
     procedure TestEmptyMessageStillReads;
   end;
 
+  TCameraTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestTheCheckmarkFollowsTheWindow;
+    procedure TestDefaultIsBottomRightOfTheVisibleFrame;
+    procedure TestDefaultHonoursANonZeroScreenOrigin;
+    procedure TestDefaultStaysOnATinyScreen;
+    procedure TestASavedOriginOnTheScreenIsUsable;
+    procedure TestAnOriginOnAVanishedScreenIsNot;
+    procedure TestAMostlyOffScreenOriginIsNot;
+    procedure TestAnOriginUnderTheDockIsNot;
+  end;
+
 { TTransitionTests }
 
 procedure TTransitionTests.SetupTests;
@@ -324,12 +337,121 @@ begin
     + 'unknown error');
 end;
 
+{ TCameraTests }
+
+procedure TCameraTests.SetupTests;
+begin
+  Test('the camera item''s checkmark follows the window',
+    TestTheCheckmarkFollowsTheWindow);
+  Test('the default origin is the visible frame''s bottom right',
+    TestDefaultIsBottomRightOfTheVisibleFrame);
+  Test('the default origin honours a secondary screen''s origin',
+    TestDefaultHonoursANonZeroScreenOrigin);
+  Test('the default origin stays on a screen smaller than the window',
+    TestDefaultStaysOnATinyScreen);
+  Test('a saved origin on an attached screen is kept',
+    TestASavedOriginOnTheScreenIsUsable);
+  Test('a saved origin from a vanished screen is rejected',
+    TestAnOriginOnAVanishedScreenIsNot);
+  Test('a saved origin with only a sliver on screen is rejected',
+    TestAMostlyOffScreenOriginIsNot);
+  Test('a saved origin that would restore under the Dock is rejected',
+    TestAnOriginUnderTheDockIsNot);
+end;
+
+procedure TCameraTests.TestTheCheckmarkFollowsTheWindow;
+begin
+  Expect<Integer>(CameraMenuState(False)).ToBe(MenuItemStateOff);
+  Expect<Integer>(CameraMenuState(True)).ToBe(MenuItemStateOn);
+  // The title never flips; the checkmark is the whole signal.
+  Expect<string>(CameraMenuTitle).ToBe('Camera');
+end;
+
+procedure TCameraTests.TestDefaultIsBottomRightOfTheVisibleFrame;
+var
+  Origin: TCameraOrigin;
+begin
+  // A 1440x900 screen whose visible frame excludes a 25 pt menu bar.
+  Origin := DefaultCameraOrigin(0, 0, 1440, 875);
+  Expect<Double>(Origin.X)
+    .ToBe(1440 - CameraWindowWidth - CameraWindowMargin);
+  Expect<Double>(Origin.Y).ToBe(CameraWindowMargin);
+end;
+
+procedure TCameraTests.TestDefaultHonoursANonZeroScreenOrigin;
+var
+  Origin: TCameraOrigin;
+begin
+  // A display to the right of the main one starts at x = 1440.
+  Origin := DefaultCameraOrigin(1440, -200, 1920, 1080);
+  Expect<Double>(Origin.X)
+    .ToBe(1440 + 1920 - CameraWindowWidth - CameraWindowMargin);
+  Expect<Double>(Origin.Y).ToBe(-200 + CameraWindowMargin);
+end;
+
+procedure TCameraTests.TestDefaultStaysOnATinyScreen;
+var
+  Origin: TCameraOrigin;
+begin
+  Origin := DefaultCameraOrigin(0, 0, CameraWindowWidth div 2,
+    CameraWindowHeight div 2);
+  Expect<Double>(Origin.X).ToBe(0);
+  Expect<Double>(Origin.Y).ToBe(0);
+end;
+
+procedure TCameraTests.TestASavedOriginOnTheScreenIsUsable;
+var
+  Origin: TCameraOrigin;
+begin
+  Origin.X := 100;
+  Origin.Y := 100;
+  Expect<Boolean>(IsCameraOriginUsable(Origin, 0, 0, 1440, 900)).ToBe(True);
+end;
+
+procedure TCameraTests.TestAnOriginOnAVanishedScreenIsNot;
+var
+  Origin: TCameraOrigin;
+begin
+  // Saved while a second display sat to the right; that display is gone.
+  Origin.X := 2000;
+  Origin.Y := 400;
+  Expect<Boolean>(IsCameraOriginUsable(Origin, 0, 0, 1440, 900)).ToBe(False);
+end;
+
+procedure TCameraTests.TestAMostlyOffScreenOriginIsNot;
+var
+  Origin: TCameraOrigin;
+begin
+  // Only MinVisibleCameraExtent - 1 points of width remain on screen.
+  Origin.X := 1440 - (MinVisibleCameraExtent - 1);
+  Origin.Y := 100;
+  Expect<Boolean>(IsCameraOriginUsable(Origin, 0, 0, 1440, 900)).ToBe(False);
+  Origin.X := 1440 - MinVisibleCameraExtent;
+  Expect<Boolean>(IsCameraOriginUsable(Origin, 0, 0, 1440, 900)).ToBe(True);
+end;
+
+// The reason the caller passes visibleFrame and not frame: the camera
+// window floats at level 3 and the Dock sits at 20, so a position the
+// Dock now covers is unreachable — the user could neither see nor drag
+// it. Judged against the full frame the same origin looks fine.
+procedure TCameraTests.TestAnOriginUnderTheDockIsNot;
+var
+  Origin: TCameraOrigin;
+begin
+  Origin.X := 100;
+  Origin.Y := -100;
+  Expect<Boolean>(IsCameraOriginUsable(Origin, 0, 0, 1440, 900)).ToBe(True);
+  // Same screen with a 70 pt Dock along the bottom.
+  Expect<Boolean>(IsCameraOriginUsable(Origin, 0, 70, 1440, 805)).ToBe(False);
+end;
+
 begin
   TestRunnerProgram.AddSuite(TTransitionTests.Create('NextAppState'));
   TestRunnerProgram.AddSuite(TTitleTests.Create('StatusItemTitle'));
   TestRunnerProgram.AddSuite(TOutputTests.Create('recording output paths'));
   TestRunnerProgram.AddSuite(TSelectionTests.Create('selection geometry'));
   TestRunnerProgram.AddSuite(TErrorTitleTests.Create('ErrorMenuTitle'));
+  TestRunnerProgram.AddSuite(TCameraTests.Create('camera window placement'));
   TestRunnerProgram.Run;
   ExitCode := TestResultToExitCode;
 end.

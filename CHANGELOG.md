@@ -15,6 +15,12 @@ conventional commits by git-cliff (`cliff.toml`).
   `Knips.app`.
 - `record --audio=system`: system audio through ScreenCaptureKit into an
   AAC track of the same file (48 kHz stereo, 128 kbit/s).
+- `app`: a **Camera** item puts a small, round-cornered, floating camera
+  window on screen. Drag it anywhere — inside the region you are
+  recording, and ScreenCaptureKit captures it like any other window. Its
+  position and its on/off state survive a relaunch, and it stays up
+  across recordings. Needs the Camera grant; `tools/make-app.sh` now
+  writes `NSCameraUsageDescription` into the bundle.
 - `export` from `.mp4`/`.mov` to an animated GIF: median-cut palette,
   Floyd–Steinberg dithering and LZW in pure Pascal, with `--fps`,
   `--width`, and `--trim=start,end`.

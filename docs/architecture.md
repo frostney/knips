@@ -53,7 +53,7 @@
 | Layer | Units | Notes |
 | --- | --- | --- |
 | CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `export`, `displays`, `windows`, `probe`; SIGINT/SIGTERM → `StopRequested` |
-| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.State` | Status item + menu, selection overlay, and the neutral state machine (tested) |
+| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Camera`, `Knips.App.State` | Status item + menu, selection overlay, the camera picture-in-picture window, and the neutral state machine (tested) |
 | Recording | `Knips.Recording` | Target → filter + geometry → writer → stream; progress; report |
 | Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
 | Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.GifPipeline` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; the two-pass GIF export |
@@ -242,18 +242,22 @@ the thread to `NSApplication.run`. There is one state machine:
 maths; it is platform-neutral and has a co-located suite, so the only
 untested part of the app is the Cocoa plumbing.
 
-Three more classes are built through `Knips.ObjC.Runtime`, none of them
+Four more classes are built through `Knips.ObjC.Runtime`, none of them
 an `objcclass`:
 
 | Runtime class | Superclass | Methods |
 | --- | --- | --- |
-| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:` |
+| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `toggleCamera:`, `restoreCamera:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:` |
 | `KnipsOverlayView` | `NSView` | `drawRect:`, `mouseDown:`, `mouseDragged:`, `mouseUp:`, `keyDown:`, `acceptsFirstResponder` |
 | `KnipsOverlayWindow` | `NSWindow` | `canBecomeKeyWindow` (a borderless window answers NO, and then Esc never reaches the view) |
+| `KnipsCameraView` | `NSView` | `acceptsFirstMouse:` (Knips is an Accessory app, so without it the first click on the camera window is eaten as the activating click and dragging takes two) |
 
-Each carries an `knipsOwner` pointer ivar back to the owning Pascal
-object, cleared before the Objective-C instance goes away — the same rule
-as the stream output object. `KnipsOverlayView` adds an `knipsIndex`
+`KnipsCameraView` is the exception to what follows: it has no ivar and no
+`try..except`, because its one body returns a constant and never calls
+back into Pascal. The other three each carry an `knipsOwner` pointer ivar
+back to the owning Pascal object, cleared before the Objective-C instance
+goes away — the same rule as the stream output object.
+`KnipsOverlayView` adds an `knipsIndex`
 ivar holding the screen's index, so one overlay object serves every
 display.
 
@@ -309,9 +313,90 @@ drawing, event dispatch and run loop all sit above these bodies. What is
 caught becomes a message on the same NSLog + "Last error" path, and the
 method returns normally.
 
+**The camera window.** *Camera* puts a 240×180 borderless window at
+`kCGFloatingWindowLevel` on screen, its content view hosting an
+`AVCaptureVideoPreviewLayer` (`resize-aspect-fill`, 8 pt corner radius,
+`masksToBounds`) fed by an `AVCaptureSession` on
+`defaultDeviceWithMediaType:AVMediaTypeVideo`. It is
+`movableByWindowBackground`, so the whole picture is the drag handle, and
+it joins all Spaces the way the overlay does.
+
+Knips does **no** compositing: the camera is simply a window, and
+ScreenCaptureKit records it because it is on the display, exactly as Kap
+does it. Nothing in `Knips.Recording` or `Knips.Export.MovieWriter`
+knows it exists. That is also why the toggle sits **outside** the state
+machine and is legal in every state — a passive window cannot fail a
+capture, and mid-recording is when the user is most likely to want it on
+or off. It keeps running across recordings; only Quit or a second click
+takes it down.
+
+`startRunning` blocks for the better part of a second while the camera
+warms up. This program has no `cthreads` and creates no queues of its
+own, so that hitch is taken on the main thread rather than dispatched;
+the launch-time restore is deferred by the same zero-delay `NSTimer` as
+`startPending:`, so the status item is in the menu bar before the camera
+warms up. The one piece of foreign-thread code is the
+`requestAccessForMediaType:completionHandler:` block, a global `cdecl`
+procedure that writes two plain Booleans — the capture-queue rules
+again.
+
+The Camera grant is TCC, per binary, like Screen Recording. `Show`
+consults `authorizationStatusForMediaType:` first: authorised builds the
+session, denied or restricted reports through the same `Last error:`
+path, and undecided asks **once**, asynchronously, and still refuses that
+attempt. There is no retry loop and never a black rectangle standing in
+for a camera.
+
+Two facts underneath that were measured, not assumed (recorded in
+[spike 0001](spikes/0001-runtime-objc-class.md)):
+
+- **A bundle-less binary is not killed.** The obvious fear — that a
+  missing `NSCameraUsageDescription` aborts the process, so *Camera*
+  during a recording would destroy the file — is false. `./build/knips`
+  survived `requestAccess`, `deviceInputWithDevice:error:` and
+  `startRunning` and exited 0. `tools/make-app.sh` writes the key anyway,
+  because it is what lets macOS prompt for Knips by name.
+- **A denied grant is invisible to the session.** `startRunning`
+  succeeds and `isRunning` answers YES with no access; the session just
+  never delivers a frame. Consulting the status first is the *only*
+  thing between the user and a black rectangle.
+
+Three call sites therefore refuse to touch the access path at all,
+gating on `TCameraPreview.IsAuthorized` instead of calling `Show` blind:
+the launch-time restore (a prompt seconds after login is not something
+the user asked for, and it would not restore anything either way), and
+any switch-on while `asRecording` (a permission dialog over the thing
+being recorded — belt and braces now that the kill is disproven). The
+menu item is still enabled in every state; switching the camera *off*
+is always allowed.
+
+Persistence is the user's answer, not the last attempt's outcome: a
+refused `Show` stores `False`, so a revoked grant cannot turn into an
+error on every launch forever with no way to stop it. One click always
+turns it back on.
+
+Position and visibility live in `NSUserDefaults`
+(`KnipsCameraOriginX/Y`, `KnipsCameraVisible`), written when the window
+is hidden or the app quits. A restored origin is checked against every
+attached screen's **`visibleFrame`** — `IsCameraOriginUsable` in
+`Knips.App.State`, tested — so a position saved on a display that has
+since been unplugged, or one the Dock has since taken, falls back to the
+bottom right of the main screen. `visibleFrame` rather than `frame`
+because the window floats at level 3 and the Dock sits at 20: under the
+Dock it would be neither visible nor draggable.
+
+The layer's `contentsScale` is pinned at `Show`. Dragging the window
+between a Retina and a non-Retina display leaves it rendering at the old
+scale until it is switched off and on again; tracking it would mean an
+`NSWindowDidChangeBackingProperties` observer — another runtime-built
+class and another owner ivar — for something one menu click fixes.
+
 **Errors.** A failed capture — a denied Screen Recording grant is the
 common one — goes to `NSLog` and to a disabled `Last error: …` menu item,
 and the app returns to idle. It never retries and never opens a dialog.
+The camera's failures take the same two outputs but *not* the transition:
+`HandleCameraError` records and refreshes, where `Fail` would also drive
+`acCaptureFailed` and knock a live recording to idle over a preview layer.
 
 ## Timing and the writer session
 

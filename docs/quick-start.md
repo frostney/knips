@@ -6,7 +6,8 @@
 - `lwpt install` → `lwpt build` → `./build/knips probe` → `./build/knips
   record --out=demo.mp4`, Ctrl-C to stop.
 - `./build/knips app` is the menu-bar version: click the icon, drag a
-  rectangle, click again to stop.
+  rectangle, click again to stop. **Camera** adds a draggable floating
+  camera window that gets recorded along with everything else.
 - `./build/knips export --in=demo.mp4 --out=demo.gif` turns the
   recording into an animated GIF, optionally trimmed and scaled.
 - Grant Screen Recording on first run; a rebuilt binary re-prompts.
@@ -59,6 +60,7 @@ A `◉` appears in the menu bar. Clicking it opens:
 | Record Display | Records the main display straight away. |
 | Stop Recording | Enabled only while recording. |
 | Cancel selection | Enabled only while selecting. The overlay covers the menu bar, so this only matters if the overlay failed to open. |
+| Camera | Floating camera window; checked while it is up. Available in every state, recording included. |
 | Recordings folder | Opens `~/Movies/knips/` in Finder. |
 | Last error: … | Only visible after a failure; the full text is in Console.app. |
 | Quit Knips | Stops a running recording first. |
@@ -73,6 +75,49 @@ If Screen Recording has not been granted, the recording fails
 immediately, the icon goes back to `◉`, and the reason shows up as
 `Last error: …`. Knips does not retry — grant the permission in System
 Settings › Privacy & Security › Screen Recording and click again.
+
+## The camera window
+
+**Camera** puts a small rounded window with your camera in it at the
+bottom right of the main screen; the item carries a checkmark while it is
+up. Drag it from anywhere in the picture — there is no title bar — and
+drop it inside the region you are about to record: Knips does no
+compositing, the camera is simply a window and ScreenCaptureKit records
+it like any other. It floats above ordinary windows, follows you across
+Spaces, and stays up across recordings until you switch it off or quit.
+
+Where you left it and whether it was on are remembered, so — **once
+camera access is granted** — the next launch brings it back to the same
+corner. A position saved on a display that is no longer attached, or one
+the Dock has since covered, is discarded rather than restored somewhere
+you cannot reach. If access has *not* been granted, launch does nothing
+at all: Knips will not open a permission prompt seconds after login.
+
+The first time you switch it on, macOS asks for the **Camera**
+permission. Answer the prompt, then choose *Camera* again — Knips refuses
+that first attempt on purpose rather than showing you a black rectangle
+while it waits, and it never retries by itself. A denied grant reads as
+`Last error: camera access is denied …`; fix it in System Settings ›
+Privacy & Security › Camera. Like Screen Recording, the grant is per
+binary, so a rebuild re-prompts.
+
+**Use the bundle for the camera.** `tools/make-app.sh` writes the
+`NSCameraUsageDescription` that lets macOS prompt for Knips by name.
+Measured on device, a bundle-less `./build/knips` is not killed for
+lacking one — but it is silently refused, so *Camera* reports an error
+and never opens (see [spike 0001](spikes/0001-runtime-objc-class.md)).
+
+While a recording is running, the camera can only be switched **on** if
+access was already granted; otherwise you get `Last error: grant camera
+access before recording starts`. Switching it off always works.
+
+Two known limits, both cheap to work around:
+
+- The window renders at the scale of the display it opened on. Drag it
+  between a Retina and a non-Retina screen and it will look soft until
+  you switch it off and on again.
+- The position is written when the camera is switched off or Knips quits
+  from the menu. Force-quitting loses the last move.
 
 ## Exporting a GIF
 

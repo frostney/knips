@@ -62,6 +62,7 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | `source/Knips.App.State.pas` | Platform-neutral app state machine, titles, paths, selection maths (tested) |
 | `source/Knips.App.pas` | Menu-bar app: status item, menu, runtime-built `KnipsAppTarget` |
 | `source/Knips.App.Overlay.pas` | Region selection overlay; runtime-built `KnipsOverlayView`/`KnipsOverlayWindow` |
+| `source/Knips.App.Camera.pas` | Camera picture-in-picture window: AVCaptureSession + preview layer in a floating, draggable NSWindow |
 | `source/Knips.ObjC.TypeEncoding.pas` | Method type encodings for runtime classes (tested) |
 | `source/Knips.ObjC.Runtime.pas` | Runtime-built ObjC classes (the ADR-0002 primitive) |
 | `source/Knips.Capture.ShareableContent.pas` | Display/window enumeration via SCShareableContent |
@@ -101,6 +102,8 @@ and is tested on every host.
   `.lwpt/session-roots`, `.lwpt/install.lock`.
 - `record` writes to the path given and replaces an existing file without
   asking; `probe` writes and deletes `$TMPDIR/knips-probe.mp4`.
-- macOS permissions (Screen Recording) are per-binary; a fresh build
-  re-prompts. Test tooling never injects input — this is a recorder, not
-  lantaarn.
+- macOS permissions (Screen Recording, and Camera for the menu-bar app's
+  camera window) are per-binary; a fresh build re-prompts. A bundle that
+  uses the camera must carry `NSCameraUsageDescription` or macOS kills
+  the process — `tools/make-app.sh` writes it. Test tooling never injects
+  input — this is a recorder, not lantaarn.
