@@ -7,14 +7,31 @@ unit Knips.Export.MovieWriter;
 // the session starts at the first appended frame's PTS.
 //
 // With audio enabled the movie gains a second input: an AAC track fed
-// from ScreenCaptureKit's audio output, muxed by the same writer.
+// from ScreenCaptureKit's audio output, muxed by the same writer. The
+// microphone is a third input and a third track — nothing here mixes the
+// two audio sources, and a player picks the first track by default.
 //
-// Threading: AppendVideoSample and AppendAudioSample run on capture
-// queues (SCK uses a separate one per output type); Open and Finish run
-// on the main thread after the stream has stopped, so no two threads
-// touch the writer at once. Counters shared with the main thread — and
-// the two appends with each other — sit under a pthread mutex (no
-// cthreads in this program).
+// Both AAC inputs are configured with the same fully specified settings
+// dictionary (48 kHz stereo by default), whatever format the buffers
+// arrive in. AVAssetWriterInput.h requires exactly that: an audio
+// settings dictionary passed to
+// assetWriterInputWithMediaType:outputSettings: "must be fully
+// specified, meaning that it must contain AVFormatIDKey, AVSampleRateKey,
+// and AVNumberOfChannelsKey" — a bit-rate-only dictionary is legal only
+// with a sourceFormatHint. The same header constrains appended audio to
+// linear PCM and nothing more, and lists AVSampleRateConverterAudioQuality
+// as a settings key, so the input's encoder is what converts a mono or
+// 44.1 kHz microphone into the configured track. A mono source with
+// AVNumberOfChannelsKey = 2 is documented to produce stereo output. So
+// there is no per-buffer format inspection here, and no lazy input
+// creation under a capture callback.
+//
+// Threading: AppendVideoSample, AppendAudioSample and
+// AppendMicrophoneSample run on capture queues (SCK uses a separate one
+// per output type); Open and Finish run on the main thread after the
+// stream has stopped, so no two threads touch the writer at once.
+// Counters shared with the main thread — and the appends with each
+// other — sit under a pthread mutex (no cthreads in this program).
 
 {$I Shared.inc}
 
@@ -118,6 +135,13 @@ type
     DroppedAudioEarly: Int64;
     DroppedAudioStalled: Int64;
     FailedAudioAppends: Int64;
+    // The microphone track's own counters, same three causes. Kept apart
+    // from the system-audio ones so `--audio=both` can show which source
+    // is starving.
+    AppendedMicrophoneSamples: Int64;
+    DroppedMicrophoneEarly: Int64;
+    DroppedMicrophoneStalled: Int64;
+    FailedMicrophoneAppends: Int64;
     // True once the writer left Writing state; the recording is dead and
     // the main thread should stop instead of appending into it.
     WriterFailed: Boolean;
@@ -134,12 +158,14 @@ type
     FFramesPerSecond: Integer;
     FBitRate: Integer;
     FAudioEnabled: Boolean;
+    FMicrophoneEnabled: Boolean;
     FAudioSampleRate: Integer;
     FAudioChannelCount: Integer;
     FAudioBitRate: Integer;
     FWriter: AVAssetWriter;
     FInput: AVAssetWriterInput;
     FAudioInput: AVAssetWriterInput;
+    FMicrophoneInput: AVAssetWriterInput;
     FLock: TPThreadMutex;
     FSessionStarted: Boolean;
     FFirstTime: CMTime;
@@ -151,18 +177,36 @@ type
     FAudioDroppedEarly: Int64;
     FAudioDroppedStalled: Int64;
     FAudioFailed: Int64;
+    FMicrophoneAppended: Int64;
+    FMicrophoneDroppedEarly: Int64;
+    FMicrophoneDroppedStalled: Int64;
+    FMicrophoneFailed: Int64;
     FWriterFailed: Boolean;
     FOpen: Boolean;
     function BuildOutputSettings: NSDictionary;
     function BuildAudioOutputSettings: NSDictionary;
+    // Adds one AAC input to the writer; the two audio tracks differ only
+    // in which counters they feed.
+    function AddAudioInput(out AInput: AVAssetWriterInput;
+      const AWhat: string; out AError: string): Boolean;
+    // The shared capture-queue append path for both audio tracks. Runs
+    // under FLock; no allocation, no managed types, no exceptions.
+    function AppendAudioTo(AInput: AVAssetWriterInput;
+      ASampleBuffer: CMSampleBufferRef;
+      var AAppended, ADroppedEarly, ADroppedStalled, AFailed: Int64): Boolean;
     function WriterError: string;
   public
     constructor Create(const AOutputPath: string;
       AContainer: TOutputContainer; APixelWidth, APixelHeight,
       AFramesPerSecond, ABitRate: Integer);
     destructor Destroy; override;
-    // Adds an AAC track to the movie. Must be called before Open.
-    procedure EnableAudio(ASampleRate, AChannelCount, ABitRate: Integer);
+    // Adds AAC audio tracks — system audio, microphone, or both — in one
+    // shared format (the inputs' encoders convert whatever the sources
+    // deliver). One format for all tracks by design: per-track formats
+    // would need per-input settings in AddAudioInput. Must be called
+    // before Open.
+    procedure EnableAudioTracks(ASystem, AMicrophone: Boolean;
+      ASampleRate, AChannelCount, ABitRate: Integer);
     // Creates the writer and inputs; replaces an existing file.
     function Open(out AError: string): Boolean;
     // Capture-queue side. Returns False when the frame was dropped or the
@@ -171,6 +215,8 @@ type
     // Capture-queue side, on ScreenCaptureKit's audio queue. The session
     // starts at the first video frame, so earlier audio is dropped.
     function AppendAudioSample(ASampleBuffer: CMSampleBufferRef): Boolean;
+    // The same, on ScreenCaptureKit's microphone queue.
+    function AppendMicrophoneSample(ASampleBuffer: CMSampleBufferRef): Boolean;
     // Main-thread side, after the stream has stopped.
     function Finish(out AError: string): Boolean;
     procedure Cancel;
@@ -231,16 +277,19 @@ begin
     FInput.release;
   if FAudioInput <> nil then
     FAudioInput.release;
+  if FMicrophoneInput <> nil then
+    FMicrophoneInput.release;
   if FWriter <> nil then
     FWriter.release;
   PThreadMutexDestroy(FLock);
   inherited Destroy;
 end;
 
-procedure TMovieWriter.EnableAudio(ASampleRate, AChannelCount,
-  ABitRate: Integer);
+procedure TMovieWriter.EnableAudioTracks(ASystem, AMicrophone: Boolean;
+  ASampleRate, AChannelCount, ABitRate: Integer);
 begin
-  FAudioEnabled := True;
+  FAudioEnabled := ASystem;
+  FMicrophoneEnabled := AMicrophone;
   FAudioSampleRate := ASampleRate;
   FAudioChannelCount := AChannelCount;
   FAudioBitRate := ABitRate;
@@ -289,6 +338,30 @@ begin
   Settings.setObject_forKey(NSNumber.numberWithInt(FAudioBitRate),
     id(AVEncoderBitRateKey));
   Result := Settings;
+end;
+
+function TMovieWriter.AddAudioInput(out AInput: AVAssetWriterInput;
+  const AWhat: string; out AError: string): Boolean;
+begin
+  Result := False;
+  AError := '';
+  AInput := AVAssetWriterInput(
+    AVAssetWriterInput.assetWriterInputWithMediaType_outputSettings(
+    AVMediaTypeAudio, BuildAudioOutputSettings));
+  if AInput = nil then
+  begin
+    AError := 'the ' + AWhat + ' AVAssetWriterInput could not be created';
+    Exit;
+  end;
+  AInput.retain;
+  AInput.setExpectsMediaDataInRealTime(ObjCBOOL(True));
+  if not FWriter.canAddInput(AInput) then
+  begin
+    AError := 'AVAssetWriter rejected the ' + AWhat + ' input';
+    Exit;
+  end;
+  FWriter.addInput(AInput);
+  Result := True;
 end;
 
 function TMovieWriter.WriterError: string;
@@ -350,25 +423,14 @@ begin
   end;
   FWriter.addInput(FInput);
 
-  if FAudioEnabled then
-  begin
-    FAudioInput := AVAssetWriterInput(
-      AVAssetWriterInput.assetWriterInputWithMediaType_outputSettings(
-      AVMediaTypeAudio, BuildAudioOutputSettings));
-    if FAudioInput = nil then
-    begin
-      AError := 'the audio AVAssetWriterInput could not be created';
-      Exit;
-    end;
-    FAudioInput.retain;
-    FAudioInput.setExpectsMediaDataInRealTime(ObjCBOOL(True));
-    if not FWriter.canAddInput(FAudioInput) then
-    begin
-      AError := 'AVAssetWriter rejected the audio input';
-      Exit;
-    end;
-    FWriter.addInput(FAudioInput);
-  end;
+  // Track order is the order the inputs are added, and players pick the
+  // first audio track: system audio comes before the microphone so
+  // --audio=both keeps --audio=system's default playback.
+  if FAudioEnabled and not AddAudioInput(FAudioInput, 'audio', AError) then
+    Exit;
+  if FMicrophoneEnabled
+    and not AddAudioInput(FMicrophoneInput, 'microphone', AError) then
+    Exit;
 
   if not FWriter.startWriting then
   begin
@@ -423,18 +485,19 @@ begin
   PThreadMutexUnlock(FLock);
 end;
 
-function TMovieWriter.AppendAudioSample(
-  ASampleBuffer: CMSampleBufferRef): Boolean;
+function TMovieWriter.AppendAudioTo(AInput: AVAssetWriterInput;
+  ASampleBuffer: CMSampleBufferRef;
+  var AAppended, ADroppedEarly, ADroppedStalled, AFailed: Int64): Boolean;
 begin
   Result := False;
-  if not FOpen or (FAudioInput = nil) then
+  if not FOpen or (AInput = nil) then
     Exit;
   // A buffer whose data is not ready would fail the writer terminally,
   // video track included; refuse it before it reaches appendSampleBuffer.
   if not CMSampleBufferDataIsReady(ASampleBuffer) then
   begin
     PThreadMutexLock(FLock);
-    Inc(FAudioFailed);
+    Inc(AFailed);
     PThreadMutexUnlock(FLock);
     Exit;
   end;
@@ -443,7 +506,7 @@ begin
   if FWriter.status <> AVAssetWriterStatusWriting then
   begin
     FWriterFailed := True;
-    Inc(FAudioFailed);
+    Inc(AFailed);
     PThreadMutexUnlock(FLock);
     Exit;
   end;
@@ -451,24 +514,39 @@ begin
   // arrives before it has no timeline to be placed on yet.
   if not FSessionStarted then
   begin
-    Inc(FAudioDroppedEarly);
+    Inc(ADroppedEarly);
     PThreadMutexUnlock(FLock);
     Exit;
   end;
-  if not FAudioInput.isReadyForMoreMediaData then
+  if not AInput.isReadyForMoreMediaData then
   begin
-    Inc(FAudioDroppedStalled);
+    Inc(ADroppedStalled);
     PThreadMutexUnlock(FLock);
     Exit;
   end;
-  if FAudioInput.appendSampleBuffer(ASampleBuffer) then
+  if AInput.appendSampleBuffer(ASampleBuffer) then
   begin
-    Inc(FAudioAppended);
+    Inc(AAppended);
     Result := True;
   end
   else
-    Inc(FAudioFailed);
+    Inc(AFailed);
   PThreadMutexUnlock(FLock);
+end;
+
+function TMovieWriter.AppendAudioSample(
+  ASampleBuffer: CMSampleBufferRef): Boolean;
+begin
+  Result := AppendAudioTo(FAudioInput, ASampleBuffer, FAudioAppended,
+    FAudioDroppedEarly, FAudioDroppedStalled, FAudioFailed);
+end;
+
+function TMovieWriter.AppendMicrophoneSample(
+  ASampleBuffer: CMSampleBufferRef): Boolean;
+begin
+  Result := AppendAudioTo(FMicrophoneInput, ASampleBuffer,
+    FMicrophoneAppended, FMicrophoneDroppedEarly, FMicrophoneDroppedStalled,
+    FMicrophoneFailed);
 end;
 
 function TMovieWriter.Finish(out AError: string): Boolean;
@@ -488,6 +566,8 @@ begin
   FInput.markAsFinished;
   if FAudioInput <> nil then
     FAudioInput.markAsFinished;
+  if FMicrophoneInput <> nil then
+    FMicrophoneInput.markAsFinished;
   PThreadMutexUnlock(FLock);
 
   if not FSessionStarted then
@@ -539,6 +619,10 @@ begin
   Result.DroppedAudioEarly := FAudioDroppedEarly;
   Result.DroppedAudioStalled := FAudioDroppedStalled;
   Result.FailedAudioAppends := FAudioFailed;
+  Result.AppendedMicrophoneSamples := FMicrophoneAppended;
+  Result.DroppedMicrophoneEarly := FMicrophoneDroppedEarly;
+  Result.DroppedMicrophoneStalled := FMicrophoneDroppedStalled;
+  Result.FailedMicrophoneAppends := FMicrophoneFailed;
   Result.WriterFailed := FWriterFailed;
   if FSessionStarted and (FAppended > 0) then
     Result.Duration := CMTimeGetSeconds(FLastTime)

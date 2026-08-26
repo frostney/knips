@@ -16,7 +16,8 @@
 
 - macOS 13+ on Apple silicon (the tested target). ScreenCaptureKit needs
   12.3; window capture via `initWithDesktopIndependentWindow:` and system
-  audio (`--audio=system`) need 13.
+  audio (`--audio=system`) need 13; microphone capture (`--audio=mic`,
+  `--audio=both`) needs 15.
 - FreePascal **3.2.2** (`brew install fpc`).
 - **lwpt** on PATH — release binary, or `./bootstrap.sh` in the lwpt repo
   and use `<lwpt-repo>/build/lwpt`.
@@ -113,8 +114,8 @@ knips record --out=<file>       .mp4 or .mov (required; replaced if present)
               [--scale=auto|1|2] pixels per point (default auto)
               [--no-cursor]      hide the pointer
               [--bitrate=N]      average bits/s (default derived from size × fps)
-              [--audio=none|system]
-                                 system audio onto an AAC track (default none)
+              [--audio=none|system|mic|both]
+                                 one AAC track per source (default none)
 knips export --in=<file>        .mp4 or .mov (required)
               --out=<file>       .gif (required; replaced if present)
               [--fps=N]          1–50 (default 20)
@@ -127,9 +128,44 @@ knips probe
 knips --version
 ```
 
-`--window` and `--rect` are mutually exclusive. `--audio=system` needs
-macOS 13; it records the audio ScreenCaptureKit mixes for the captured
-content, not the microphone.
+`--window` and `--rect` are mutually exclusive.
+
+### Audio
+
+| `--audio=` | What is recorded | Needs |
+| --- | --- | --- |
+| `none` (default) | nothing | — |
+| `system` | the audio ScreenCaptureKit mixes for the captured content | macOS 13 |
+| `mic` | the system default microphone | macOS 15 |
+| `both` | both, as **two separate tracks** | macOS 15 |
+
+Each source becomes its own AAC track at 48 kHz stereo, 128 kbit/s. The
+microphone arrives in the device's own format and AVAssetWriter's
+encoder converts it, so a mono 44.1 kHz mic still lands on that track.
+
+**`both` does not mix.** The file gets two audio tracks, and most
+players play only the first (system audio). Both are there:
+
+```sh
+# QuickTime Player: View ▸ Show A/V Controls, then pick the track.
+ffprobe -v error -show_entries stream=index,codec_type,channels demo.mp4
+
+# Mix them down to one track:
+ffmpeg -i demo.mp4 -filter_complex '[0:a:0][0:a:1]amix=inputs=2[a]' \
+  -map 0:v -map '[a]' -c:v copy mixed.mp4
+
+# Or keep just the microphone:
+ffmpeg -i demo.mp4 -map 0:v -map 0:a:1 -c copy mic-only.mp4
+```
+
+Mixing in-process is deliberately not in this version.
+
+**Microphone permission** is a second TCC grant, separate from Screen
+Recording. From a terminal the grant belongs to the terminal app, so
+macOS prompts once for it (or you enable it under System Settings ▸
+Privacy & Security ▸ Microphone). `Knips.app` carries its own
+`NSMicrophoneUsageDescription` so it can prompt as itself once the
+menu-bar app gains an audio option; today `--audio` is CLI-only.
 
 ## Verifying a change end-to-end
 

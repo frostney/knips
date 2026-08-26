@@ -8,6 +8,12 @@
 # process that actually asks, which here is Contents/MacOS/knips-bin, not
 # the bundle. See docs/deployment.md.
 #
+# NSMicrophoneUsageDescription is the one key TCC does read from this
+# plist: a bundled process that asks for the microphone without it is
+# killed rather than prompted. The plain CLI binary has no Info.plist, so
+# it inherits the mic grant of whichever app is responsible for it (the
+# terminal).
+#
 # CFBundleExecutable is the binary itself, NOT a launcher script: a
 # script that execs the binary breaks the LaunchServices handshake
 # AppKit needs before the menu bar will adopt a status item (seen on
@@ -72,6 +78,8 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <true/>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Knips records the microphone when you choose to include it in a recording.</string>
 </dict>
 </plist>
 PLIST

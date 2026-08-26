@@ -15,6 +15,11 @@ conventional commits by git-cliff (`cliff.toml`).
   `Knips.app`.
 - `record --audio=system`: system audio through ScreenCaptureKit into an
   AAC track of the same file (48 kHz stereo, 128 kbit/s).
+- `record --audio=mic` and `--audio=both`: the default microphone via
+  ScreenCaptureKit's native microphone output (macOS 15), on a second
+  AAC track. `both` writes system audio and microphone as two separate
+  tracks — players pick the first one; there is no in-process mixing in
+  this version. Per-source sample counters in the `record` summary.
 - `export` from `.mp4`/`.mov` to an animated GIF: median-cut palette,
   Floyd–Steinberg dithering and LZW in pure Pascal, with `--fps`,
   `--width`, and `--trim=start,end`.

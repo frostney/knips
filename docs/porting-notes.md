@@ -75,6 +75,16 @@ key and values. `TSCKOutputHandler`, `TSCKCapture`, and the
 `SCStreamOutputProtocol` declaration are removed. The block types and
 run-loop-pumped completion pattern are unchanged.
 
+Microphone capture (macOS 15) added three more, each checked against
+`SCStream.h` in the current `MacOSX.sdk` rather than from memory:
+`SCStreamOutputTypeMicrophone`, `SCStreamConfiguration.
+setCaptureMicrophone:` and `setMicrophoneCaptureDeviceID:`. The output
+type's *value* matters and is not written in the header as a number —
+the `SCStreamOutputType` `NS_ENUM` lists `Screen`, `Audio`,
+`Microphone` with no explicit initialisers, so `Microphone` is 2. It
+sits in the `knips additions` const block with that derivation written
+down, because a future SDK inserting a case would silently change it.
+
 ### The rename reached the vendored units too
 
 The project shipped its first milestones under the name *opname*, and the

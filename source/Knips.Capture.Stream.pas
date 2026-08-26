@@ -8,6 +8,8 @@ unit Knips.Capture.Stream;
 // With CapturesAudio set, the same output object is registered a second
 // time for SCStreamOutputTypeAudio on its own queue; those buffers reach
 // OnSample as skAudio without the frame-status filter, which is video-only.
+// CapturesMicrophone does the same for SCStreamOutputTypeMicrophone
+// (macOS 15) on a third queue, delivering skMicrophone.
 //
 // The SCStreamOutput object is assembled at run time (Knips.ObjC.Runtime)
 // rather than declared as an objcclass — see ADR-0002. Its one method is
@@ -37,7 +39,7 @@ uses
   MacOSAll;
 
 type
-  TSampleKind = (skVideo, skAudio);
+  TSampleKind = (skVideo, skAudio, skMicrophone);
 
   TSampleHandler = procedure(ASampleBuffer: CMSampleBufferRef;
     AKind: TSampleKind) of object;
@@ -54,6 +56,9 @@ type
     CapturesAudio: Boolean;
     AudioSampleRate: Integer;
     AudioChannelCount: Integer;
+    // Microphone: a separate SCK output, in the device's native format.
+    // The rate and channel count above do not apply to it.
+    CapturesMicrophone: Boolean;
   end;
 
   TScreenStream = class
@@ -64,6 +69,7 @@ type
     FOutput: id;
     FQueue: dispatch_queue_t;
     FAudioQueue: dispatch_queue_t;
+    FMicrophoneQueue: dispatch_queue_t;
     FActive: Boolean;
     FOnSample: TSampleHandler;
     FLastError: string;
@@ -88,6 +94,11 @@ function EnsureStreamOutputClass: pobjc_class;
 
 function StreamOutputClassName: string;
 
+// True when this macOS has ScreenCaptureKit microphone capture
+// (setCaptureMicrophone:, macOS 15+). Probe prints it; Start refuses
+// cleanly without it.
+function StreamSupportsMicrophone: Boolean;
+
 {$ENDIF}
 
 implementation
@@ -108,6 +119,9 @@ const
   // audio delivery from waiting behind a video append. The two appends
   // still serialise on the writer's mutex, but only for the append itself.
   AudioQueueLabel = 'knips.capture.audio';
+  // Likewise for the microphone output: SCK delivers it independently of
+  // the system mix, so it must not queue behind either of the others.
+  MicrophoneQueueLabel = 'knips.capture.mic';
   // Frames SCK may hold while the writer catches up during a keyframe.
   QueueDepth = 5;
   CompletionTimeoutSlices = 5000;
@@ -206,6 +220,17 @@ begin
   Result := OutputClassName;
 end;
 
+function StreamSupportsMicrophone: Boolean;
+var
+  Configuration: SCStreamConfiguration;
+begin
+  Configuration := SCStreamConfiguration(SCStreamConfiguration.alloc.init);
+  if Configuration = nil then
+    Exit(False);
+  Result := RespondsToSelector(id(Configuration), 'setCaptureMicrophone:');
+  Configuration.release;
+end;
+
 function EnsureStreamOutputClass: pobjc_class;
 var
   Builder: TRuntimeClassBuilder;
@@ -296,6 +321,8 @@ begin
     dispatch_release(FQueue);
   if FAudioQueue <> nil then
     dispatch_release(FAudioQueue);
+  if FMicrophoneQueue <> nil then
+    dispatch_release(FMicrophoneQueue);
   if FFilter <> nil then
     FFilter.release;
   inherited Destroy;
@@ -315,7 +342,9 @@ begin
     FOnSample(ASampleBuffer, skVideo);
   end
   else if AOutputType = SCStreamOutputTypeAudio then
-    FOnSample(ASampleBuffer, skAudio);
+    FOnSample(ASampleBuffer, skAudio)
+  else if AOutputType = SCStreamOutputTypeMicrophone then
+    FOnSample(ASampleBuffer, skMicrophone);
 end;
 
 function TScreenStream.Start: Boolean;
@@ -350,6 +379,22 @@ begin
       Configuration.setCapturesAudio(ObjCBOOL(True));
       Configuration.setSampleRate(FGeometry.AudioSampleRate);
       Configuration.setChannelCount(FGeometry.AudioChannelCount);
+    end;
+    if FGeometry.CapturesMicrophone then
+    begin
+      // captureMicrophone is macOS 15+; the project floor is 13. On an
+      // older OS the send would raise an ObjC unrecognized-selector
+      // exception no Pascal handler can catch — abort with a message
+      // instead of a SIGABRT and a zero-byte file.
+      if not RespondsToSelector(id(Configuration), 'setCaptureMicrophone:') then
+      begin
+        FLastError := 'microphone capture needs macOS 15 or newer';
+        Exit;
+      end;
+      Configuration.setCaptureMicrophone(ObjCBOOL(True));
+      // nil is the documented "system default microphone"; setting it
+      // explicitly keeps the v1 choice visible rather than implied.
+      Configuration.setMicrophoneCaptureDeviceID(nil);
     end;
     if FGeometry.HasSourceRect then
     begin
@@ -402,6 +447,22 @@ begin
           + string(Error.localizedDescription.UTF8String)
       else
         FLastError := 'addStreamOutput (audio) failed';
+      Exit;
+    end;
+  end;
+
+  if FGeometry.CapturesMicrophone then
+  begin
+    FMicrophoneQueue := dispatch_queue_create(MicrophoneQueueLabel, nil);
+    Error := nil;
+    if not FStream.addStreamOutput_type_sampleHandlerQueue_error(FOutput,
+      SCStreamOutputTypeMicrophone, FMicrophoneQueue, @Error) then
+    begin
+      if Error <> nil then
+        FLastError := 'addStreamOutput (microphone): '
+          + string(Error.localizedDescription.UTF8String)
+      else
+        FLastError := 'addStreamOutput (microphone) failed';
       Exit;
     end;
   end;

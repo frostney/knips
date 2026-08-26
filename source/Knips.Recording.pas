@@ -44,6 +44,10 @@ type
     DroppedAudioEarly: Int64;
     DroppedAudioStalled: Int64;
     FailedAudioAppends: Int64;
+    AppendedMicrophoneSamples: Int64;
+    DroppedMicrophoneEarly: Int64;
+    DroppedMicrophoneStalled: Int64;
+    FailedMicrophoneAppends: Int64;
     DurationSeconds: Double;
   end;
 
@@ -130,14 +134,16 @@ procedure TRecordingSession.HandleSample(ASampleBuffer: CMSampleBufferRef;
   AKind: TSampleKind);
 begin
   // Capture-queue context: no exceptions, no WriteLn, no managed types.
-  // Video and audio arrive on separate queues; the writer's mutex is what
-  // keeps the two appends from overlapping.
+  // Video, system audio and microphone arrive on three separate queues;
+  // the writer's mutex is what keeps the appends from overlapping.
   if FWriter = nil then
     Exit;
   if AKind = skVideo then
     FWriter.AppendVideoSample(ASampleBuffer)
   else if AKind = skAudio then
-    FWriter.AppendAudioSample(ASampleBuffer);
+    FWriter.AppendAudioSample(ASampleBuffer)
+  else if AKind = skMicrophone then
+    FWriter.AppendMicrophoneSample(ASampleBuffer);
 end;
 
 function TRecordingSession.ResolveFilter(const AContent: TShareableContent;
@@ -230,9 +236,11 @@ begin
   AGeometry.PixelHeight := AlignDimension(PointHeight * Scale);
   AGeometry.FramesPerSecond := FOptions.FramesPerSecond;
   AGeometry.ShowsCursor := FOptions.ShowsCursor;
-  AGeometry.CapturesAudio := FOptions.AudioMode <> amNone;
+  AGeometry.CapturesAudio := AudioModeCapturesSystem(FOptions.AudioMode);
   AGeometry.AudioSampleRate := FOptions.AudioSampleRate;
   AGeometry.AudioChannelCount := FOptions.AudioChannelCount;
+  AGeometry.CapturesMicrophone :=
+    AudioModeCapturesMicrophone(FOptions.AudioMode);
   if (AGeometry.PixelWidth <= 0) or (AGeometry.PixelHeight <= 0) then
   begin
     AError := 'capture size is empty';
@@ -325,8 +333,9 @@ begin
   FWriter := TMovieWriter.Create(FOptions.OutputPath, FOptions.Container,
     FGeometry.PixelWidth, FGeometry.PixelHeight, FGeometry.FramesPerSecond,
     FReport.BitRate);
-  if FGeometry.CapturesAudio then
-    FWriter.EnableAudio(FOptions.AudioSampleRate,
+  if FGeometry.CapturesAudio or FGeometry.CapturesMicrophone then
+    FWriter.EnableAudioTracks(FGeometry.CapturesAudio,
+      FGeometry.CapturesMicrophone, FOptions.AudioSampleRate,
       FOptions.AudioChannelCount, FOptions.AudioBitRate);
   if not FWriter.Open(AError) then
   begin
@@ -376,6 +385,10 @@ begin
   FReport.DroppedAudioEarly := Statistics.DroppedAudioEarly;
   FReport.DroppedAudioStalled := Statistics.DroppedAudioStalled;
   FReport.FailedAudioAppends := Statistics.FailedAudioAppends;
+  FReport.AppendedMicrophoneSamples := Statistics.AppendedMicrophoneSamples;
+  FReport.DroppedMicrophoneEarly := Statistics.DroppedMicrophoneEarly;
+  FReport.DroppedMicrophoneStalled := Statistics.DroppedMicrophoneStalled;
+  FReport.FailedMicrophoneAppends := Statistics.FailedMicrophoneAppends;
   FReport.DurationSeconds := Statistics.Duration;
 
   Result := FWriter.Finish(AError);
@@ -390,8 +403,8 @@ begin
   if not StartCapture(AError) then
     Exit;
 
-  if FGeometry.CapturesAudio then
-    AudioNote := Format(' + %s audio (%d kHz, %d ch)',
+  if FGeometry.CapturesAudio or FGeometry.CapturesMicrophone then
+    AudioNote := Format(' + %s audio (AAC %d kHz, %d ch)',
       [AudioModeName(FOptions.AudioMode),
       FOptions.AudioSampleRate div 1000, FOptions.AudioChannelCount])
   else

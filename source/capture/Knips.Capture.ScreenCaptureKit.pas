@@ -13,6 +13,9 @@ unit Knips.Capture.ScreenCaptureKit;
     windowLayer, SCContentFilter.initWithDesktopIndependentWindow:,
     SCStreamConfiguration.setSourceRect:/setScalesToFit:, the
     SCStreamFrameInfoStatus attachment key and its status values.
+  - Added: SCStreamOutputTypeMicrophone and
+    SCStreamConfiguration.setCaptureMicrophone:/
+    setMicrophoneCaptureDeviceID: (macOS 15).
   - The block types and async completion pattern are unchanged.
 
   Everything else is carried verbatim, including formatting. }
@@ -34,6 +37,15 @@ uses
 const
   SCStreamOutputTypeScreen = 0;
   SCStreamOutputTypeAudio  = 1;
+
+  { ======== knips additions (not in the vendored original) ======== }
+
+  { SCStreamOutputTypeMicrophone, macOS 15. Verified against SCStream.h in
+    the MacOSX.sdk of Xcode's current toolchain: the SCStreamOutputType
+    NS_ENUM lists Screen, Audio, Microphone with no explicit values, so
+    Microphone is 2. Buffers arrive in the microphone device's own native
+    format, not the sampleRate/channelCount set for system audio. }
+  SCStreamOutputTypeMicrophone = 2;
 
   { SCFrameStatus — value of the SCStreamFrameInfoStatus attachment on
     every video sample buffer. Only Complete frames carry pixels worth
@@ -125,6 +137,14 @@ type
     { Region of the filtered content to capture, in points }
     procedure setSourceRect(rect: CGRect); message 'setSourceRect:';
     procedure setScalesToFit(scales: ObjCBOOL); message 'setScalesToFit:';
+    { knips addition: microphone capture, macOS 15. captureMicrophone is
+      BOOL and defaults to NO; microphoneCaptureDeviceID is a nullable
+      NSString* holding an AVCaptureDevice uniqueID, and the system
+      default microphone is used when it is not set. }
+    procedure setCaptureMicrophone(captures: ObjCBOOL);
+      message 'setCaptureMicrophone:';
+    procedure setMicrophoneCaptureDeviceID(deviceID: NSString);
+      message 'setMicrophoneCaptureDeviceID:';
   end;
 
   { SCStream }

@@ -5,7 +5,7 @@ program knips;
 //   knips app                   menu-bar app: drag a region, click to stop
 //   knips record --out=demo.mp4 [--display=N | --window=ID] [--rect=x,y,w,h]
 //                 [--fps=30] [--scale=auto|1|2] [--no-cursor] [--bitrate=N]
-//                 [--audio=none|system]
+//                 [--audio=none|system|mic|both]
 //   knips export --in=demo.mp4 --out=demo.gif [--fps=20] [--width=N]
 //                 [--trim=start,end] [--no-dither]
 //   knips displays              list capturable displays
@@ -124,7 +124,7 @@ begin
   Audio := StringValue(AOptions, 'audio', AudioModeName(amNone));
   if not ParseAudioMode(Audio, ARecording.AudioMode) then
   begin
-    AError := '--audio must be none or system';
+    AError := '--audio must be none, system, mic, or both';
     Exit;
   end;
 
@@ -215,14 +215,23 @@ begin
       WriteLn(ProgramName, ' record: ', Error);
       Exit(ExitFailure);
     end;
-    if Session.Report.AudioMode <> amNone then
-      Audio := Format(', %d audio samples (%d dropped early, %d stalled, %d failed)',
+    // One segment per audio track, so --audio=both shows which source is
+    // starving rather than one merged count.
+    Audio := '';
+    if AudioModeCapturesSystem(Session.Report.AudioMode) then
+      Audio := Audio + Format(
+        ', %d system audio samples (%d dropped early, %d stalled, %d failed)',
         [Session.Report.AppendedAudioSamples,
         Session.Report.DroppedAudioEarly,
         Session.Report.DroppedAudioStalled,
-        Session.Report.FailedAudioAppends])
-    else
-      Audio := '';
+        Session.Report.FailedAudioAppends]);
+    if AudioModeCapturesMicrophone(Session.Report.AudioMode) then
+      Audio := Audio + Format(
+        ', %d mic samples (%d dropped early, %d stalled, %d failed)',
+        [Session.Report.AppendedMicrophoneSamples,
+        Session.Report.DroppedMicrophoneEarly,
+        Session.Report.DroppedMicrophoneStalled,
+        Session.Report.FailedMicrophoneAppends]);
     WriteLn(Format('wrote %s: %dx%d, %.1fs, %d frames (%d dropped, %d failed)%s',
       [Session.Report.OutputPath, Session.Report.PixelWidth,
       Session.Report.PixelHeight, Session.Report.DurationSeconds,
@@ -456,6 +465,14 @@ begin
     end;
   end;
 
+  // Informational, not a gate: microphone capture is macOS 15+, the
+  // project floor is 13. record --audio=mic refuses cleanly where this
+  // prints unavailable.
+  if StreamSupportsMicrophone then
+    WriteLn('microphone capture: supported')
+  else
+    WriteLn('microphone capture: unavailable (needs macOS 15+)');
+
   try
     Content := TShareableContent.Create;
     try
@@ -553,7 +570,7 @@ begin
   Result[7] := TIntegerOption.Create('bitrate',
     'Average video bit rate in bits per second (default: derived)');
   Result[8] := TStringOption.Create('audio',
-    Format('Record system audio: none or system (default %s)',
+    Format('Record audio: none, system, mic, or both (default %s)',
     [AudioModeName(amNone)]));
 end;
 
@@ -646,7 +663,7 @@ begin
       @HandleApp, NoOptions));
     Registry.Add(TSubcommand.Create('record',
       'Record a display, region, or window to an .mp4/.mov file',
-      '--out=<file> [--display=N|--window=ID] [--rect=x,y,w,h] [--fps=N] [--audio=system]',
+      '--out=<file> [--display=N|--window=ID] [--rect=x,y,w,h] [--fps=N] [--audio=system|mic|both]',
       @HandleRecord, RecordOptions));
     Registry.Add(TSubcommand.Create('export',
       'Convert a recording to an animated GIF',
@@ -665,7 +682,7 @@ begin
       NoOptions));
     Registry.Add(TSubcommand.Create('record',
       'Record a display, region, or window (macOS only)',
-      '--out=<file> [--display=N|--window=ID] [--rect=x,y,w,h] [--fps=N] [--audio=system]',
+      '--out=<file> [--display=N|--window=ID] [--rect=x,y,w,h] [--fps=N] [--audio=system|mic|both]',
       @HandleUnsupported, RecordOptions));
     Registry.Add(TSubcommand.Create('export',
       'Convert a recording to an animated GIF (macOS only)',

@@ -33,8 +33,11 @@ type
     procedure SetupTests; override;
     procedure TestParsesNone;
     procedure TestParsesSystemCaseInsensitive;
+    procedure TestParsesMicrophone;
+    procedure TestParsesBoth;
     procedure TestRejectsUnknownMode;
     procedure TestNamesRoundTrip;
+    procedure TestSourcePredicates;
   end;
 
   TValidationTests = class(TTestSuite)
@@ -53,6 +56,7 @@ type
     procedure TestFillsContainer;
     procedure TestDefaultsHaveNoAudio;
     procedure TestSystemAudioFillsFormatDefaults;
+    procedure TestEveryAudioModeFillsFormatDefaults;
     procedure TestNoAudioLeavesFormatUntouched;
     procedure TestKeepsExplicitAudioFormat;
     procedure TestRejectsAudioSampleRateOutOfRange;
@@ -203,8 +207,11 @@ procedure TAudioModeTests.SetupTests;
 begin
   Test('"none" parses to amNone', TestParsesNone);
   Test('"System" parses regardless of case', TestParsesSystemCaseInsensitive);
+  Test('"mic" parses regardless of case', TestParsesMicrophone);
+  Test('"both" parses regardless of case', TestParsesBoth);
   Test('unknown modes are rejected', TestRejectsUnknownMode);
   Test('names round-trip through the parser', TestNamesRoundTrip);
+  Test('each mode reports the sources it captures', TestSourcePredicates);
 end;
 
 procedure TAudioModeTests.TestParsesNone;
@@ -223,22 +230,59 @@ begin
   Expect<Boolean>(Mode = amSystem).ToBe(True);
 end;
 
+procedure TAudioModeTests.TestParsesMicrophone;
+var
+  Mode: TAudioMode;
+begin
+  Expect<Boolean>(ParseAudioMode(' Mic ', Mode)).ToBe(True);
+  Expect<Boolean>(Mode = amMicrophone).ToBe(True);
+end;
+
+procedure TAudioModeTests.TestParsesBoth;
+var
+  Mode: TAudioMode;
+begin
+  Expect<Boolean>(ParseAudioMode('BOTH', Mode)).ToBe(True);
+  Expect<Boolean>(Mode = amBoth).ToBe(True);
+end;
+
 procedure TAudioModeTests.TestRejectsUnknownMode;
 var
   Mode: TAudioMode;
 begin
+  // "microphone" is deliberately not an alias: one spelling per mode, so
+  // AudioModeName round-trips.
   Expect<Boolean>(ParseAudioMode('microphone', Mode)).ToBe(False);
+  Expect<Boolean>(ParseAudioMode('all', Mode)).ToBe(False);
   Expect<Boolean>(ParseAudioMode('', Mode)).ToBe(False);
 end;
 
 procedure TAudioModeTests.TestNamesRoundTrip;
 var
   Mode: TAudioMode;
+  Named: TAudioMode;
 begin
   Expect<string>(AudioModeName(amNone)).ToBe('none');
   Expect<string>(AudioModeName(amSystem)).ToBe('system');
-  Expect<Boolean>(ParseAudioMode(AudioModeName(amSystem), Mode)).ToBe(True);
-  Expect<Boolean>(Mode = amSystem).ToBe(True);
+  Expect<string>(AudioModeName(amMicrophone)).ToBe('mic');
+  Expect<string>(AudioModeName(amBoth)).ToBe('both');
+  for Mode := Low(TAudioMode) to High(TAudioMode) do
+  begin
+    Expect<Boolean>(ParseAudioMode(AudioModeName(Mode), Named)).ToBe(True);
+    Expect<Boolean>(Named = Mode).ToBe(True);
+  end;
+end;
+
+procedure TAudioModeTests.TestSourcePredicates;
+begin
+  Expect<Boolean>(AudioModeCapturesSystem(amNone)).ToBe(False);
+  Expect<Boolean>(AudioModeCapturesMicrophone(amNone)).ToBe(False);
+  Expect<Boolean>(AudioModeCapturesSystem(amSystem)).ToBe(True);
+  Expect<Boolean>(AudioModeCapturesMicrophone(amSystem)).ToBe(False);
+  Expect<Boolean>(AudioModeCapturesSystem(amMicrophone)).ToBe(False);
+  Expect<Boolean>(AudioModeCapturesMicrophone(amMicrophone)).ToBe(True);
+  Expect<Boolean>(AudioModeCapturesSystem(amBoth)).ToBe(True);
+  Expect<Boolean>(AudioModeCapturesMicrophone(amBoth)).ToBe(True);
 end;
 
 { TValidationTests }
@@ -264,6 +308,8 @@ begin
   Test('audio is off by default', TestDefaultsHaveNoAudio);
   Test('system audio fills 48 kHz stereo 128 kbit/s',
     TestSystemAudioFillsFormatDefaults);
+  Test('mic and both fill the same format defaults',
+    TestEveryAudioModeFillsFormatDefaults);
   Test('audio off leaves the format fields alone',
     TestNoAudioLeavesFormatUntouched);
   Test('an explicit audio format is kept', TestKeepsExplicitAudioFormat);
@@ -400,6 +446,28 @@ begin
   Expect<Integer>(Options.AudioSampleRate).ToBe(DefaultAudioSampleRate);
   Expect<Integer>(Options.AudioChannelCount).ToBe(DefaultAudioChannelCount);
   Expect<Integer>(Options.AudioBitRate).ToBe(DefaultAudioBitRate);
+end;
+
+// The microphone track is encoded with the same AAC settings as system
+// audio — AVAssetWriterInput converts the device's native format into
+// them — so every mode that captures anything derives the same defaults.
+procedure TValidationTests.TestEveryAudioModeFillsFormatDefaults;
+var
+  Options: TRecordingOptions;
+  Error: string;
+  Mode: TAudioMode;
+begin
+  for Mode := Low(TAudioMode) to High(TAudioMode) do
+  begin
+    if Mode = amNone then
+      Continue;
+    Options := Valid;
+    Options.AudioMode := Mode;
+    Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(True);
+    Expect<Integer>(Options.AudioSampleRate).ToBe(DefaultAudioSampleRate);
+    Expect<Integer>(Options.AudioChannelCount).ToBe(DefaultAudioChannelCount);
+    Expect<Integer>(Options.AudioBitRate).ToBe(DefaultAudioBitRate);
+  end;
 end;
 
 procedure TValidationTests.TestNoAudioLeavesFormatUntouched;

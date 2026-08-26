@@ -5,8 +5,9 @@
 - One binary: ScreenCaptureKit stream → complete-frame filter →
   AVAssetWriter input (hardware H.264) → `.mp4`/`.mov`. Knips never
   touches pixels or NAL units; it moves sample buffers.
-- `--audio=system` adds SCK's audio output and a second AVAssetWriter
-  input (AAC) to the same file; see [System audio](#system-audio).
+- `--audio=system|mic|both` adds SCK's audio and/or microphone output,
+  one AVAssetWriter input (AAC) per source, to the same file; see
+  [Audio](#audio).
 - The `SCStreamOutput` object the framework calls back into is a
   **runtime-built Objective-C class** — one plain `cdecl` Pascal routine
   registered with `class_addMethod` — so the build needs no linker flags
@@ -171,7 +172,9 @@ rejects.
 - **Capture queue** (`knips.capture.video`, created for the stream) runs
   `StreamOutputSampleBuffer` → `DeliverSample` → `OnSample` →
   `AppendVideoSample`. With audio on, a second queue
-  (`knips.capture.audio`) runs the same path into `AppendAudioSample`.
+  (`knips.capture.audio`) runs the same path into `AppendAudioSample`,
+  and with the microphone on a third (`knips.capture.mic`) into
+  `AppendMicrophoneSample`.
   Rules on that path, carried from the prototype:
   no exceptions or `try..finally` (no `cthreads`, so the exception frame
   chain is process-global), no `WriteLn`, no managed-type writes outside
@@ -326,31 +329,74 @@ Frames arriving while the input reports `isReadyForMoreMediaData ==
 NO` are dropped and counted; that is the back-pressure path during
 keyframe spikes, mirrored by the stream's `queueDepth`.
 
-## System audio
+## Audio
 
-`--audio=system` (macOS 13+) sets `capturesAudio`, `sampleRate` and
-`channelCount` on the stream configuration (48 kHz stereo by default) and
-registers the *same* runtime-built output object a second time, for
-`SCStreamOutputTypeAudio` on its own dispatch queue. Audio buffers reach
-`OnSample` as `skAudio`, skipping the complete-frame filter, which is a
-video-only attachment. `TMovieWriter` adds a second `AVAssetWriterInput`
-— AAC at 128 kbit/s (`AVFormatIDKey` = `kAudioFormatMPEG4AAC`), also
-`expectsMediaDataInRealTime` — and the one AVAssetWriter muxes both
-tracks into the same file.
+`--audio` selects between ScreenCaptureKit's two audio outputs:
+`system` (macOS 13+), `mic` (macOS 15+), `both`, or `none`. Each one is
+an independent SCK output and becomes its own AAC track; nothing here
+mixes them.
+
+- **System audio** sets `capturesAudio`, `sampleRate` and `channelCount`
+  on the stream configuration (48 kHz stereo by default).
+- **Microphone** sets `captureMicrophone` and leaves
+  `microphoneCaptureDeviceID` nil, which is the documented "system
+  default microphone". The configuration's `sampleRate`/`channelCount`
+  do *not* apply to it: SCK delivers the microphone in the capture
+  device's own native format.
+
+For each enabled output the *same* runtime-built output object is
+registered again, on its own dispatch queue — `knips.capture.audio` and
+`knips.capture.mic` beside `knips.capture.video`. The buffers reach
+`OnSample` as `skAudio`/`skMicrophone`, skipping the complete-frame
+filter, which is a video-only attachment.
+
+`TMovieWriter` adds one `AVAssetWriterInput` per enabled source — AAC at
+128 kbit/s (`AVFormatIDKey` = `kAudioFormatMPEG4AAC`), each
+`expectsMediaDataInRealTime` — and the one AVAssetWriter muxes every
+track into the same file. System audio is added before the microphone,
+so `--audio=both` leaves `--audio=system`'s track first and a player's
+default choice unchanged.
+
+**Both AAC inputs get the identical, fully specified settings
+dictionary, whatever format the buffers arrive in.** That is not a
+simplification, it is what the API requires and permits.
+`AVAssetWriterInput.h` states that a dictionary passed to
+`assetWriterInputWithMediaType:outputSettings:` "must be fully
+specified, meaning that it must contain AVFormatIDKey, AVSampleRateKey,
+and AVNumberOfChannelsKey" — a bit-rate-only dictionary is legal only
+alongside a `sourceFormatHint`. The same header constrains *appended*
+audio to linear PCM and nothing further, lists
+`AVSampleRateConverterAudioQualityKey` among the audio settings keys,
+and documents `AVNumberOfChannelsKey` = 2 as producing stereo output
+when no other layout information is available. The input's encoder is
+therefore the converter: a mono or 44.1 kHz microphone is resampled and
+upmixed into the configured track. Knips consequently never inspects a
+buffer's `CMFormatDescription`, and never creates an input lazily from
+under a capture callback — which the capture-thread rules would have
+made awkward anyway.
 
 The writer's session still starts at the first *video* frame's PTS, so
 audio delivered before that has no timeline to sit on: it is dropped and
-counted separately, as are audio buffers arriving while the audio input
-is not ready. Both appends take the same `FLock`, which is what keeps
-SCK's two queues from touching the writer at once; every capture-queue
-rule above applies unchanged to the audio path. Microphone capture is a
-third SCK output type (macOS 15) and is not wired up.
+counted, as are buffers arriving while their input is not ready. The two
+audio paths share one guard chain (`AppendAudioTo`) and differ only in
+which input and which counters they feed, so `--audio=both` reports
+per-source appended/early/stalled/failed counts and shows which source
+is starving. Every append takes the same `FLock`, which is what keeps
+SCK's three queues from touching the writer at once; every capture-queue
+rule above applies unchanged to both audio paths.
 
 One rejected buffer fails AVAssetWriter terminally — every later append
-on every input returns NO. Both append paths therefore check the
+on every input returns NO. All append paths therefore check the
 writer's status first (audio buffers additionally
 `CMSampleBufferDataIsReady`), flag the failure, and the main loop aborts
 the recording rather than streaming minutes into a dead file.
+
+**Permissions.** The microphone is a second TCC grant, separate from
+Screen Recording. `Knips.app` carries `NSMicrophoneUsageDescription` —
+a bundled process that asks without it is killed rather than prompted;
+the key is groundwork, since the menu-bar app has no audio surface yet.
+The bare CLI binary has no `Info.plist` and inherits the grant of the
+app responsible for it, which is the terminal it was launched from.
 
 ## Geometry
 

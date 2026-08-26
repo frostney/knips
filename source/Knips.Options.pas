@@ -30,6 +30,9 @@ const
   // Audio defaults. ScreenCaptureKit delivers system audio at whatever
   // sample rate and channel count the stream configuration asks for;
   // 48 kHz stereo is what the mixer runs at, so nothing is resampled.
+  // The microphone output ignores these and arrives in the device's own
+  // native format; they are the AAC track's format, and AVAssetWriter's
+  // encoder converts into it.
   DefaultAudioSampleRate = 48000;
   MinAudioSampleRate = 8000;
   MaxAudioSampleRate = 192000;
@@ -65,10 +68,11 @@ type
 
   TOutputContainer = (ocMPEG4, ocQuickTime);
 
-  // What, if anything, is recorded onto the movie's audio track.
-  // amSystem is the audio ScreenCaptureKit delivers alongside video;
-  // microphone capture is a separate SCK output and not modelled here.
-  TAudioMode = (amNone, amSystem);
+  // What, if anything, is recorded onto the movie's audio tracks.
+  // amSystem is the audio ScreenCaptureKit mixes for the captured
+  // content; amMicrophone is SCK's separate microphone output (macOS 15).
+  // amBoth keeps them apart, as two tracks — nothing here mixes them.
+  TAudioMode = (amNone, amSystem, amMicrophone, amBoth);
 
   TRecordingOptions = record
     TargetKind: TCaptureTargetKind;
@@ -122,10 +126,18 @@ function DefaultRecordingOptions: TRecordingOptions;
 function ParseCaptureRegion(const AText: string;
   out ARegion: TCaptureRegion): Boolean;
 
-// "none" or "system", case-insensitively. False for anything else.
+// "none", "system", "mic", or "both", case-insensitively. False for
+// anything else.
 function ParseAudioMode(const AText: string; out AMode: TAudioMode): Boolean;
 
 function AudioModeName(AMode: TAudioMode): string;
+
+// Which of ScreenCaptureKit's two audio outputs the mode asks for. Every
+// layer below the CLI asks these rather than comparing the enum, so a
+// future mode joins in one place.
+function AudioModeCapturesSystem(AMode: TAudioMode): Boolean;
+
+function AudioModeCapturesMicrophone(AMode: TAudioMode): Boolean;
 
 // Container from the output path's extension; False for unknown ones.
 function ContainerForPath(const APath: string;
@@ -191,6 +203,10 @@ begin
     AMode := amNone
   else if Normalized = 'system' then
     AMode := amSystem
+  else if Normalized = 'mic' then
+    AMode := amMicrophone
+  else if Normalized = 'both' then
+    AMode := amBoth
   else
     Result := False;
 end;
@@ -199,9 +215,21 @@ function AudioModeName(AMode: TAudioMode): string;
 begin
   case AMode of
     amSystem: Result := 'system';
+    amMicrophone: Result := 'mic';
+    amBoth: Result := 'both';
   else
     Result := 'none';
   end;
+end;
+
+function AudioModeCapturesSystem(AMode: TAudioMode): Boolean;
+begin
+  Result := AMode in [amSystem, amBoth];
+end;
+
+function AudioModeCapturesMicrophone(AMode: TAudioMode): Boolean;
+begin
+  Result := AMode in [amMicrophone, amBoth];
 end;
 
 function ParseCaptureRegion(const AText: string;
