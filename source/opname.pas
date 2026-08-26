@@ -4,6 +4,7 @@ program opname;
 //
 //   opname record --out=demo.mp4 [--display=N | --window=ID] [--rect=x,y,w,h]
 //                 [--fps=30] [--scale=auto|1|2] [--no-cursor] [--bitrate=N]
+//                 [--audio=none|system]
 //   opname displays              list capturable displays
 //   opname windows               list capturable on-screen windows
 //   opname probe                 verify the ObjC runtime + framework path
@@ -90,7 +91,7 @@ end;
 function BuildRecordingOptions(const AOptions: TOptionArray;
   out ARecording: TRecordingOptions; out AError: string): Boolean;
 var
-  Rect, Scale: string;
+  Rect, Scale, Audio: string;
 begin
   Result := False;
   ARecording := DefaultRecordingOptions;
@@ -110,6 +111,13 @@ begin
   else if not TryStrToInt(Scale, ARecording.Scale) then
   begin
     AError := '--scale must be auto, 1, or 2';
+    Exit;
+  end;
+
+  Audio := StringValue(AOptions, 'audio', AudioModeName(amNone));
+  if not ParseAudioMode(Audio, ARecording.AudioMode) then
+  begin
+    AError := '--audio must be none or system';
     Exit;
   end;
 
@@ -157,6 +165,7 @@ var
   Recording: TRecordingOptions;
   Session: TRecordingSession;
   Error: string;
+  Audio: string;
 begin
   if not BuildRecordingOptions(AOptions, Recording, Error) then
   begin
@@ -171,11 +180,19 @@ begin
       WriteLn(ProgramName, ' record: ', Error);
       Exit(ExitFailure);
     end;
-    WriteLn(Format('wrote %s: %dx%d, %.1fs, %d frames (%d dropped, %d failed)',
+    if Session.Report.AudioMode <> amNone then
+      Audio := Format(', %d audio samples (%d dropped early, %d stalled, %d failed)',
+        [Session.Report.AppendedAudioSamples,
+        Session.Report.DroppedAudioEarly,
+        Session.Report.DroppedAudioStalled,
+        Session.Report.FailedAudioAppends])
+    else
+      Audio := '';
+    WriteLn(Format('wrote %s: %dx%d, %.1fs, %d frames (%d dropped, %d failed)%s',
       [Session.Report.OutputPath, Session.Report.PixelWidth,
       Session.Report.PixelHeight, Session.Report.DurationSeconds,
       Session.Report.AppendedFrames, Session.Report.DroppedFrames,
-      Session.Report.FailedAppends]));
+      Session.Report.FailedAppends, Audio]));
     Result := ExitOk;
   finally
     Session.Free;
@@ -357,7 +374,7 @@ end;
 // Option objects are owned by the registry once the subcommand is added.
 function RecordOptions: TOptionArray;
 begin
-  SetLength(Result, 8);
+  SetLength(Result, 9);
   Result[0] := TStringOption.Create('out',
     'Output file; .mp4 or .mov (required)');
   Result[1] := TIntegerOption.Create('display',
@@ -375,6 +392,9 @@ begin
     'Hide the pointer in the recording');
   Result[7] := TIntegerOption.Create('bitrate',
     'Average video bit rate in bits per second (default: derived)');
+  Result[8] := TStringOption.Create('audio',
+    Format('Record system audio: none or system (default %s)',
+    [AudioModeName(amNone)]));
 end;
 
 // The cli package's top-level help carries lwpt's own tagline, so the
@@ -430,7 +450,7 @@ begin
     {$IFDEF DARWIN}
     Registry.Add(TSubcommand.Create('record',
       'Record a display, region, or window to an .mp4/.mov file',
-      '--out=<file> [--display=N|--window=ID] [--rect=x,y,w,h] [--fps=N]',
+      '--out=<file> [--display=N|--window=ID] [--rect=x,y,w,h] [--fps=N] [--audio=system]',
       @HandleRecord, RecordOptions));
     Registry.Add(TSubcommand.Create('displays',
       'List capturable displays', '', @HandleDisplays, NoOptions));
@@ -442,7 +462,7 @@ begin
     {$ELSE}
     Registry.Add(TSubcommand.Create('record',
       'Record a display, region, or window (macOS only)',
-      '--out=<file> [--display=N|--window=ID] [--rect=x,y,w,h] [--fps=N]',
+      '--out=<file> [--display=N|--window=ID] [--rect=x,y,w,h] [--fps=N] [--audio=system]',
       @HandleUnsupported, RecordOptions));
     Registry.Add(TSubcommand.Create('displays',
       'List capturable displays (macOS only)', '', @HandleUnsupported,

@@ -39,6 +39,11 @@ type
     AppendedFrames: Int64;
     DroppedFrames: Int64;
     FailedAppends: Int64;
+    AudioMode: TAudioMode;
+    AppendedAudioSamples: Int64;
+    DroppedAudioEarly: Int64;
+    DroppedAudioStalled: Int64;
+    FailedAudioAppends: Int64;
     DurationSeconds: Double;
   end;
 
@@ -96,8 +101,14 @@ procedure TRecordingSession.HandleSample(ASampleBuffer: CMSampleBufferRef;
   AKind: TSampleKind);
 begin
   // Capture-queue context: no exceptions, no WriteLn, no managed types.
-  if (AKind = skVideo) and (FWriter <> nil) then
-    FWriter.AppendVideoSample(ASampleBuffer);
+  // Video and audio arrive on separate queues; the writer's mutex is what
+  // keeps the two appends from overlapping.
+  if FWriter = nil then
+    Exit;
+  if AKind = skVideo then
+    FWriter.AppendVideoSample(ASampleBuffer)
+  else if AKind = skAudio then
+    FWriter.AppendAudioSample(ASampleBuffer);
 end;
 
 function TRecordingSession.ResolveFilter(const AContent: TShareableContent;
@@ -190,6 +201,9 @@ begin
   AGeometry.PixelHeight := AlignDimension(PointHeight * Scale);
   AGeometry.FramesPerSecond := FOptions.FramesPerSecond;
   AGeometry.ShowsCursor := FOptions.ShowsCursor;
+  AGeometry.CapturesAudio := FOptions.AudioMode <> amNone;
+  AGeometry.AudioSampleRate := FOptions.AudioSampleRate;
+  AGeometry.AudioChannelCount := FOptions.AudioChannelCount;
   if (AGeometry.PixelWidth <= 0) or (AGeometry.PixelHeight <= 0) then
   begin
     AError := 'capture size is empty';
@@ -214,6 +228,15 @@ begin
   begin
     CFRunLoopRunInMode(kCFRunLoopDefaultMode, RunLoopSliceSeconds, False);
     Inc(Slice);
+    // One rejected buffer fails AVAssetWriter for good; keeping the
+    // stream running would record minutes into a dead file. Abort as
+    // soon as the capture threads have flagged it.
+    if FWriter.Statistics.WriterFailed then
+    begin
+      WriteLn('writer failed — stopping');
+      Flush(Output);
+      Break;
+    end;
     if Slice mod ProgressEverySlices = 0 then
     begin
       Statistics := FWriter.Statistics;
@@ -231,12 +254,14 @@ var
   Geometry: TStreamGeometry;
   Statistics: TMovieWriterStatistics;
   FinishError: string;
+  AudioNote: string;
 begin
   Result := False;
   AError := '';
   FReport := Default(TRecordingReport);
   FReport.OutputPath := FOptions.OutputPath;
   FReport.FramesPerSecond := FOptions.FramesPerSecond;
+  FReport.AudioMode := FOptions.AudioMode;
 
   try
     Content := TShareableContent.Create;
@@ -263,6 +288,9 @@ begin
     FWriter := TMovieWriter.Create(FOptions.OutputPath, FOptions.Container,
       Geometry.PixelWidth, Geometry.PixelHeight, Geometry.FramesPerSecond,
       FReport.BitRate);
+    if Geometry.CapturesAudio then
+      FWriter.EnableAudio(FOptions.AudioSampleRate,
+        FOptions.AudioChannelCount, FOptions.AudioBitRate);
     if not FWriter.Open(AError) then
       Exit;
 
@@ -275,9 +303,15 @@ begin
       Exit;
     end;
 
-    WriteLn(Format('recording %dx%d @ %d fps (%d kbit/s) to %s — Ctrl-C to stop',
+    if Geometry.CapturesAudio then
+      AudioNote := Format(' + %s audio (%d kHz, %d ch)',
+        [AudioModeName(FOptions.AudioMode),
+        FOptions.AudioSampleRate div 1000, FOptions.AudioChannelCount])
+    else
+      AudioNote := '';
+    WriteLn(Format('recording %dx%d @ %d fps (%d kbit/s)%s to %s — Ctrl-C to stop',
       [Geometry.PixelWidth, Geometry.PixelHeight, Geometry.FramesPerSecond,
-      FReport.BitRate div 1000, FOptions.OutputPath]));
+      FReport.BitRate div 1000, AudioNote, FOptions.OutputPath]));
     Flush(Output);
 
     RunUntilStopped;
@@ -287,6 +321,10 @@ begin
     FReport.AppendedFrames := Statistics.AppendedFrames;
     FReport.DroppedFrames := Statistics.DroppedFrames;
     FReport.FailedAppends := Statistics.FailedAppends;
+    FReport.AppendedAudioSamples := Statistics.AppendedAudioSamples;
+    FReport.DroppedAudioEarly := Statistics.DroppedAudioEarly;
+    FReport.DroppedAudioStalled := Statistics.DroppedAudioStalled;
+    FReport.FailedAudioAppends := Statistics.FailedAudioAppends;
     FReport.DurationSeconds := Statistics.Duration;
 
     if not FWriter.Finish(FinishError) then

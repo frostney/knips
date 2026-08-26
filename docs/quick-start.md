@@ -11,7 +11,8 @@
 ## Prerequisites
 
 - macOS 13+ on Apple silicon (the tested target). ScreenCaptureKit needs
-  12.3; window capture via `initWithDesktopIndependentWindow:` needs 13.
+  12.3; window capture via `initWithDesktopIndependentWindow:` and system
+  audio (`--audio=system`) need 13.
 - FreePascal **3.2.2** (`brew install fpc`).
 - **lwpt** on PATH — release binary, or `./bootstrap.sh` in the lwpt repo
   and use `<lwpt-repo>/build/lwpt`.
@@ -50,13 +51,17 @@ opname record --out=<file>       .mp4 or .mov (required; replaced if present)
               [--scale=auto|1|2] pixels per point (default auto)
               [--no-cursor]      hide the pointer
               [--bitrate=N]      average bits/s (default derived from size × fps)
+              [--audio=none|system]
+                                 system audio onto an AAC track (default none)
 opname displays
 opname windows
 opname probe
 opname --version
 ```
 
-`--window` and `--rect` are mutually exclusive.
+`--window` and `--rect` are mutually exclusive. `--audio=system` needs
+macOS 13; it records the audio ScreenCaptureKit mixes for the captured
+content, not the microphone.
 
 ## Verifying a change end-to-end
 

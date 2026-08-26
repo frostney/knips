@@ -46,6 +46,31 @@ entry. **Gate:** `opname record` against a display produces a playable
 file whose frame count matches the appended-sample statistic. Until that
 runs, treat SCK-accepts-runtime-class as asserted, not proven.
 
+**Audio (milestone 4) re-runs this gate's logic on the same class.**
+`--audio=system` registers the *same* runtime-built object a second time
+for `SCStreamOutputTypeAudio`, on a second dispatch queue. Verified from
+Apple's headers: `SCStreamConfiguration.capturesAudio` / `sampleRate` /
+`channelCount` and `SCStreamOutputTypeAudio` = 1 all exist since macOS
+13; `kAudioFormatMPEG4AAC` is `'aac '` = 1633772320; `AVFormatIDKey`,
+`AVSampleRateKey`, `AVNumberOfChannelsKey`, `AVEncoderBitRateKey` and
+`AVMediaTypeAudio` link against AVFoundation (which re-exports AVFAudio).
+Still asserted, not proven, and clearable only by a real recording:
+
+- that SCK dispatches `stream:didOutputSampleBuffer:ofType:` to one
+  runtime-built object registered for two output types, with the right
+  `ofType:` value on each queue;
+- that AVAssetWriter accepts SCK's audio buffers unchanged — no format
+  description or timing fix-up between the audio output and the AAC
+  input;
+- that the audio SCK delivers before the first video frame (dropped and
+  counted here) is short enough not to clip the start of the track, and
+  that audio delivered *after* the session's source time but with an
+  earlier PTS is trimmed by the writer rather than rejected.
+
+**Gate:** `record --out=x.mp4 --audio=system` over playing audio
+produces a file whose audio track plays in sync in QuickTime Player,
+with a dropped-audio count near zero after the first frame.
+
 ### 2. `IsMultiThread := True` on the GCD capture thread
 
 Frames arrive on a GCD queue, not an FPC-created thread. Setting
@@ -65,7 +90,8 @@ or two.
 
 ## Out of scope
 
-Menu bar, region overlay, audio, and any second recording target. This
+Menu bar, region overlay, microphone capture, and any second recording
+target. Audio appears above only as a re-run of gate 1's logic. This
 spike is only the class-registration primitive and the single-display
 record path that exercises it. Later milestones add selectors to the same
 primitive and re-run gate 1's logic; they do not reopen the question of
