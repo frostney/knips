@@ -1,7 +1,7 @@
-unit Opname.Export.MovieWriter;
+unit Knips.Export.MovieWriter;
 
 // The movie sink: AVAssetWriter owns encoding (VideoToolbox underneath)
-// and muxing, so opname appends the raw BGRA sample buffers SCK delivers
+// and muxing, so knips appends the raw BGRA sample buffers SCK delivers
 // and gets an .mp4/.mov back — the same shape Kap's Aperture used
 // (ADR-0001). Timing comes from each buffer's own presentation stamp;
 // the session starts at the first appended frame's PTS.
@@ -29,10 +29,10 @@ uses
   SysUtils,
 
   CocoaAll,
-  MacOSAll,
-  Opname.Capture.CoreMedia,
-  Opname.Capture.PThreadMutex,
-  Opname.Options;
+  Knips.Capture.CoreMedia,
+  Knips.Capture.PThreadMutex,
+  Knips.Options,
+  MacOSAll;
 
 {$linkframework AVFoundation}
 {$linkframework CoreMedia}

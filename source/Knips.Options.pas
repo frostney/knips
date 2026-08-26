@@ -1,4 +1,4 @@
-unit Opname.Options;
+unit Knips.Options;
 
 // Recording and export options as the CLI hands them to the recorder
 // and the exporter: what to capture, at what rate, into which
@@ -41,7 +41,7 @@ const
   MinAudioBitRate = 32000;
   MaxAudioBitRate = 320000;
   // Bumped once per release that changes the CLI surface.
-  OpnameVersion = '0.1.0';
+  KnipsVersion = '0.1.0';
 
   // GIF delays are whole centiseconds, so anything above 50 fps cannot
   // be represented and 20 is what Kap-sized clips actually want.
@@ -316,7 +316,7 @@ begin
   end;
   if (AOptions.TargetKind = ctkWindow) and (AOptions.WindowID = 0) then
   begin
-    AError := '--window needs a non-zero window id (see `opname windows`)';
+    AError := '--window needs a non-zero window id (see `knips windows`)';
     Exit;
   end;
   if AOptions.HasRegion and ((AlignDimension(AOptions.Region.Width) = 0)

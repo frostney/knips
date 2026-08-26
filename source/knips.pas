@@ -1,16 +1,16 @@
-program opname;
+program knips;
 
-// opname — a native macOS screen recorder in FreePascal.
+// knips — a native macOS screen recorder in FreePascal.
 //
-//   opname app                   menu-bar app: drag a region, click to stop
-//   opname record --out=demo.mp4 [--display=N | --window=ID] [--rect=x,y,w,h]
+//   knips app                   menu-bar app: drag a region, click to stop
+//   knips record --out=demo.mp4 [--display=N | --window=ID] [--rect=x,y,w,h]
 //                 [--fps=30] [--scale=auto|1|2] [--no-cursor] [--bitrate=N]
 //                 [--audio=none|system]
-//   opname export --in=demo.mp4 --out=demo.gif [--fps=20] [--width=N]
+//   knips export --in=demo.mp4 --out=demo.gif [--fps=20] [--width=N]
 //                 [--trim=start,end] [--no-dither]
-//   opname displays              list capturable displays
-//   opname windows               list capturable on-screen windows
-//   opname probe                 verify the ObjC runtime + framework path
+//   knips displays              list capturable displays
+//   knips windows               list capturable on-screen windows
+//   knips probe                 verify the ObjC runtime + framework path
 //
 // Built and tested with lwpt. Capture is ScreenCaptureKit, the file is
 // written by AVAssetWriter, and the GIF encoder is pure Pascal; see
@@ -21,7 +21,7 @@ program opname;
 uses
   {$IFDEF DARWIN}
   cmem,        // libc heap: thread-safe without cthreads (prototype invariant)
-  Opname.ThreadManager, // pthread-backed RTL locks/events; no thread creation
+  Knips.ThreadManager, // pthread-backed RTL locks/events; no thread creation
   BaseUnix,
   ctypes,
   objc,        // the id type for the probe; the program is not in ObjC mode
@@ -32,19 +32,19 @@ uses
   CLI.Options,
   CLI.Subcommands,
   {$IFDEF DARWIN}
-  Opname.App,
-  Opname.App.Overlay,
-  Opname.Capture.ShareableContent,
-  Opname.Capture.Stream,
-  Opname.Export.GifPipeline,
-  Opname.Export.MovieWriter,
-  Opname.ObjC.Runtime,
-  Opname.Recording,
+  Knips.App,
+  Knips.App.Overlay,
+  Knips.Capture.ShareableContent,
+  Knips.Capture.Stream,
+  Knips.Export.GifPipeline,
+  Knips.Export.MovieWriter,
+  Knips.ObjC.Runtime,
+  Knips.Recording,
   {$ENDIF}
-  Opname.Options;
+  Knips.Options;
 
 const
-  ProgramName = 'opname';
+  ProgramName = 'knips';
   ExitOk = 0;
   ExitUsage = 1;
   ExitFailure = 2;
@@ -472,7 +472,7 @@ begin
     end;
   end;
 
-  TempPath := IncludeTrailingPathDelimiter(GetTempDir) + 'opname-probe.mp4';
+  TempPath := IncludeTrailingPathDelimiter(GetTempDir) + 'knips-probe.mp4';
   Writer := TMovieWriter.Create(TempPath, ocMPEG4, 1280, 720,
     DefaultFramesPerSecond, MinBitRate);
   try
@@ -538,9 +538,9 @@ begin
   Result[0] := TStringOption.Create('out',
     'Output file; .mp4 or .mov (required)');
   Result[1] := TIntegerOption.Create('display',
-    'Display index from `opname displays` (default: main)');
+    'Display index from `knips displays` (default: main)');
   Result[2] := TIntegerOption.Create('window',
-    'Record one window by id from `opname windows`');
+    'Record one window by id from `knips windows`');
   Result[3] := TStringOption.Create('rect',
     'Region of the display in points: left,top,width,height');
   Result[4] := TIntegerOption.Create('fps',
@@ -604,7 +604,7 @@ begin
   Result := (First = '--help') or (First = '-h') or (First = 'help');
 end;
 
-// True when this process was started as an app bundle (Opname.app). The
+// True when this process was started as an app bundle (Knips.app). The
 // bundle's CFBundleExecutable is the binary itself: a launcher script
 // that execs it breaks the LaunchServices handshake AppKit needs before
 // the menu bar will adopt a status item (seen on device — the item's
@@ -632,7 +632,7 @@ begin
   if (ParamCount = 1) and ((ParamStr(1) = '--version')
     or (ParamStr(1) = '-v')) then
   begin
-    WriteLn(ProgramName, ' ', OpnameVersion);
+    WriteLn(ProgramName, ' ', KnipsVersion);
     ExitCode := ExitOk;
     Exit;
   end;

@@ -1,12 +1,12 @@
-program Opname.App.State.Test;
+program Knips.App.State.Test;
 
 {$I Shared.inc}
 
 uses
   SysUtils,
 
-  Opname.App.State,
-  Opname.Options,
+  Knips.App.State,
+  Knips.Options,
   TestingPascalLibrary;
 
 type
@@ -199,7 +199,7 @@ procedure TOutputTests.SetupTests;
 begin
   Test('the file name carries a sortable timestamp',
     TestFileNameCarriesTheTimestamp);
-  Test('recordings live under ~/Movies/opname', TestDirectoryIsUnderMovies);
+  Test('recordings live under ~/Movies/knips', TestDirectoryIsUnderMovies);
   Test('a home directory with a trailing slash is not doubled',
     TestDirectoryToleratesATrailingSlash);
 end;
@@ -207,13 +207,13 @@ end;
 procedure TOutputTests.TestFileNameCarriesTheTimestamp;
 begin
   Expect<string>(RecordingFileName(EncodeDate(2026, 8, 26)
-    + EncodeTime(14, 5, 9, 0))).ToBe('opname-20260826-140509.mp4');
+    + EncodeTime(14, 5, 9, 0))).ToBe('knips-20260826-140509.mp4');
 end;
 
 procedure TOutputTests.TestDirectoryIsUnderMovies;
 begin
   Expect<string>(RecordingsDirectory('/Users/x'))
-    .ToBe('/Users/x' + PathDelim + 'Movies' + PathDelim + 'opname'
+    .ToBe('/Users/x' + PathDelim + 'Movies' + PathDelim + 'knips'
     + PathDelim);
 end;
 

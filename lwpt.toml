@@ -1,8 +1,8 @@
-# opname — a native macOS screen recorder in FreePascal (Kap's spiritual
+# knips — a native macOS screen recorder in FreePascal (Kap's spiritual
 # successor). Built, tested, and formatted with lwpt. See README.md.
 
 [package]
-name = "opname"
+name = "knips"
 version = "0.1.0"
 units = ["source", "source/capture"]
 
@@ -24,4 +24,4 @@ testing = { source = "frostney/lwpt", version = "^0.7.0", include = ["packages/t
 # If the runtime-built ObjC class spike fails on a given toolchain, the
 # documented escape hatch is a second entry with flags = ["-k-ld_classic"]
 # — see docs/tooling.md — never a change to this one.
-opname = { source = "source/opname.pas", output = "build/opname" }
+knips = { source = "source/knips.pas", output = "build/knips" }

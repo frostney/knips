@@ -2,7 +2,7 @@
 
 ## Mission
 
-opname is the screen recorder Kap was — a menu-bar tool that records a
+Knips is the screen recorder Kap was — a menu-bar tool that records a
 region, a window, or a display and hands you a small, shareable file —
 rebuilt native: one FreePascal binary, ScreenCaptureKit in, hardware
 H.264 out, no Electron, no runtime, no plugins process. It should feel
@@ -11,7 +11,7 @@ chat, and stay small enough that one person keeps it healthy.
 
 ## Product direction
 
-opname is a **member of the lwpt ecosystem**: built, tested, and
+Knips is a **member of the lwpt ecosystem**: built, tested, and
 formatted through lwpt, consuming lwpt's `cli` and `testing` packages the
 way duetto and lantaarn do, and vendoring lantaarn's capture bindings
 rather than a second copy of the framework surface.
@@ -25,16 +25,16 @@ and none of them drags `-ld_classic` into the build.
 
 ### Milestones
 
-1. **Headless recorder** (this release): `opname record` to `.mp4`/`.mov`
+1. **Headless recorder** (this release): `knips record` to `.mp4`/`.mov`
    from a display, region, or window; ScreenCaptureKit → AVAssetWriter;
    `probe` as the toolchain gate.
 2. **Menu bar + region overlay:** the Kap gesture — click the icon, drag
    a rectangle, record, click to stop. Cocoa through the same runtime-class
-   primitive. Pause on Option-click. *Landed as `opname app`, except
+   primitive. Pause on Option-click. *Landed as `knips app`, except
    Option-click pause.*
 3. **Exports:** GIF (Kap's signature output; palette + LZW in pure
    Pascal, testable on Linux), APNG, WebM via a post-process step; trim
-   before export. *GIF and trim have landed as `opname export`; APNG and
+   before export. *GIF and trim have landed as `knips export`; APNG and
    WebM have not.*
 4. **Audio:** system audio and microphone as a second AVAssetWriter input
    (SCK already delivers system audio buffers). *System audio landed as
@@ -46,18 +46,18 @@ and none of them drags `-ld_classic` into the build.
 ### Reachability and trust
 
 A recorder writes files; it needs Screen Recording permission and nothing
-else. opname never listens on a port and never injects input.
+else. Knips never listens on a port and never injects input.
 
-## What opname is not
+## What Knips is not
 
-- **Not a remote desktop** — lantaarn is. opname shares its capture
+- **Not a remote desktop** — lantaarn is. Knips shares its capture
   bindings, not its server.
 - **Not a plugin host.** Kap's plugin ecosystem was its most fragile part;
   exports are built in, in Pascal.
 - **Not cross-platform in this release.** ScreenCaptureKit and
   AVAssetWriter are the whole point; a Windows path
   (Windows.Graphics.Capture + Media Foundation) would be a parallel
-  implementation behind the same `Opname.Options`, not an abstraction
+  implementation behind the same `Knips.Options`, not an abstraction
   layered on top of macOS.
 - **Not an editor.** Trim and export, no timeline.
 

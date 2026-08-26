@@ -1,4 +1,4 @@
-unit Opname.Capture.ShareableContent;
+unit Knips.Capture.ShareableContent;
 
 // What the host can capture, as ScreenCaptureKit reports it. The query is
 // asynchronous in the framework; this unit pumps the run loop until the
@@ -20,8 +20,8 @@ uses
   SysUtils,
 
   CocoaAll,
-  MacOSAll,
-  Opname.Capture.ScreenCaptureKit;
+  Knips.Capture.ScreenCaptureKit,
+  MacOSAll;
 
 type
   TDisplayInfo = record

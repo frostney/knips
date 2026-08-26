@@ -1,4 +1,4 @@
-unit Opname.Capture.PThreadMutex;
+unit Knips.Capture.PThreadMutex;
 
 { Direct pthread_mutex wrapper for macOS.
 

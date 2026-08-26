@@ -1,4 +1,4 @@
-unit Opname.Capture.ScreenCaptureKit;
+unit Knips.Capture.ScreenCaptureKit;
 
 { Vendored from lantaarn's Lantaarn.Capture.ScreenCaptureKit (carried from
   the SoftKVM prototype's uScreenCaptureKit). What changed, and why, is in
@@ -7,7 +7,7 @@ unit Opname.Capture.ScreenCaptureKit;
   - TSCKOutputHandler (the FPC-defined objcclass that made the linker
     demand -ld_classic) and TSCKCapture are gone. The stream output object
     is now built through the Objective-C runtime API in
-    Opname.Capture.Stream, and this unit keeps only external declarations,
+    Knips.Capture.Stream, and this unit keeps only external declarations,
     which emit no method-list metadata.
   - Added: SCDisplay.frame, SCWindow.frame/owningApplication/isOnScreen/
     windowLayer, SCContentFilter.initWithDesktopIndependentWindow:,
@@ -27,7 +27,7 @@ interface
 
 {$IFDEF DARWIN}
 uses
-  SysUtils, MacOSAll, CocoaAll, ctypes, Opname.Capture.CoreMedia;
+  SysUtils, MacOSAll, CocoaAll, ctypes, Knips.Capture.CoreMedia;
 
 {$linkframework ScreenCaptureKit}
 

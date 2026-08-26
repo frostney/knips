@@ -1,4 +1,4 @@
-program Opname.Export.Gif.Test;
+program Knips.Export.Gif.Test;
 
 // The GIF encoder is checked against a decoder written here rather than
 // against golden bytes: every test encodes synthetic frames, parses the
@@ -13,8 +13,8 @@ uses
   Math,
   SysUtils,
 
-  Opname.Export.Bitmap,
-  Opname.Export.Gif,
+  Knips.Export.Bitmap,
+  Knips.Export.Gif,
   TestingPascalLibrary;
 
 type

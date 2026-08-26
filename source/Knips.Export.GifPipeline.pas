@@ -1,4 +1,4 @@
-unit Opname.Export.GifPipeline;
+unit Knips.Export.GifPipeline;
 
 // One export, start to finish: movie in, animated GIF out.
 //
@@ -27,12 +27,12 @@ uses
   SysUtils,
 
   CocoaAll,
-  MacOSAll,
-  Opname.Capture.CoreMedia,
-  Opname.Export.Bitmap,
-  Opname.Export.Gif,
-  Opname.Export.MovieReader,
-  Opname.Options;
+  Knips.Capture.CoreMedia,
+  Knips.Export.Bitmap,
+  Knips.Export.Gif,
+  Knips.Export.MovieReader,
+  Knips.Options,
+  MacOSAll;
 
 const
   // Enough spread to catch a palette change halfway through a clip

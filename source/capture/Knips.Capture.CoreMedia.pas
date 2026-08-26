@@ -1,10 +1,10 @@
-unit Opname.Capture.CoreMedia;
+unit Knips.Capture.CoreMedia;
 
 { Vendored from lantaarn's Lantaarn.Capture.VideoToolbox (itself carried from
   the SoftKVM prototype's uVideoToolbox). Renamed to say what it binds —
-  CoreVideo, CoreMedia, VideoToolbox and GCD — since opname's default
+  CoreVideo, CoreMedia, VideoToolbox and GCD — since knips's default
   pipeline lets AVAssetWriter own the VideoToolbox session. Contents are
-  carried as-is; opname's additions are in the marked block at the end of
+  carried as-is; knips's additions are in the marked block at the end of
   the interface. See docs/porting-notes.md. }
 
 {$mode objfpc}{$H+}
@@ -348,7 +348,7 @@ procedure dispatch_release(
   queue: dispatch_queue_t
 ); external name '_dispatch_release';
 
-{ ======== opname additions (not in the vendored original) ======== }
+{ ======== knips additions (not in the vendored original) ======== }
 
 { Presentation timing straight from the sample buffer. SCK delivers frames
   only when content changes, so a recorder must take timestamps from the

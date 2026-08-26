@@ -1,11 +1,11 @@
-unit Opname.App.State;
+unit Knips.App.State;
 
 // The menu-bar app's state machine and the pure decisions around it:
 // which command is legal in which state, what the status item reads, where
 // a recording is written, and how a dragged rectangle becomes a region.
 //
-// Everything here is platform-neutral and unit-tested; Opname.App and
-// Opname.App.Overlay hold the Cocoa objects and call into this unit for
+// Everything here is platform-neutral and unit-tested; Knips.App and
+// Knips.App.Overlay hold the Cocoa objects and call into this unit for
 // every decision that does not need a framework.
 
 {$I Shared.inc}
@@ -15,17 +15,17 @@ interface
 uses
   SysUtils,
 
-  Opname.Options;
+  Knips.Options;
 
 const
   // Menu-bar glyphs. Both are drawn as the status item's plain title, so
   // they inherit the menu bar's foreground colour in light and dark mode.
   IdleGlyph = '◉';
   RecordingGlyph = '⏺';
-  // ~/Movies/opname/opname-YYYYMMDD-HHMMSS.mp4
+  // ~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4
   MoviesFolderName = 'Movies';
-  RecordingsFolderName = 'opname';
-  RecordingFilePrefix = 'opname-';
+  RecordingsFolderName = 'knips';
+  RecordingFilePrefix = 'knips-';
   RecordingTimestampFormat = 'yyyymmdd-hhnnss';
   RecordingFileExtension = '.mp4';
   // Longer messages are elided in the menu; the full text goes to NSLog.
@@ -65,7 +65,7 @@ function FormatElapsed(ASeconds: Int64): string;
 
 function RecordingFileName(const AWhen: TDateTime): string;
 
-// ~/Movies/opname/, with a trailing path delimiter.
+// ~/Movies/knips/, with a trailing path delimiter.
 function RecordingsDirectory(const AHomeDirectory: string): string;
 
 // Two overlay corners into a region. Both points are already in the

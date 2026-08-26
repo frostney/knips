@@ -3,7 +3,7 @@
 ## Status
 
 Accepted and **proven on device** (2026-08-26, Apple silicon, stock
-linker, flag-free build): `opname probe` passed all four checks and a
+linker, flag-free build): `probe` passed all four checks and a
 real region recording produced a playable file with matching frame
 statistics — spike 0001's three gates are closed. This is the project's
 load-bearing decision.
@@ -18,7 +18,7 @@ generates Objective-C method-list metadata for such a class, and the
 current Apple linker (ld-prime, Xcode 15+) rejects that metadata —
 `malformed method list atom` — unless the whole link uses `-ld_classic`.
 lantaarn documented exactly this and dodged it by keeping ScreenCaptureKit
-out of its default build. opname cannot dodge it: SCK is the product.
+out of its default build. Knips cannot dodge it: SCK is the product.
 
 lwpt 0.7.0 can pass `-k-ld_classic` per build entry, so a flagged build
 is possible. But `-ld_classic` is the old linker; Apple has signalled its
@@ -27,7 +27,7 @@ linker flag is a standing liability, not a fix.
 
 ## Decision
 
-Build every Objective-C class opname defines through libobjc's C runtime
+Build every Objective-C class Knips defines through libobjc's C runtime
 API — `objc_allocateClassPair`, `class_addIvar`, `class_addMethod`,
 `class_addProtocol`, `objc_registerClassPair` — with plain `cdecl` Pascal
 routines as method bodies. Those runtime functions are already bound in
@@ -37,9 +37,9 @@ the default build links with the stock linker and no flags.
 `objcclass` is still used, but only as `external` bindings for framework
 classes, which emit no such metadata.
 
-`Opname.ObjC.Runtime` is the primitive (a `TRuntimeClassBuilder` plus
-instance helpers); `Opname.ObjC.TypeEncoding` supplies method type
-encodings so they are never hand-typed. `opname probe` registers and
+`Knips.ObjC.Runtime` is the primitive (a `TRuntimeClassBuilder` plus
+instance helpers); `Knips.ObjC.TypeEncoding` supplies method type
+encodings so they are never hand-typed. `knips probe` registers and
 exercises the first such class as the on-device gate.
 
 ## Consequences

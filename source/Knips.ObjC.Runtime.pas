@@ -1,4 +1,4 @@
-unit Opname.ObjC.Runtime;
+unit Knips.ObjC.Runtime;
 
 // Objective-C classes built at run time through libobjc's C API instead
 // of FPC's `objcclass` syntax. This is the spike ADR-0002 rests on: an
@@ -73,7 +73,7 @@ procedure SetPointerIvar(AInstance: id; const AIvarName: string;
 function GetPointerIvar(AInstance: id; const AIvarName: string): Pointer;
 function RespondsToSelector(AInstance: id; const ASelector: string): Boolean;
 // Whether the class (or an ancestor) has an implementation for the
-// selector, without needing an instance. `opname probe` uses it on the
+// selector, without needing an instance. `knips probe` uses it on the
 // overlay classes, whose instances would need a window to be worth making.
 function ClassImplementsSelector(AClass: pobjc_class;
   const ASelector: string): Boolean;

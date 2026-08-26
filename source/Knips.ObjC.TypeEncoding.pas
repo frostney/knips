@@ -1,4 +1,4 @@
-unit Opname.ObjC.TypeEncoding;
+unit Knips.ObjC.TypeEncoding;
 
 // Objective-C method type encodings for classes built through the
 // runtime API (class_addMethod needs one per method). The encoding is a

@@ -3,11 +3,11 @@
 ## Executive Summary
 
 - Prereqs: macOS on Apple silicon, FPC 3.2.2, lwpt ≥ 0.7.0 on PATH.
-- `lwpt install` → `lwpt build` → `./build/opname probe` → `./build/opname
+- `lwpt install` → `lwpt build` → `./build/knips probe` → `./build/knips
   record --out=demo.mp4`, Ctrl-C to stop.
-- `./build/opname app` is the menu-bar version: click the icon, drag a
+- `./build/knips app` is the menu-bar version: click the icon, drag a
   rectangle, click again to stop.
-- `./build/opname export --in=demo.mp4 --out=demo.gif` turns the
+- `./build/knips export --in=demo.mp4 --out=demo.gif` turns the
   recording into an animated GIF, optionally trimmed and scaled.
 - Grant Screen Recording on first run; a rebuilt binary re-prompts.
 - `lwpt test` runs the neutral suites on any OS, including Linux CI.
@@ -25,8 +25,8 @@
 
 ```sh
 lwpt install       # cli + testing from the lwpt 0.7.0 tag into .lwpt/modules
-lwpt build         # build/opname
-./build/opname probe
+lwpt build         # build/knips
+./build/knips probe
 ```
 
 `probe` must print `probe: ok`. It registers the runtime-built stream
@@ -37,8 +37,8 @@ AVAssetWriter on a temp file. If any line fails, read
 before touching code.
 
 ```sh
-./build/opname displays
-./build/opname record --out=demo.mp4            # main display, auto scale, 30 fps
+./build/knips displays
+./build/knips record --out=demo.mp4            # main display, auto scale, 30 fps
 ```
 
 Press Ctrl-C once. The last line reports size, duration, and frame
@@ -47,8 +47,8 @@ counts; open the file in QuickTime Player.
 ## The menu bar app
 
 ```sh
-./build/opname app          # runs until you quit from the menu
-tools/make-app.sh           # or wrap it: build/Opname.app, double-clickable
+./build/knips app          # runs until you quit from the menu
+tools/make-app.sh           # or wrap it: build/Knips.app, double-clickable
 ```
 
 A `◉` appears in the menu bar. Clicking it opens:
@@ -59,26 +59,27 @@ A `◉` appears in the menu bar. Clicking it opens:
 | Record Display | Records the main display straight away. |
 | Stop Recording | Enabled only while recording. |
 | Cancel selection | Enabled only while selecting. The overlay covers the menu bar, so this only matters if the overlay failed to open. |
-| Recordings folder | Opens `~/Movies/opname/` in Finder. |
+| Recordings folder | Opens `~/Movies/knips/` in Finder. |
 | Last error: … | Only visible after a failure; the full text is in Console.app. |
-| Quit opname | Stops a running recording first. |
+| Quit Knips | Stops a running recording first. |
 
 While recording the title reads `⏺ 0:07` and ticks once a second, and the
 menu is detached so **one click on the icon stops** — Kap's gesture. The
 price of that gesture is that Quit is unreachable until you stop; one
 click does it. The finished file lands in
-`~/Movies/opname/opname-YYYYMMDD-HHMMSS.mp4` and is revealed in Finder.
+`~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4` and is revealed in Finder.
 
 If Screen Recording has not been granted, the recording fails
 immediately, the icon goes back to `◉`, and the reason shows up as
-`Last error: …`. opname does not retry — grant the permission in System
+`Last error: …`. Knips does not retry — grant the permission in System
 Settings › Privacy & Security › Screen Recording and click again.
+
 ## Exporting a GIF
 
 ```sh
-./build/opname export --in=demo.mp4 --out=demo.gif
-./build/opname export --in=demo.mp4 --out=demo.gif --width=800 --fps=15
-./build/opname export --in=demo.mp4 --out=demo.gif --trim=1.5,4
+./build/knips export --in=demo.mp4 --out=demo.gif
+./build/knips export --in=demo.mp4 --out=demo.gif --width=800 --fps=15
+./build/knips export --in=demo.mp4 --out=demo.gif --trim=1.5,4
 ```
 
 `export` reads the movie twice: once to sample colours for a single
@@ -95,18 +96,18 @@ stamps, so an idle stretch stays idle instead of being padded out.
 
 Only `.gif` is accepted for `--out` in this release, and trimming an
 `.mp4` into another `.mp4` is not supported — that would need a
-re-encoder, and opname is not an editor. A source whose video track
+re-encoder, and Knips is not an editor. A source whose video track
 carries a rotation or mirroring matrix — a phone recording held
 sideways, say — is refused rather than exported the wrong way up;
-opname's own recordings never carry one.
+Knips's own recordings never carry one.
 
 ## Flags
 
 ```text
-opname app                       menu-bar app; no options
-opname record --out=<file>       .mp4 or .mov (required; replaced if present)
-              [--display=N]      index from `opname displays` (default: main)
-              [--window=ID]      one window, id from `opname windows`
+knips app                       menu-bar app; no options
+knips record --out=<file>       .mp4 or .mov (required; replaced if present)
+              [--display=N]      index from `knips displays` (default: main)
+              [--window=ID]      one window, id from `knips windows`
               [--rect=x,y,w,h]   region of the display in points
               [--fps=N]          1–120 (default 30)
               [--scale=auto|1|2] pixels per point (default auto)
@@ -114,16 +115,16 @@ opname record --out=<file>       .mp4 or .mov (required; replaced if present)
               [--bitrate=N]      average bits/s (default derived from size × fps)
               [--audio=none|system]
                                  system audio onto an AAC track (default none)
-opname export --in=<file>        .mp4 or .mov (required)
+knips export --in=<file>        .mp4 or .mov (required)
               --out=<file>       .gif (required; replaced if present)
               [--fps=N]          1–50 (default 20)
               [--width=N]        16–4096; scales down, keeps the aspect ratio
               [--trim=start,end] seconds, decimals allowed, either side optional
               [--no-dither]      skip Floyd–Steinberg dithering
-opname displays
-opname windows
-opname probe
-opname --version
+knips displays
+knips windows
+knips probe
+knips --version
 ```
 
 `--window` and `--rect` are mutually exclusive. `--audio=system` needs
@@ -134,11 +135,11 @@ content, not the microphone.
 
 ```sh
 lwpt format --check && lwpt build && lwpt test
-./build/opname probe
-./build/opname record --out=/tmp/check.mp4 --rect=0,0,640,360 --fps=60
+./build/knips probe
+./build/knips record --out=/tmp/check.mp4 --rect=0,0,640,360 --fps=60
 # Ctrl-C after ~5 s, then:
 open /tmp/check.mp4
-./build/opname export --in=/tmp/check.mp4 --out=/tmp/check.gif --width=640
+./build/knips export --in=/tmp/check.mp4 --out=/tmp/check.gif --width=640
 open /tmp/check.gif
 ```
 

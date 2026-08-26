@@ -3,9 +3,9 @@
 ## Status: CLOSED — passed on device 2026-08-26
 
 On Apple silicon (Darwin 25.5.0), after the `objc_msgSend` symbol-name
-fix and the `Opname.ThreadManager` install (both required before the
+fix and the `Knips.ThreadManager` install (both required before the
 binary would run at all): `probe` printed all four checks and `probe:
-ok`; `opname record --rect=0,0,640,360 --fps=30` wrote a playable
+ok`; `record --rect=0,0,640,360 --fps=30` wrote a playable
 1280x720 H.264 file — 133 frames, 0 dropped, duration 4.86 s matching
 the appended-frame span. Gates 1 and 3 are closed outright; gate 2's
 multi-minute soak remains a good idea but the primitive is proven.
@@ -15,15 +15,15 @@ ADR-0002's status now records this.
 
 ADR-0002 asserts that an Objective-C class assembled through libobjc's C
 runtime API (no compiler-emitted method-list metadata) can stand in
-everywhere opname needs a delegate — starting with ScreenCaptureKit's
+everywhere Knips needs a delegate — starting with ScreenCaptureKit's
 `SCStreamOutput`. That assertion is unproven off-device: FPC on Linux
 will not parse Objective-C mode, and the linker interaction the whole
 design avoids only exists on Apple silicon. This spike is the on-device
 gate that turns the assertion into a fact.
 
-## What `opname probe` must show
+## What `knips probe` must show
 
-`opname probe` is the executable form of this spike. It must, on macOS
+`knips probe` is the executable form of this spike. It must, on macOS
 on Apple silicon, in the flag-free default build:
 
 1. Register a class with `objc_allocateClassPair` /
@@ -37,7 +37,7 @@ on Apple silicon, in the flag-free default build:
 4. Release the instance after the owner back-pointer is cleared, with no
    late-callback crash.
 
-Passing means the primitive in `Opname.ObjC.Runtime` is sound and the
+Passing means the primitive in `Knips.ObjC.Runtime` is sound and the
 default build genuinely links flag-free with the stock linker.
 
 ## The three unverified claims
@@ -53,7 +53,7 @@ belt-and-braces. But "should be" is the whole risk: if SCK checks
 `conformsToProtocol:` before accepting the output, or the metadata it
 reads differs from what `class_addProtocol` installs, the design's
 premise fails and the fallback is the quarantined `-ld_classic` build
-entry. **Gate:** `opname record` against a display produces a playable
+entry. **Gate:** `knips record` against a display produces a playable
 file whose frame count matches the appended-sample statistic. Until that
 runs, treat SCK-accepts-runtime-class as asserted, not proven.
 

@@ -1,13 +1,13 @@
-unit Opname.ThreadManager;
+unit Knips.ThreadManager;
 
 // Minimal pthread-backed RTL thread manager for the no-cthreads build.
 //
-// opname cannot use cthreads: its adoption of the RTL signal handlers
+// knips cannot use cthreads: its adoption of the RTL signal handlers
 // intercepts a benign SIGSEGV raised inside CoreMedia's XPC
 // deserialisation of SCK sample buffers (docs/architecture.md, the
-// vendored Opname.Capture.PThreadMutex header). But without any thread
+// vendored Knips.Capture.PThreadMutex header). But without any thread
 // manager, FPC's NoThreadManager stubs hard-error (RTE 232) for critical
-// sections and events as soon as IsMultiThread is True — and opname sets
+// sections and events as soon as IsMultiThread is True — and knips sets
 // IsMultiThread at startup so managed-type refcounts use locked
 // instructions. Off-device type checking could not catch this; the first
 // on-device run did.
@@ -28,7 +28,7 @@ interface
 
 {$IFDEF DARWIN}
 
-procedure InstallOpnameThreadManager;
+procedure InstallKnipsThreadManager;
 
 {$ENDIF}
 
@@ -42,7 +42,7 @@ uses
 const
   // Generous opaque sizes: pthread_mutex_t is 64 bytes on darwin/arm64,
   // pthread_cond_t 48, pthread_mutexattr_t 16 (the same headroom rule as
-  // the vendored Opname.Capture.PThreadMutex).
+  // the vendored Knips.Capture.PThreadMutex).
   MutexOpaqueSize = 128;
   CondOpaqueSize = 64;
   AttrOpaqueSize = 32;
@@ -321,7 +321,7 @@ begin
   Result := TThreadID(Pthread_self);
 end;
 
-procedure InstallOpnameThreadManager;
+procedure InstallKnipsThreadManager;
 var
   Manager: TThreadManager;
 begin
@@ -347,7 +347,7 @@ begin
 end;
 
 initialization
-  InstallOpnameThreadManager;
+  InstallKnipsThreadManager;
 
 {$ENDIF}
 

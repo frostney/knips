@@ -3,7 +3,7 @@
 ## Executive Summary
 
 - Delphi mode via `source/Shared.inc`; style enforced by `lwpt format`.
-- Namespaced units (`Opname.<Layer>.<Name>.pas`), flat under `source/`;
+- Namespaced units (`Knips.<Layer>.<Name>.pas`), flat under `source/`;
   tests co-located as `*.Test.pas`.
 - Darwin units add `{$modeswitch objectivec2}` / `cblocks` / `cvar`
   under `{$IFDEF DARWIN}` and compile to empty shells elsewhere.
@@ -25,8 +25,8 @@ Pascal identifier is free.
 ## Compiler mode and modeswitches
 
 - Default: `{$mode delphi}{$H+}` from `source/Shared.inc`.
-- Darwin units (`Opname.Capture.*`, `Opname.Export.*`,
-  `Opname.Recording`, `Opname.ObjC.Runtime`) enable `objectivec2` (to
+- Darwin units (`Knips.Capture.*`, `Knips.Export.*`,
+  `Knips.Recording`, `Knips.ObjC.Runtime`) enable `objectivec2` (to
   call `objcclass external` bindings), `cblocks` (to pass a global
   `cdecl` procedure where a framework wants a completion block), and
   `cvar` (for `NSString` constants declared `cvar; external`). These sit
@@ -49,14 +49,14 @@ Verified against FPC 3.2.2's own headers (`univint`, `cocoaint`):
 | Protocol key in dictionaries | pass `id(Key)` to `setObject_forKey` | output settings |
 
 Never declare a non-`external` `objcclass`; build the class through
-`Opname.ObjC.Runtime` instead ([ADR-0002](adr/0002-runtime-built-objc-classes.md)).
+`Knips.ObjC.Runtime` instead ([ADR-0002](adr/0002-runtime-built-objc-classes.md)).
 
 ## Vendored code (`source/capture/`)
 
 Carried from lantaarn (itself from the SoftKVM prototype). Units are
-renamed into `Opname.Capture.*`; contents stay unrestyled and inline
+renamed into `Knips.Capture.*`; contents stay unrestyled and inline
 directives stay where they were, so diffs against lantaarn remain
-readable. Additions live under an `opname additions` banner. Excluded
+readable. Additions live under a `knips additions` banner. Excluded
 from `lwpt format` via `[format] exclude`. Substantive changes are in
 [porting-notes.md](porting-notes.md).
 

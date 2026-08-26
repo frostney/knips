@@ -1,13 +1,13 @@
-# opname pre-commit hook.
+# knips pre-commit hook.
 #
 # Install once per fresh clone:  lefthook install
 #
 # Local pre-commit runs the canonical formatter (`lwpt format`) and
 # re-stages any files it rewrites. The heavyweight gates — `lwpt format
-# --check`, `lwpt build`, `lwpt test`, `opname probe` on a Mac — belong to
+# --check`, `lwpt build`, `lwpt test`, `knips probe` on a Mac — belong to
 # the PR / CI flow so local commits stay fast.
 #
-# lwpt is expected on PATH. Point OPNAME_LWPT at another lwpt binary to
+# lwpt is expected on PATH. Point KNIPS_LWPT at another lwpt binary to
 # override. Do NOT bypass with `git commit --no-verify` unless a
 # maintainer explicitly authorises it.
 
@@ -20,7 +20,7 @@ pre-commit:
 
     format:
       glob: "*.{pas,inc,dpr,toml}"
-      run: ${OPNAME_LWPT:-lwpt} format
+      run: ${KNIPS_LWPT:-lwpt} format
       stage_fixed: true
       fail_text: |
         lwpt format failed. Inspect the output above; the formatter only

@@ -1,7 +1,7 @@
-unit Opname.App;
+unit Knips.App;
 
 // The menu-bar app: an NSStatusItem, its menu, and the state machine that
-// decides what each click means. `opname app` sets the activation policy
+// decides what each click means. `knips app` sets the activation policy
 // to Accessory (no Dock tile, no main menu) and hands the process to
 // NSApp's run loop; everything below happens inside it, on the main
 // thread.
@@ -13,10 +13,10 @@ unit Opname.App;
 //                                                                v
 //                                                             asIdle
 //
-// Legal transitions live in Opname.App.State (platform-neutral, tested);
+// Legal transitions live in Knips.App.State (platform-neutral, tested);
 // this unit only owns the Cocoa objects and the recording session.
 //
-// The one Objective-C class defined here, OpnameAppTarget, is assembled
+// The one Objective-C class defined here, KnipsAppTarget, is assembled
 // at run time (ADR-0002): AppKit needs a target object for the menu
 // items, the status item's button and the elapsed-time timer, and every
 // one of its methods is a plain cdecl Pascal routine that recovers the
@@ -41,20 +41,20 @@ uses
   SysUtils,
 
   CocoaAll,
-  MacOSAll,
-  Opname.App.Overlay,
-  Opname.App.State,
-  Opname.Capture.ShareableContent,
-  Opname.ObjC.Runtime,
-  Opname.Options,
-  Opname.Recording;
+  Knips.App.Overlay,
+  Knips.App.State,
+  Knips.Capture.ShareableContent,
+  Knips.ObjC.Runtime,
+  Knips.Options,
+  Knips.Recording,
+  MacOSAll;
 
 // Installs the status item and runs NSApp until the user quits. Returns
 // False with a message when the app cannot be set up at all; a failed
 // recording is reported through the menu, not through this result.
 function RunMenuBarApp(out AError: string): Boolean;
 
-// Registers OpnameAppTarget once per process; exposed so `opname probe`
+// Registers KnipsAppTarget once per process; exposed so `knips probe`
 // can gate on registration without starting the app.
 procedure EnsureAppClasses;
 
@@ -67,19 +67,19 @@ implementation
 {$IFDEF DARWIN}
 
 uses
-  Opname.ObjC.TypeEncoding;
+  Knips.ObjC.TypeEncoding;
 
 const
-  TargetClassName = 'OpnameAppTarget';
+  TargetClassName = 'KnipsAppTarget';
   TargetSuperclassName = 'NSObject';
-  OwnerIvarName = 'opnameOwner';
+  OwnerIvarName = 'knipsOwner';
 
   RecordRegionSelector = 'recordRegion:';
   RecordDisplaySelector = 'recordDisplay:';
   StopRecordingSelector = 'stopRecording:';
   CancelSelectionSelector = 'cancelSelection:';
   RevealRecordingsSelector = 'revealRecordings:';
-  QuitSelector = 'quitOpname:';
+  QuitSelector = 'quitKnips:';
   TimerFiredSelector = 'timerFired:';
   StartPendingSelector = 'startPending:';
   StopPendingSelector = 'stopPending:';
@@ -89,10 +89,10 @@ const
   StopRecordingTitle = 'Stop Recording';
   CancelSelectionTitle = 'Cancel selection';
   RevealRecordingsTitle = 'Recordings folder';
-  QuitTitle = 'Quit opname';
-  MenuTitle = 'opname';
-  IdleToolTip = 'opname — click for the menu';
-  RecordingToolTip = 'opname — click to stop recording';
+  QuitTitle = 'Quit Knips';
+  MenuTitle = 'Knips';
+  IdleToolTip = 'Knips — click for the menu';
+  RecordingToolTip = 'Knips — click to stop recording';
 
   ElapsedTimerSeconds = 1.0;
   // A zero-delay one-shot: the selection commits inside the overlay
@@ -177,11 +177,11 @@ end;
 
 procedure LogMessage(const AMessage: string);
 begin
-  NSLog(PascalToNSString('opname: %@'), PascalToNSString(AMessage));
+  NSLog(PascalToNSString('knips: %@'), PascalToNSString(AMessage));
 end;
 
-{ OpnameAppTarget method bodies. Each recovers the controller from the
-  opnameOwner ivar; a nil owner means the app is tearing down.
+{ KnipsAppTarget method bodies. Each recovers the controller from the
+  knipsOwner ivar; a nil owner means the app is tearing down.
 
   Every body is wrapped in try..except. AppKit calls these directly, and a
   Pascal exception escaping into an Objective-C frame has nothing to

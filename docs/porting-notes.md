@@ -1,4 +1,4 @@
-# Porting notes: lantaarn → opname
+# Porting notes: lantaarn → Knips
 
 What was carried from lantaarn's capture core into a recorder, what
 changed, and why. Written for whoever extends this next.
@@ -6,7 +6,7 @@ changed, and why. Written for whoever extends this next.
 ## Executive Summary
 
 - Three units are vendored: the CoreMedia/CoreVideo/VideoToolbox/GCD
-  bindings (renamed `Opname.Capture.CoreMedia`), the ScreenCaptureKit
+  bindings (renamed `Knips.Capture.CoreMedia`), the ScreenCaptureKit
   external declarations, and the pthread mutex. The two encoders are
   deliberately not carried.
 - The FPC-defined `TSCKOutputHandler` — the reason lantaarn kept SCK
@@ -34,7 +34,7 @@ tagged for a WebSocket. `TVideoEncoder` stamped frames as
 ### Runtime-built output object instead of `objcclass`
 
 The only thing SCK needs is an object that responds to
-`stream:didOutputSampleBuffer:ofType:`. `Opname.ObjC.Runtime` assembles
+`stream:didOutputSampleBuffer:ofType:`. `Knips.ObjC.Runtime` assembles
 one with `objc_allocateClassPair` / `class_addIvar` / `class_addMethod`
 / `objc_registerClassPair` (all in FPC's RTL `objc` unit) and a plain
 `cdecl` Pascal routine as the method body. No FPC ObjC metadata is
@@ -46,7 +46,7 @@ is what makes region and window capture possible at all.
 
 The streaming encoder converted AVCC → Annex-B and prepended a wire
 tag; a file wants AVCC in an `avcC` box with a sample table. Rather than
-port a muxer, opname appends SCK's BGRA sample buffers to an
+port a muxer, knips appends SCK's BGRA sample buffers to an
 `AVAssetWriterInput` with H.264 output settings, exactly as Kap's
 Aperture did. `Lantaarn.Capture.VideoEncoder` and `AudioEncoder` are
 therefore not carried; the bindings unit they used is, renamed to say
@@ -58,12 +58,12 @@ SCK emits frames when content changes, so a frame-counting PTS makes
 idle periods play back fast. `TMovieWriter` starts the session at the
 first buffer's `CMSampleBufferGetPresentationTimeStamp` and lets each
 buffer carry its own. Added to the vendored CoreMedia unit under the
-`opname additions` banner.
+`knips additions` banner.
 
 ### Complete-frame filter
 
 SCK tags every video buffer with `SCStreamFrameInfoStatus`. lantaarn
-only checked for a non-nil image buffer; opname also requires
+only checked for a non-nil image buffer; Knips also requires
 `Complete`, so idle/blank/suspended buffers never reach the writer.
 
 ### Bindings added to the SCK unit
@@ -75,10 +75,21 @@ key and values. `TSCKOutputHandler`, `TSCKCapture`, and the
 `SCStreamOutputProtocol` declaration are removed. The block types and
 run-loop-pumped completion pattern are unchanged.
 
+### The rename reached the vendored units too
+
+The project shipped its first milestones under the name *opname*, and the
+vendored units carried that prefix: `Lantaarn.Capture.*` became
+`Opname.Capture.*`, and with the rename to Knips they became
+`Knips.Capture.*`. Both passes touched only the unit header, the `uses`
+clauses, and the `knips additions` banner — never a line of carried body.
+That is the same seam the units were vendored along in the first place,
+so `source/capture/**` stays outside `lwpt format` and a diff against
+lantaarn still reads as it did on day one.
+
 ### No cthreads, no duetto
 
 lantaarn needed `cthreads` for duetto and could afford it because its
-default capture path was in-process. opname has no duetto and does need
+default capture path was in-process. Knips has no duetto and does need
 SCK, so it returns to the prototype's shape: `cmem` first, pthread
 mutexes, no exceptions on the capture queue. One addition:
 `IsMultiThread := True` at startup, so the RTL's refcount updates use
@@ -97,7 +108,7 @@ spike.
 ## Not verified — needs a Mac
 
 Listed in [spikes/0001-runtime-objc-class.md](spikes/0001-runtime-objc-class.md).
-Also noted, in carried code that opname does not compile today:
+Also noted, in carried code that Knips does not compile today:
 `Lantaarn.Capture.AudioEncoder` declares `cdecl; external name
 'AudioConverterNew'` without the leading underscore that every other
 Darwin binding (and FPC's own `univint/AudioConverter.pas`) uses. Whether
@@ -106,7 +117,7 @@ MacOSAll's `AudioConverter` bindings and drop the hand-written ones.
 
 ## Next
 
-- `opname probe` and a real recording on Apple silicon — clears the spike.
+- `knips probe` and a real recording on Apple silicon — clears the spike.
 - Menu bar + region overlay on the same runtime-class primitive.
 - GIF export in pure Pascal (testable on Linux).
 - Audio as a second writer input from SCK's audio output.

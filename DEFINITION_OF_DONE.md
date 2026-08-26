@@ -5,7 +5,7 @@ A change is shippable only when every applicable item holds.
 - `lwpt format --check`, `lwpt build`, and `lwpt test` exit zero.
 - Platform-neutral code has co-located `*.Test.pas` coverage of its
   public surface.
-- Darwin changes have been exercised on a Mac: `opname probe` passes and
+- Darwin changes have been exercised on a Mac: `knips probe` passes and
   a recording produced by the change plays in QuickTime Player at the
   expected size, rate, and duration.
 - Anything that could not be verified on hardware is listed in the

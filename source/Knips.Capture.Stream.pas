@@ -1,4 +1,4 @@
-unit Opname.Capture.Stream;
+unit Knips.Capture.Stream;
 
 // One ScreenCaptureKit stream: display or window filter, optional source
 // rect, fixed output size and frame rate. Video sample buffers arrive on
@@ -9,7 +9,7 @@ unit Opname.Capture.Stream;
 // time for SCStreamOutputTypeAudio on its own queue; those buffers reach
 // OnSample as skAudio without the frame-status filter, which is video-only.
 //
-// The SCStreamOutput object is assembled at run time (Opname.ObjC.Runtime)
+// The SCStreamOutput object is assembled at run time (Knips.ObjC.Runtime)
 // rather than declared as an objcclass — see ADR-0002. Its one method is
 // the plain cdecl routine StreamOutputSampleBuffer below.
 //
@@ -31,10 +31,10 @@ uses
   SysUtils,
 
   CocoaAll,
-  MacOSAll,
-  Opname.Capture.CoreMedia,
-  Opname.Capture.ScreenCaptureKit,
-  Opname.ObjC.Runtime;
+  Knips.Capture.CoreMedia,
+  Knips.Capture.ScreenCaptureKit,
+  Knips.ObjC.Runtime,
+  MacOSAll;
 
 type
   TSampleKind = (skVideo, skAudio);
@@ -83,7 +83,7 @@ type
   end;
 
 // The runtime-built output class, registered on first use. Exposed so
-// `opname probe` can verify registration without starting a stream.
+// `knips probe` can verify registration without starting a stream.
 function EnsureStreamOutputClass: pobjc_class;
 
 function StreamOutputClassName: string;
@@ -95,19 +95,19 @@ implementation
 {$IFDEF DARWIN}
 
 uses
-  Opname.ObjC.TypeEncoding;
+  Knips.ObjC.TypeEncoding;
 
 const
-  OutputClassName = 'OpnameStreamOutput';
+  OutputClassName = 'KnipsStreamOutput';
   OutputSuperclassName = 'NSObject';
   OutputProtocolName = 'SCStreamOutput';
-  OwnerIvarName = 'opnameOwner';
+  OwnerIvarName = 'knipsOwner';
   SampleSelector = 'stream:didOutputSampleBuffer:ofType:';
-  VideoQueueLabel = 'opname.capture.video';
+  VideoQueueLabel = 'knips.capture.video';
   // SCK delivers audio on its own output; giving it its own queue keeps
   // audio delivery from waiting behind a video append. The two appends
   // still serialise on the writer's mutex, but only for the append itself.
-  AudioQueueLabel = 'opname.capture.audio';
+  AudioQueueLabel = 'knips.capture.audio';
   // Frames SCK may hold while the writer catches up during a keyframe.
   QueueDepth = 5;
   CompletionTimeoutSlices = 5000;

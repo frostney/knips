@@ -1,8 +1,8 @@
-unit Opname.Export.MovieReader;
+unit Knips.Export.MovieReader;
 
 // The movie source: AVAssetReader decodes an .mp4/.mov video track and
 // hands back BGRA CVPixelBuffers with their presentation stamps — the
-// mirror image of Opname.Export.MovieWriter, and declared in the same
+// mirror image of Knips.Export.MovieWriter, and declared in the same
 // style (external objcclass bindings, no runtime-built classes needed
 // because nothing here is a delegate).
 //
@@ -27,8 +27,8 @@ uses
   SysUtils,
 
   CocoaAll,
-  MacOSAll,
-  Opname.Capture.CoreMedia;
+  Knips.Capture.CoreMedia,
+  MacOSAll;
 
 {$linkframework AVFoundation}
 {$linkframework CoreMedia}

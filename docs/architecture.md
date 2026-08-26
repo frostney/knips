@@ -3,7 +3,7 @@
 ## Executive Summary
 
 - One binary: ScreenCaptureKit stream → complete-frame filter →
-  AVAssetWriter input (hardware H.264) → `.mp4`/`.mov`. opname never
+  AVAssetWriter input (hardware H.264) → `.mp4`/`.mov`. Knips never
   touches pixels or NAL units; it moves sample buffers.
 - `--audio=system` adds SCK's audio output and a second AVAssetWriter
   input (AAC) to the same file; see [System audio](#system-audio).
@@ -13,7 +13,7 @@
   ([ADR-0002](adr/0002-runtime-built-objc-classes.md)). The menu bar's
   target, the selection overlay's view and its window ride on the same
   primitive.
-- `opname app` is the same binary in a second shape: an Accessory-policy
+- `knips app` is the same binary in a second shape: an Accessory-policy
   `NSApplication` with a status item, whose recording lifecycle is
   `TRecordingSession.StartCapture` … NSApp's run loop … `FinishCapture`.
 - Timing is taken from each sample buffer's presentation stamp; the
@@ -28,11 +28,11 @@
 ## Process shape
 
 ```text
- ┌──────────────────────────── opname (one binary) ──────────────────────┐
+ ┌──────────────────────────── knips (one binary) ────────────────────────┐
  │                                                                        │
  │  main thread                          capture queue (GCD, SCK-owned)   │
  │  ┌──────────────────────┐             ┌──────────────────────────────┐ │
- │  │ opname.pas: CLI      │             │ OpnameStreamOutput           │ │
+ │  │ knips.pas: CLI       │             │ KnipsStreamOutput            │ │
  │  │ TRecordingSession    │             │  (runtime-built class)       │ │
  │  │  resolve target      │             │  stream:didOutputSample…     │ │
  │  │  size geometry       │             │        │                     │ │
@@ -52,14 +52,14 @@
 
 | Layer | Units | Notes |
 | --- | --- | --- |
-| CLI | `opname.pas` | lwpt `cli` package: `app`, `record`, `export`, `displays`, `windows`, `probe`; SIGINT/SIGTERM → `StopRequested` |
-| App | `Opname.App`, `Opname.App.Overlay`, `Opname.App.State` | Status item + menu, selection overlay, and the neutral state machine (tested) |
-| Recording | `Opname.Recording` | Target → filter + geometry → writer → stream; progress; report |
-| Capture | `Opname.Capture.ShareableContent`, `Opname.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
-| Export (Darwin) | `Opname.Export.MovieWriter`, `Opname.Export.MovieReader`, `Opname.Export.GifPipeline` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; the two-pass GIF export |
-| Export (neutral) | `Opname.Export.Gif`, `Opname.Export.Bitmap` | Median cut, dithering, LZW, GIF89a writer; BGRA buffer + resampling (both tested) |
-| ObjC | `Opname.ObjC.Runtime`, `Opname.ObjC.TypeEncoding` | Class assembly via libobjc; method type encodings (tested) |
-| Options | `Opname.Options` | Neutral option model, validation, derived values (tested) |
+| CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `export`, `displays`, `windows`, `probe`; SIGINT/SIGTERM → `StopRequested` |
+| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.State` | Status item + menu, selection overlay, and the neutral state machine (tested) |
+| Recording | `Knips.Recording` | Target → filter + geometry → writer → stream; progress; report |
+| Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
+| Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.GifPipeline` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; the two-pass GIF export |
+| Export (neutral) | `Knips.Export.Gif`, `Knips.Export.Bitmap` | Median cut, dithering, LZW, GIF89a writer; BGRA buffer + resampling (both tested) |
+| ObjC | `Knips.ObjC.Runtime`, `Knips.ObjC.TypeEncoding` | Class assembly via libobjc; method type encodings (tested) |
+| Options | `Knips.Options` | Neutral option model, validation, derived values (tested) |
 | Vendored | `source/capture/*` | CoreMedia/CoreVideo/VideoToolbox/GCD, ScreenCaptureKit externals, pthread mutex |
 
 Nothing above the capture layer knows about `objcclass`; nothing below
@@ -67,11 +67,11 @@ the recording layer knows about the CLI.
 
 ## The GIF export
 
-`opname export` is the mirror of `record`, and it is deliberately thin on
-the Darwin side: `Opname.Export.MovieReader` turns an `.mp4`/`.mov` into
+`knips export` is the mirror of `record`, and it is deliberately thin on
+the Darwin side: `Knips.Export.MovieReader` turns an `.mp4`/`.mov` into
 a stream of BGRA `CVPixelBuffer`s with presentation stamps, and
 everything that decides what the file looks like —
-`Opname.Export.Bitmap` and `Opname.Export.Gif` — is platform-neutral and
+`Knips.Export.Bitmap` and `Knips.Export.Gif` — is platform-neutral and
 unit-tested off-device.
 
 ```text
@@ -145,15 +145,15 @@ inside the encoder. Nothing accumulates with the length of the movie.
 
 ## The runtime-built output object
 
-`Opname.Capture.Stream.EnsureStreamOutputClass` assembles
-`OpnameStreamOutput` once per process:
+`Knips.Capture.Stream.EnsureStreamOutputClass` assembles
+`KnipsStreamOutput` once per process:
 
-1. `objc_allocateClassPair(NSObject, "OpnameStreamOutput", 0)`
-2. `class_addIvar("opnameOwner", sizeof(Pointer))` — back-pointer to the
+1. `objc_allocateClassPair(NSObject, "KnipsStreamOutput", 0)`
+2. `class_addIvar("knipsOwner", sizeof(Pointer))` — back-pointer to the
    owning `TScreenStream`
 3. `class_addMethod("stream:didOutputSampleBuffer:ofType:",
    @StreamOutputSampleBuffer, "v@:@^vq")` — the encoding comes from
-   `Opname.ObjC.TypeEncoding`, never a literal
+   `Knips.ObjC.TypeEncoding`, never a literal
 4. `class_addProtocol(SCStreamOutput)` if the runtime has it registered
    (best effort — SCStream dispatches by selector)
 5. `objc_registerClassPair`
@@ -168,10 +168,10 @@ rejects.
 - **Main thread** owns creation, start, stop, finish, and all output. It
   waits in `CFRunLoopRunInMode` slices so framework completion blocks
   (shareable-content query, start/stop capture, finish writing) can fire.
-- **Capture queue** (`opname.capture.video`, created for the stream) runs
+- **Capture queue** (`knips.capture.video`, created for the stream) runs
   `StreamOutputSampleBuffer` → `DeliverSample` → `OnSample` →
   `AppendVideoSample`. With audio on, a second queue
-  (`opname.capture.audio`) runs the same path into `AppendAudioSample`.
+  (`knips.capture.audio`) runs the same path into `AppendAudioSample`.
   Rules on that path, carried from the prototype:
   no exceptions or `try..finally` (no `cthreads`, so the exception frame
   chain is process-global), no `WriteLn`, no managed-type writes outside
@@ -179,11 +179,11 @@ rejects.
 - **Why no cthreads:** the prototype documented cthreads' signal handler
   intercepting a benign SIGSEGV raised inside CoreMedia's XPC
   deserialisation of SCK sample buffers. lantaarn escaped it by not using
-  SCK in the default build; opname needs SCK, so it keeps the prototype's
+  SCK in the default build; Knips needs SCK, so it keeps the prototype's
   shape: `cmem` (libc heap, thread-safe without a thread manager) first,
   real pthread mutexes, and `IsMultiThread := True` at startup so the
   RTL's refcount updates use locked instructions.
-- **`Opname.ThreadManager`:** the first on-device run showed the shape
+- **`Knips.ThreadManager`:** the first on-device run showed the shape
   above is not enough by itself — with `IsMultiThread` true, FPC's
   NoThreadManager stubs hard-error (RTE 232) on the critical sections and
   events that `Classes`/`SysUtils` create and destroy in their unit init
@@ -222,7 +222,7 @@ rejects.
 
 ## Menu bar app
 
-`opname app` sets the activation policy to `Accessory` — a process with a
+`knips app` sets the activation policy to `Accessory` — a process with a
 menu-bar item and no Dock tile — installs one `NSStatusItem`, and hands
 the thread to `NSApplication.run`. There is one state machine:
 
@@ -237,29 +237,29 @@ the thread to `NSApplication.run`. There is one state machine:
      │◀─────────────────────────────────────────────────────────────┘
 ```
 
-`Opname.App.State` owns the transition table, the status-item title, the
-`~/Movies/opname/opname-YYYYMMDD-HHMMSS.mp4` naming, and the selection
+`Knips.App.State` owns the transition table, the status-item title, the
+`~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4` naming, and the selection
 maths; it is platform-neutral and has a co-located suite, so the only
 untested part of the app is the Cocoa plumbing.
 
-Three more classes are built through `Opname.ObjC.Runtime`, none of them
+Three more classes are built through `Knips.ObjC.Runtime`, none of them
 an `objcclass`:
 
 | Runtime class | Superclass | Methods |
 | --- | --- | --- |
-| `OpnameAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `quitOpname:`, `timerFired:`, `startPending:`, `stopPending:` |
-| `OpnameOverlayView` | `NSView` | `drawRect:`, `mouseDown:`, `mouseDragged:`, `mouseUp:`, `keyDown:`, `acceptsFirstResponder` |
-| `OpnameOverlayWindow` | `NSWindow` | `canBecomeKeyWindow` (a borderless window answers NO, and then Esc never reaches the view) |
+| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:` |
+| `KnipsOverlayView` | `NSView` | `drawRect:`, `mouseDown:`, `mouseDragged:`, `mouseUp:`, `keyDown:`, `acceptsFirstResponder` |
+| `KnipsOverlayWindow` | `NSWindow` | `canBecomeKeyWindow` (a borderless window answers NO, and then Esc never reaches the view) |
 
-Each carries an `opnameOwner` pointer ivar back to the owning Pascal
+Each carries an `knipsOwner` pointer ivar back to the owning Pascal
 object, cleared before the Objective-C instance goes away — the same rule
-as the stream output object. `OpnameOverlayView` adds an `opnameIndex`
+as the stream output object. `KnipsOverlayView` adds an `knipsIndex`
 ivar holding the screen's index, so one overlay object serves every
 display.
 
 **The click.** Idle, the status item has its menu; recording, the menu is
 detached and the button's action is `stopRecording:`, so a single click
-stops — Kap's gesture. An `NSTimer` on `OpnameAppTarget` rewrites the
+stops — Kap's gesture. An `NSTimer` on `KnipsAppTarget` rewrites the
 title once a second while recording (`⏺ 0:07`).
 
 That gesture costs the menu while recording, so **Quit is deliberately
@@ -303,7 +303,7 @@ windows are `autorelease`d rather than released for the same
 mid-dispatch reason.
 
 **Exceptions never cross the boundary.** Every `cdecl` method body in
-`Opname.App` and `Opname.App.Overlay` is wrapped in `try..except`. There
+`Knips.App` and `Knips.App.Overlay` is wrapped in `try..except`. There
 is no Objective-C frame that could unwind a Pascal exception, and AppKit's
 drawing, event dispatch and run loop all sit above these bodies. What is
 caught becomes a message on the same NSLog + "Last error" path, and the
@@ -372,7 +372,7 @@ SCK scales later resizes into it.
 | 2 | failure — framework, permission, writer, or reader error (message printed) |
 | 3 | unsupported — not a macOS build |
 
-`opname app` only uses these for set-up failures; once the status item is
+`knips app` only uses these for set-up failures; once the status item is
 up, a failed recording is reported in the menu and the process keeps
 running.
 

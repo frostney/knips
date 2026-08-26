@@ -11,9 +11,9 @@
   all go through it. Do not invoke `fpc` directly except as `fpc @lwpt.cfg`.
 - **`lwpt.cfg` and `lwpt.lock` are generated** by `lwpt install`; never
   hand-edit them. `lwpt.toml` is the manifest you edit.
-- **The default `opname` build entry stays linker-flag-free.** Never add
+- **The default `knips` build entry stays linker-flag-free.** Never add
   `flags` to it. Objective-C classes are built through the runtime API
-  (`Opname.ObjC.Runtime`), never declared with `objcclass` except as
+  (`Knips.ObjC.Runtime`), never declared with `objcclass` except as
   `external` bindings ([ADR-0002](docs/adr/0002-runtime-built-objc-classes.md)).
   The `-k-ld_classic` variant is a separate, documented entry if it is ever
   needed ([docs/tooling.md](docs/tooling.md)).
@@ -21,7 +21,7 @@
   adopts. On that thread (`TScreenStream.OnSample` and everything it
   calls): no exceptions, no `try..finally`, no `WriteLn`, no managed-type
   writes outside a `TPThreadMutex`. `cmem` stays the first unit of the
-  program, `Opname.ThreadManager` (pthread-backed RTL locks/events, no
+  program, `Knips.ThreadManager` (pthread-backed RTL locks/events, no
   thread creation) comes second, and `IsMultiThread` is set at startup
   ([docs/architecture.md](docs/architecture.md)).
 - **`source/capture/**` is vendored** from lantaarn and excluded from
@@ -32,7 +32,7 @@
   Framework bindings are checked against FPC 3.2.2's `univint`/`cocoaint`
   and Apple's headers before being declared; anything unverified on real
   hardware is listed in [docs/spikes/0001-runtime-objc-class.md](docs/spikes/0001-runtime-objc-class.md)
-  until `opname probe` and a real recording clear it.
+  until `knips probe` and a real recording clear it.
 - **Edit `AGENTS.md` only** — `CLAUDE.md` is a symlink to it. Same for
   `.agents/skills/` (canonical) vs `.claude/skills` (symlink).
 
@@ -43,64 +43,53 @@ lwpt ≥ 0.7.0 is expected on PATH (or a locally built binary; see
 
 ```bash
 lwpt install          # resolve cli + testing from the lwpt release tag
-lwpt build            # build/opname (dev mode)
+lwpt build            # build/knips (dev mode)
 lwpt test             # co-located unit suites (*.Test.pas) — run on any OS
 lwpt format --check   # formatter gate (no flag = rewrite in place)
 
-./build/opname probe                     # toolchain verification (macOS)
-./build/opname record --out=demo.mp4     # record; Ctrl-C stops
-./build/opname app                       # menu-bar app; drag a region, click to stop
-tools/make-app.sh                        # wrap the built binary in build/Opname.app
+./build/knips probe                     # toolchain verification (macOS)
+./build/knips record --out=demo.mp4     # record; Ctrl-C stops
+./build/knips app                       # menu-bar app; drag a region, click to stop
+tools/make-app.sh                        # wrap the built binary in build/Knips.app
 ```
 
 ## Code Organization
 
 | Path | Role |
 | --- | --- |
-<<<<<<< HEAD
-| `source/opname.pas` | Program: CLI surface (`app`, `record`, `displays`, `windows`, `probe`), signals |
-| `source/Opname.Options.pas` | Platform-neutral option model + validation (tested) |
-| `source/Opname.App.State.pas` | Platform-neutral app state machine, titles, paths, selection maths (tested) |
-| `source/Opname.App.pas` | Menu-bar app: status item, menu, runtime-built `OpnameAppTarget` |
-| `source/Opname.App.Overlay.pas` | Region selection overlay; runtime-built `OpnameOverlayView`/`OpnameOverlayWindow` |
-=======
-| `source/opname.pas` | Program: CLI surface (`record`, `export`, `displays`, `windows`, `probe`), signals |
-| `source/Opname.Options.pas` | Platform-neutral recording + export option models and validation (tested) |
->>>>>>> lane/export
-| `source/Opname.ObjC.TypeEncoding.pas` | Method type encodings for runtime classes (tested) |
-| `source/Opname.ObjC.Runtime.pas` | Runtime-built ObjC classes (the ADR-0002 primitive) |
-| `source/Opname.Capture.ShareableContent.pas` | Display/window enumeration via SCShareableContent |
-| `source/Opname.Capture.Stream.pas` | SCStream wrapper; runtime-built SCStreamOutput; frame-status filter |
-| `source/Opname.Export.MovieWriter.pas` | AVAssetWriter bindings + the movie sink |
-| `source/Opname.Export.MovieReader.pas` | AVAssetReader bindings; BGRA frames + presentation stamps, with a trim range |
-| `source/Opname.Export.Bitmap.pas` | Platform-neutral BGRA buffer + box/bilinear resampling (tested) |
-| `source/Opname.Export.Gif.pas` | Platform-neutral GIF89a: median cut, dithering, LZW (tested) |
-| `source/Opname.Export.GifPipeline.pas` | Orchestrator: reader → decimate → scale → palette → GIF |
-| `source/Opname.Recording.pas` | Orchestrator: target → geometry → writer → stream → finish |
+| `source/knips.pas` | Program: CLI surface (`app`, `record`, `export`, `displays`, `windows`, `probe`), signals |
+| `source/Knips.Options.pas` | Platform-neutral recording + export option models and validation (tested) |
+| `source/Knips.App.State.pas` | Platform-neutral app state machine, titles, paths, selection maths (tested) |
+| `source/Knips.App.pas` | Menu-bar app: status item, menu, runtime-built `KnipsAppTarget` |
+| `source/Knips.App.Overlay.pas` | Region selection overlay; runtime-built `KnipsOverlayView`/`KnipsOverlayWindow` |
+| `source/Knips.ObjC.TypeEncoding.pas` | Method type encodings for runtime classes (tested) |
+| `source/Knips.ObjC.Runtime.pas` | Runtime-built ObjC classes (the ADR-0002 primitive) |
+| `source/Knips.Capture.ShareableContent.pas` | Display/window enumeration via SCShareableContent |
+| `source/Knips.Capture.Stream.pas` | SCStream wrapper; runtime-built SCStreamOutput; frame-status filter |
+| `source/Knips.Export.MovieWriter.pas` | AVAssetWriter bindings + the movie sink |
+| `source/Knips.Export.MovieReader.pas` | AVAssetReader bindings; BGRA frames + presentation stamps, with a trim range |
+| `source/Knips.Export.Bitmap.pas` | Platform-neutral BGRA buffer + box/bilinear resampling (tested) |
+| `source/Knips.Export.Gif.pas` | Platform-neutral GIF89a: median cut, dithering, LZW (tested) |
+| `source/Knips.Export.GifPipeline.pas` | Orchestrator: reader → decimate → scale → palette → GIF |
+| `source/Knips.Recording.pas` | Orchestrator: target → geometry → writer → stream → finish |
 | `source/capture/` | Vendored bindings: CoreMedia/CoreVideo/VideoToolbox/GCD, ScreenCaptureKit, pthread mutex |
 | `docs/` | Architecture, quick-start, tooling, code style, deployment, porting notes, spikes, ADRs |
 
-<<<<<<< HEAD
-Layering: `opname.pas` → {`Opname.App`, `Opname.Recording`} →
-`Opname.Recording` → {`Opname.Capture.*`, `Opname.Export.MovieWriter`} →
-{`Opname.ObjC.*`, `source/capture/*`}. `Opname.Options` is used by every
-layer and depends on nothing; `Opname.App.State` depends only on it.
-=======
-Layering: `opname.pas` → {`Opname.Recording`, `Opname.Export.GifPipeline`}
-→ {`Opname.Capture.*`, `Opname.Export.MovieWriter`,
-`Opname.Export.MovieReader`, `Opname.Export.Gif`} → {`Opname.ObjC.*`,
-`Opname.Export.Bitmap`, `source/capture/*`}. `Opname.Options` is used by
-every layer and depends on nothing. The GIF encoder is deliberately below
-the Darwin line: it has no `{$IFDEF DARWIN}` at all and is tested on
-every host.
->>>>>>> lane/export
+Layering: `knips.pas` → {`Knips.App`, `Knips.Recording`,
+`Knips.Export.GifPipeline`} → {`Knips.Capture.*`,
+`Knips.Export.MovieWriter`, `Knips.Export.MovieReader`,
+`Knips.Export.Gif`} → {`Knips.ObjC.*`, `Knips.Export.Bitmap`,
+`source/capture/*`}. `Knips.Options` is used by every layer and depends
+on nothing; `Knips.App.State` depends only on it. The GIF encoder is
+deliberately below the Darwin line: it has no `{$IFDEF DARWIN}` at all
+and is tested on every host.
 
 ## Testing
 
 - `lwpt test` discovers `source/*.Test.pas`. Everything platform-neutral
   has a co-located suite and runs on Linux CI as well as macOS.
 - Darwin units cannot be unit-tested off-device. Their gate is
-  `opname probe` (runtime class registration, SCK enumeration,
+  `knips probe` (runtime class registration, SCK enumeration,
   AVAssetWriter open) followed by a real `record` that plays back in
   QuickTime Player. Both are hard gates before handoff of any capture change.
 - Off-device, the Darwin units are type-checked with a cross compiler
@@ -111,7 +100,7 @@ every host.
 - Never commit generated state: `build/`, `.lwpt/tmp/`, `.lwpt/sessions/`,
   `.lwpt/session-roots`, `.lwpt/install.lock`.
 - `record` writes to the path given and replaces an existing file without
-  asking; `probe` writes and deletes `$TMPDIR/opname-probe.mp4`.
+  asking; `probe` writes and deletes `$TMPDIR/knips-probe.mp4`.
 - macOS permissions (Screen Recording) are per-binary; a fresh build
   re-prompts. Test tooling never injects input — this is a recorder, not
   lantaarn.

@@ -17,11 +17,11 @@
 | Command | What |
 | --- | --- |
 | `lwpt install` | resolve `lwpt.toml`, fetch deps, write `lwpt.lock` + `lwpt.cfg` |
-| `lwpt build` | `build/opname` (dev; `--mode release` for `-O4 -Xs`) |
+| `lwpt build` | `build/knips` (dev; `--mode release` for `-O4 -Xs`) |
 | `lwpt test` | discover/compile/run `source/*.Test.pas` |
 | `lwpt format [--check]` | canonical formatting; `--check` is the CI form |
 | `lwpt health [--hotspots]` | complexity report |
-| `./build/opname probe` | on-device toolchain gate |
+| `./build/knips probe` | on-device toolchain gate |
 
 ## Versions (verify live, don't trust memory)
 
@@ -45,8 +45,8 @@ default:
 
 ```toml
 [build]
-opname = { source = "source/opname.pas", output = "build/opname" }
-opname-ld-classic = { source = "source/opname.pas", output = "build/opname-ld-classic", flags = ["-k-ld_classic"] }
+knips = { source = "source/knips.pas", output = "build/knips" }
+knips-ld-classic = { source = "source/knips.pas", output = "build/knips-ld-classic", flags = ["-k-ld_classic"] }
 ```
 
 lwpt 0.7.0 passes `flags` verbatim per entry (see lwpt's
@@ -73,7 +73,7 @@ without a Mac:
    -dLEGACY_SETNEEDSDISPLAY`), `rtl-objpas` `varutils`/`variants`, and
    `rtl-generics` into one unit directory.
 6. `ppcrossa64 -Tdarwin -Paarch64 -XPaarch64-darwin- -Mdelphi -Sh -Cn
-   -Fu<rtl units> -Fu<that directory> @lwpt.cfg source/opname.pas`.
+   -Fu<rtl units> -Fu<that directory> @lwpt.cfg source/knips.pas`.
 
 `-Cn` skips linking. This is how the Darwin units in this repository were
 checked before the first on-device run; it proves declarations and
@@ -88,6 +88,6 @@ types, nothing about the frameworks' behaviour.
 ## Known upstream issues
 
 - lwpt `cli` 0.7.0: `TSubcommandRegistry.PrintTopLevelHelp` prints
-  lwpt's own tagline. opname prints its own top-level help and only
+  lwpt's own tagline. Knips prints its own top-level help and only
   delegates per-command help. Worth a small upstream change (a tagline
   parameter).

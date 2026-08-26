@@ -1,11 +1,11 @@
-program Opname.Options.Test;
+program Knips.Options.Test;
 
 {$I Shared.inc}
 
 uses
   SysUtils,
 
-  Opname.Options,
+  Knips.Options,
   TestingPascalLibrary;
 
 type

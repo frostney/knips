@@ -1,4 +1,4 @@
-unit Opname.Recording;
+unit Knips.Recording;
 
 // One recording, start to finish: resolve what to capture, size the
 // stream in pixels, open the movie, run the ScreenCaptureKit stream into
@@ -20,13 +20,13 @@ uses
   SysUtils,
 
   CocoaAll,
-  MacOSAll,
-  Opname.Capture.CoreMedia,
-  Opname.Capture.ScreenCaptureKit,
-  Opname.Capture.ShareableContent,
-  Opname.Capture.Stream,
-  Opname.Export.MovieWriter,
-  Opname.Options;
+  Knips.Capture.CoreMedia,
+  Knips.Capture.ScreenCaptureKit,
+  Knips.Capture.ShareableContent,
+  Knips.Capture.Stream,
+  Knips.Export.MovieWriter,
+  Knips.Options,
+  MacOSAll;
 
 type
   TRecordingReport = record
@@ -160,7 +160,7 @@ begin
         Window := AContent.RetainWindow(FOptions.WindowID);
         if Window = nil then
         begin
-          AError := Format('no on-screen window with id %d (see `opname windows`)',
+          AError := Format('no on-screen window with id %d (see `knips windows`)',
             [FOptions.WindowID]);
           Exit;
         end;
@@ -182,7 +182,7 @@ begin
       Display := AContent.RetainDisplay(FOptions.DisplayIndex);
       if Display = nil then
       begin
-        AError := Format('no display at index %d (see `opname displays`)',
+        AError := Format('no display at index %d (see `knips displays`)',
           [FOptions.DisplayIndex]);
         Exit;
       end;

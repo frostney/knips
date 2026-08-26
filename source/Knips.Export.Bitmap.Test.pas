@@ -1,11 +1,11 @@
-program Opname.Export.Bitmap.Test;
+program Knips.Export.Bitmap.Test;
 
 {$I Shared.inc}
 
 uses
   SysUtils,
 
-  Opname.Export.Bitmap,
+  Knips.Export.Bitmap,
   TestingPascalLibrary;
 
 type

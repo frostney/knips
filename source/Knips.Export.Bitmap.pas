@@ -1,4 +1,4 @@
-unit Opname.Export.Bitmap;
+unit Knips.Export.Bitmap;
 
 // A 32-bit BGRA frame in plain memory, plus the resampling the GIF
 // exporter needs. Platform-neutral on purpose: the Darwin side locks a

@@ -1,6 +1,6 @@
-# opname
+# Knips
 
-Ubiquitous language for opname — a native macOS screen recorder.
+Ubiquitous language for Knips — a native macOS screen recorder.
 
 ## Language
 
@@ -39,7 +39,7 @@ _Avoid_: valid frame, real frame.
 
 **Writer**:
 The AVAssetWriter-backed sink (`TMovieWriter`) that encodes and muxes.
-_Avoid_: encoder (the writer owns one; opname never sees it), muxer.
+_Avoid_: encoder (the writer owns one; Knips never sees it), muxer.
 
 **Container**:
 `.mp4` (MPEG-4) or `.mov` (QuickTime), chosen from the output extension.
@@ -54,7 +54,7 @@ _Avoid_: job, take.
 
 **Export**:
 Turning a finished recording into another format —
-`opname export --in=… --out=….gif`. Never used for writing the
+`knips export --in=… --out=….gif`. Never used for writing the
 recording itself; that is the writer's job.
 _Avoid_: convert, transcode (there is no re-encode to a movie).
 
@@ -95,16 +95,16 @@ _Avoid_: delta encoding, optimisation pass.
 
 **Runtime class**:
 An Objective-C class assembled through libobjc's C API at start-up
-(`Opname.ObjC.Runtime`), as opposed to an `objcclass` declared in
+(`Knips.ObjC.Runtime`), as opposed to an `objcclass` declared in
 Pascal.
 _Avoid_: dynamic class, fake class, shim.
 
 **Probe**:
-`opname probe` — the on-device check that the runtime class registers,
+`knips probe` — the on-device check that the runtime class registers,
 ScreenCaptureKit enumerates, and AVAssetWriter opens.
 _Avoid_: smoke test (too generic), self-test.
 
 **Vendored unit**:
 A unit under `source/capture/` carried from lantaarn with its contents
-unrestyled; opname's additions live in marked blocks.
+unrestyled; Knips's additions live in marked blocks.
 _Avoid_: fork, copy.

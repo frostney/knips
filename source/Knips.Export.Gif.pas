@@ -1,4 +1,4 @@
-unit Opname.Export.Gif;
+unit Knips.Export.Gif;
 
 // Animated GIF89a in pure Pascal: median-cut quantisation, optional
 // Floyd-Steinberg dithering, LZW, and a NETSCAPE2.0 loop extension.
@@ -33,7 +33,7 @@ uses
   Math,
   SysUtils,
 
-  Opname.Export.Bitmap;
+  Knips.Export.Bitmap;
 
 const
   GifMaxColors = 256;

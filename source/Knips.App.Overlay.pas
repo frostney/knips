@@ -1,13 +1,13 @@
-unit Opname.App.Overlay;
+unit Knips.App.Overlay;
 
 // The Kap selection gesture: one borderless, transparent, screen-saver
 // level window per display, the screen dimmed behind a crosshair, and a
 // click-drag that punches the recording region out of the dim.
 //
 // Both Objective-C classes here are assembled at run time
-// (ADR-0002): OpnameOverlayView is an NSView subclass whose drawRect:,
+// (ADR-0002): KnipsOverlayView is an NSView subclass whose drawRect:,
 // mouse and key handlers are plain cdecl Pascal routines, and
-// OpnameOverlayWindow is an NSWindow subclass that exists only to answer
+// KnipsOverlayWindow is an NSWindow subclass that exists only to answer
 // YES to canBecomeKeyWindow — a borderless window says NO by default, and
 // without key status the view never sees the Esc keystroke.
 //
@@ -38,11 +38,11 @@ uses
   SysUtils,
 
   CocoaAll,
-  MacOSAll,
-  Opname.App.State,
-  Opname.Capture.ShareableContent,
-  Opname.ObjC.Runtime,
-  Opname.Options;
+  Knips.App.State,
+  Knips.Capture.ShareableContent,
+  Knips.ObjC.Runtime,
+  Knips.Options,
+  MacOSAll;
 
 type
   // ADisplayID is the CGDirectDisplayID of the screen the drag ended on;
@@ -110,8 +110,8 @@ type
     property OnError: TOverlayErrorEvent read FOnError write FOnError;
   end;
 
-// Registers OpnameOverlayView and OpnameOverlayWindow once per process.
-// Exposed so `opname probe` can gate on registration alone.
+// Registers KnipsOverlayView and KnipsOverlayWindow once per process.
+// Exposed so `knips probe` can gate on registration alone.
 procedure EnsureOverlayClasses;
 
 function OverlayViewClassName: string;
@@ -124,15 +124,15 @@ implementation
 {$IFDEF DARWIN}
 
 uses
-  Opname.ObjC.TypeEncoding;
+  Knips.ObjC.TypeEncoding;
 
 const
-  ViewClassName = 'OpnameOverlayView';
-  WindowClassName = 'OpnameOverlayWindow';
+  ViewClassName = 'KnipsOverlayView';
+  WindowClassName = 'KnipsOverlayWindow';
   ViewSuperclassName = 'NSView';
   WindowSuperclassName = 'NSWindow';
-  OwnerIvarName = 'opnameOwner';
-  IndexIvarName = 'opnameIndex';
+  OwnerIvarName = 'knipsOwner';
+  IndexIvarName = 'knipsIndex';
   // Kap dims the rest of the screen rather than hiding it.
   DimAlpha = 0.35;
   // kCGScreenSaverWindowLevel: above every normal window, the Dock, and
@@ -168,7 +168,7 @@ begin
 end;
 
 { Runtime-built method bodies. Each one recovers the owning Pascal object
-  from the view's opnameOwner ivar; a nil owner means the overlay is gone
+  from the view's knipsOwner ivar; a nil owner means the overlay is gone
   and the message is ignored.
 
   Every body is wrapped in try..except. There is no Objective-C frame that

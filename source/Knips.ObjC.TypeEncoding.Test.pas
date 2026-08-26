@@ -1,11 +1,11 @@
-program Opname.ObjC.TypeEncoding.Test;
+program Knips.ObjC.TypeEncoding.Test;
 
 {$I Shared.inc}
 
 uses
   SysUtils,
 
-  Opname.ObjC.TypeEncoding,
+  Knips.ObjC.TypeEncoding,
   TestingPascalLibrary;
 
 type
