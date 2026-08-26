@@ -24,7 +24,10 @@ type
     otBool,             // ObjC BOOL
     otDouble,
     otFloat,
-    otCString);         // char*
+    otCString,          // char*
+    otPoint,            // CGPoint / NSPoint, by value
+    otSize,             // CGSize / NSSize, by value
+    otRect);            // CGRect / NSRect, by value (NSView's drawRect:)
 
 function TypeEncodingOf(AType: TObjCType): string;
 
@@ -45,6 +48,18 @@ const
   // char ('c') on Intel macOS.
   BoolEncodingAppleSilicon = 'B';
   BoolEncodingIntel = 'c';
+  // Struct encodings are `{Name=fields}`. CGFloat is a double on 64-bit,
+  // a single on 32-bit; the geometry structs are named after their
+  // CoreGraphics types, which is what the ObjC runtime records for
+  // AppKit's own -drawRect:, -mouseDown: and friends.
+  {$IFDEF CPU64}
+  FloatEncoding = 'd';
+  {$ELSE}
+  FloatEncoding = 'f';
+  {$ENDIF}
+  PointEncoding = '{CGPoint=' + FloatEncoding + FloatEncoding + '}';
+  SizeEncoding = '{CGSize=' + FloatEncoding + FloatEncoding + '}';
+  RectEncoding = '{CGRect=' + PointEncoding + SizeEncoding + '}';
 
 function TypeEncodingOf(AType: TObjCType): string;
 begin
@@ -75,6 +90,9 @@ begin
     otDouble: Result := 'd';
     otFloat: Result := 'f';
     otCString: Result := '*';
+    otPoint: Result := PointEncoding;
+    otSize: Result := SizeEncoding;
+    otRect: Result := RectEncoding;
   else
     Result := '?';
   end;

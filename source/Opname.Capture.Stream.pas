@@ -113,11 +113,20 @@ const
   CompletionTimeoutSlices = 5000;
   StopTimeoutSlices = 3000;
   RunLoopSliceSeconds = 0.001;
+  // How long a *second* Start waits for a first one's abandoned handler
+  // before refusing. Short: this only ever runs after a timeout, and the
+  // caller (the menu-bar app) must not freeze on a retry.
+  StalePendingSlices = 1000;
 
 var
   GOutputClass: pobjc_class = nil;
   GStartError: NSError = nil;
   GStartReady: Boolean = False;
+  // True from the moment startCaptureWithCompletionHandler: is issued
+  // until its handler runs. A Start that times out leaves this set, and
+  // the framework may still call the handler minutes later — see
+  // DrainPendingStart.
+  GStartPending: Boolean = False;
   GStopReady: Boolean = False;
 
 // The SCStreamOutput method. Runs on the capture queue.
@@ -132,17 +141,64 @@ begin
   TScreenStream(Owner).DeliverSample(ASampleBuffer, AOutputType);
 end;
 
+// ScreenCaptureKit calls both completion handlers on one of its own
+// queues, never the main thread (measured: pthread_main_np() = 0 in both).
+// They are therefore capture-thread code — no exceptions, no WriteLn, no
+// managed-type writes — and only set globals the main thread reads while
+// it pumps the run loop. The pending flag is cleared *last* so a main
+// thread that sees it cleared has already seen the result written.
 procedure StartCompletionHandler(AError: id); cdecl;
 begin
   GStartError := NSError(AError);
   if GStartError <> nil then
     GStartError.retain;
   GStartReady := True;
+  GStartPending := False;
 end;
 
 procedure StopCompletionHandler(AError: id); cdecl;
 begin
   GStopReady := True;
+end;
+
+// Drops whatever a previous start left behind, including a retained
+// NSError nobody read.
+procedure ClearStartResult;
+begin
+  if GStartError <> nil then
+  begin
+    GStartError.release;
+    GStartError := nil;
+  end;
+  GStartReady := False;
+end;
+
+// A start that timed out abandoned its handler, but the framework can
+// still run it — and a global handler cannot tell which Start it belongs
+// to, so a late one would falsely complete the next attempt (FActive with
+// nothing capturing, and a zero-frame file). Only the CLI was immune,
+// because it never retried. Wait the stale handler out; refuse the new
+// start rather than proceed on an ambiguous flag.
+function DrainPendingStart(out AError: string): Boolean;
+var
+  WaitCount: Integer;
+begin
+  Result := True;
+  AError := '';
+  if not GStartPending then
+    Exit;
+  WaitCount := 0;
+  while GStartPending and (WaitCount < StalePendingSlices) do
+  begin
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, RunLoopSliceSeconds, False);
+    Inc(WaitCount);
+  end;
+  if GStartPending then
+  begin
+    AError := 'a previous capture start is still pending; try again in a '
+      + 'moment';
+    Result := False;
+  end;
 end;
 
 function StreamOutputClassName: string;
@@ -273,6 +329,11 @@ begin
     Exit(True);
   FLastError := '';
 
+  // Nothing below may run while another Start's handler is outstanding.
+  if not DrainPendingStart(FLastError) then
+    Exit;
+  ClearStartResult;
+
   EnsureStreamOutputClass;
 
   Configuration := SCStreamConfiguration.alloc.init;
@@ -345,8 +406,8 @@ begin
     end;
   end;
 
-  GStartError := nil;
-  GStartReady := False;
+  ClearStartResult;
+  GStartPending := True;
   FStream.startCaptureWithCompletionHandler(StartCompletionHandler);
   WaitCount := 0;
   while (not GStartReady) and (WaitCount < CompletionTimeoutSlices) do
@@ -363,8 +424,7 @@ begin
   begin
     FLastError := 'startCapture: '
       + string(GStartError.localizedDescription.UTF8String);
-    GStartError.release;
-    GStartError := nil;
+    ClearStartResult;
     Exit;
   end;
 

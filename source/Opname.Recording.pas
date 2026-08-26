@@ -52,19 +52,36 @@ type
     FOptions: TRecordingOptions;
     FWriter: TMovieWriter;
     FStream: TScreenStream;
+    FFilter: SCContentFilter;
+    FGeometry: TStreamGeometry;
     FReport: TRecordingReport;
+    FCapturing: Boolean;
     procedure HandleSample(ASampleBuffer: CMSampleBufferRef;
       AKind: TSampleKind);
     function ResolveFilter(const AContent: TShareableContent;
       out AFilter: SCContentFilter; out AGeometry: TStreamGeometry;
       out AError: string): Boolean;
+    procedure ReleaseFilter;
     procedure RunUntilStopped;
   public
     constructor Create(const AOptions: TRecordingOptions);
     destructor Destroy; override;
+    // Opens the writer and starts the stream, then returns: the caller
+    // owns the run loop from there. The CLI's Run and the menu-bar app
+    // share this; the app needs NSApp's own run loop to keep turning, so
+    // nothing here may block.
+    function StartCapture(out AError: string): Boolean;
+    // Stops the stream and finalises the file, in that order. Both the
+    // stream's stop handler and the writer's completion handler are
+    // awaited by pumping CFRunLoopRunInMode slices on the calling thread,
+    // which must be the same main thread that called StartCapture.
+    function FinishCapture(out AError: string): Boolean;
     // Blocks until StopRequested is set. False with a message on any
     // failure before or after capture.
     function Run(out AError: string): Boolean;
+    // True between a successful StartCapture and FinishCapture.
+    property Capturing: Boolean read FCapturing;
+    property Geometry: TStreamGeometry read FGeometry;
     property Report: TRecordingReport read FReport;
   end;
 
@@ -94,7 +111,19 @@ destructor TRecordingSession.Destroy;
 begin
   FreeAndNil(FStream);
   FreeAndNil(FWriter);
+  ReleaseFilter;
   inherited Destroy;
+end;
+
+// The filter is alloc'd by ResolveFilter and retained again by
+// TScreenStream; this releases only this class's own reference.
+procedure TRecordingSession.ReleaseFilter;
+begin
+  if FFilter <> nil then
+  begin
+    FFilter.release;
+    FFilter := nil;
+  end;
 end;
 
 procedure TRecordingSession.HandleSample(ASampleBuffer: CMSampleBufferRef;
@@ -247,17 +276,25 @@ begin
   end;
 end;
 
-function TRecordingSession.Run(out AError: string): Boolean;
+function TRecordingSession.StartCapture(out AError: string): Boolean;
 var
   Content: TShareableContent;
-  Filter: SCContentFilter;
-  Geometry: TStreamGeometry;
-  Statistics: TMovieWriterStatistics;
-  FinishError: string;
-  AudioNote: string;
 begin
   Result := False;
   AError := '';
+  if FCapturing then
+  begin
+    AError := 'this session is already recording';
+    Exit;
+  end;
+  // A session records once. Restarting one that has already finished
+  // would strand the previous writer and stream behind the new fields;
+  // the app makes a fresh TRecordingSession per recording.
+  if (FWriter <> nil) or (FStream <> nil) or (FFilter <> nil) then
+  begin
+    AError := 'this session has already been used; create a new one';
+    Exit;
+  end;
   FReport := Default(TRecordingReport);
   FReport.OutputPath := FOptions.OutputPath;
   FReport.FramesPerSecond := FOptions.FramesPerSecond;
@@ -273,69 +310,100 @@ begin
     end;
   end;
   try
-    if not ResolveFilter(Content, Filter, Geometry, AError) then
+    if not ResolveFilter(Content, FFilter, FGeometry, AError) then
       Exit;
   finally
     Content.Free;
   end;
 
-  try
-    FReport.BitRate := FOptions.BitRate;
-    if FReport.BitRate = 0 then
-      FReport.BitRate := SuggestedBitRate(Geometry.PixelWidth,
-        Geometry.PixelHeight, Geometry.FramesPerSecond);
+  FReport.BitRate := FOptions.BitRate;
+  if FReport.BitRate = 0 then
+    FReport.BitRate := SuggestedBitRate(FGeometry.PixelWidth,
+      FGeometry.PixelHeight, FGeometry.FramesPerSecond);
 
-    FWriter := TMovieWriter.Create(FOptions.OutputPath, FOptions.Container,
-      Geometry.PixelWidth, Geometry.PixelHeight, Geometry.FramesPerSecond,
-      FReport.BitRate);
-    if Geometry.CapturesAudio then
-      FWriter.EnableAudio(FOptions.AudioSampleRate,
-        FOptions.AudioChannelCount, FOptions.AudioBitRate);
-    if not FWriter.Open(AError) then
-      Exit;
-
-    FStream := TScreenStream.Create(Filter, Geometry);
-    FStream.OnSample := HandleSample;
-    if not FStream.Start then
-    begin
-      AError := FStream.LastError;
-      FWriter.Cancel;
-      Exit;
-    end;
-
-    if Geometry.CapturesAudio then
-      AudioNote := Format(' + %s audio (%d kHz, %d ch)',
-        [AudioModeName(FOptions.AudioMode),
-        FOptions.AudioSampleRate div 1000, FOptions.AudioChannelCount])
-    else
-      AudioNote := '';
-    WriteLn(Format('recording %dx%d @ %d fps (%d kbit/s)%s to %s — Ctrl-C to stop',
-      [Geometry.PixelWidth, Geometry.PixelHeight, Geometry.FramesPerSecond,
-      FReport.BitRate div 1000, AudioNote, FOptions.OutputPath]));
-    Flush(Output);
-
-    RunUntilStopped;
-
-    FStream.Stop;
-    Statistics := FWriter.Statistics;
-    FReport.AppendedFrames := Statistics.AppendedFrames;
-    FReport.DroppedFrames := Statistics.DroppedFrames;
-    FReport.FailedAppends := Statistics.FailedAppends;
-    FReport.AppendedAudioSamples := Statistics.AppendedAudioSamples;
-    FReport.DroppedAudioEarly := Statistics.DroppedAudioEarly;
-    FReport.DroppedAudioStalled := Statistics.DroppedAudioStalled;
-    FReport.FailedAudioAppends := Statistics.FailedAudioAppends;
-    FReport.DurationSeconds := Statistics.Duration;
-
-    if not FWriter.Finish(FinishError) then
-    begin
-      AError := FinishError;
-      Exit;
-    end;
-    Result := True;
-  finally
-    Filter.release;
+  FReport.AudioMode := FOptions.AudioMode;
+  FWriter := TMovieWriter.Create(FOptions.OutputPath, FOptions.Container,
+    FGeometry.PixelWidth, FGeometry.PixelHeight, FGeometry.FramesPerSecond,
+    FReport.BitRate);
+  if FGeometry.CapturesAudio then
+    FWriter.EnableAudio(FOptions.AudioSampleRate,
+      FOptions.AudioChannelCount, FOptions.AudioBitRate);
+  if not FWriter.Open(AError) then
+  begin
+    FreeAndNil(FWriter);
+    ReleaseFilter;
+    Exit;
   end;
+
+  FStream := TScreenStream.Create(FFilter, FGeometry);
+  FStream.OnSample := HandleSample;
+  if not FStream.Start then
+  begin
+    AError := FStream.LastError;
+    FWriter.Cancel;
+    FreeAndNil(FStream);
+    FreeAndNil(FWriter);
+    ReleaseFilter;
+    Exit;
+  end;
+
+  FCapturing := True;
+  Result := True;
+end;
+
+function TRecordingSession.FinishCapture(out AError: string): Boolean;
+var
+  Statistics: TMovieWriterStatistics;
+begin
+  Result := False;
+  AError := '';
+  if not FCapturing then
+  begin
+    AError := 'no recording is running';
+    Exit;
+  end;
+  FCapturing := False;
+
+  // Stream first, then writer: an append must never race the finish.
+  if FStream <> nil then
+    FStream.Stop;
+
+  Statistics := FWriter.Statistics;
+  FReport.AppendedFrames := Statistics.AppendedFrames;
+  FReport.DroppedFrames := Statistics.DroppedFrames;
+  FReport.FailedAppends := Statistics.FailedAppends;
+  FReport.AppendedAudioSamples := Statistics.AppendedAudioSamples;
+  FReport.DroppedAudioEarly := Statistics.DroppedAudioEarly;
+  FReport.DroppedAudioStalled := Statistics.DroppedAudioStalled;
+  FReport.FailedAudioAppends := Statistics.FailedAudioAppends;
+  FReport.DurationSeconds := Statistics.Duration;
+
+  Result := FWriter.Finish(AError);
+  ReleaseFilter;
+end;
+
+function TRecordingSession.Run(out AError: string): Boolean;
+var
+  AudioNote: string;
+begin
+  Result := False;
+  if not StartCapture(AError) then
+    Exit;
+
+  if FGeometry.CapturesAudio then
+    AudioNote := Format(' + %s audio (%d kHz, %d ch)',
+      [AudioModeName(FOptions.AudioMode),
+      FOptions.AudioSampleRate div 1000, FOptions.AudioChannelCount])
+  else
+    AudioNote := '';
+  WriteLn(Format('recording %dx%d @ %d fps (%d kbit/s)%s to %s — Ctrl-C to stop',
+    [FGeometry.PixelWidth, FGeometry.PixelHeight, FGeometry.FramesPerSecond,
+    FReport.BitRate div 1000, AudioNote, FOptions.OutputPath]));
+  Flush(Output);
+
+  RunUntilStopped;
+
+  Result := FinishCapture(AError);
 end;
 
 {$ENDIF}

@@ -57,13 +57,26 @@ type
   end;
 
 function LookUpClass(const AName: string): pobjc_class;
+// A registered selector for the given name. Callers pass these to
+// framework methods that take a SEL (menu item actions, timer targets).
+function SelectorNamed(const AName: string): SEL;
 // alloc + init on the given class; nil when either fails.
 function InstantiateClass(AClass: pobjc_class): id;
+// alloc only, for classes whose superclass has a designated initialiser
+// other than -init (NSView's initWithFrame:, NSWindow's
+// initWithContentRect:...). Send that initialiser through the framework's
+// own external binding after casting the result.
+function AllocateInstance(AClass: pobjc_class): id;
 procedure ReleaseInstance(AInstance: id);
 procedure SetPointerIvar(AInstance: id; const AIvarName: string;
   AValue: Pointer);
 function GetPointerIvar(AInstance: id; const AIvarName: string): Pointer;
 function RespondsToSelector(AInstance: id; const ASelector: string): Boolean;
+// Whether the class (or an ancestor) has an implementation for the
+// selector, without needing an instance. `opname probe` uses it on the
+// overlay classes, whose instances would need a window to be worth making.
+function ClassImplementsSelector(AClass: pobjc_class;
+  const ASelector: string): Boolean;
 
 {$ENDIF}
 
@@ -159,12 +172,22 @@ begin
   Result := pobjc_class(objc_lookUpClass(PAnsiChar(AName)));
 end;
 
-function InstantiateClass(AClass: pobjc_class): id;
+function SelectorNamed(const AName: string): SEL;
+begin
+  Result := Selector(AName);
+end;
+
+function AllocateInstance(AClass: pobjc_class): id;
 begin
   Result := nil;
   if AClass = nil then
     Exit;
   Result := MessageSendId(id(AClass), Selector('alloc'));
+end;
+
+function InstantiateClass(AClass: pobjc_class): id;
+begin
+  Result := AllocateInstance(AClass);
   if Result <> nil then
     Result := MessageSendId(Result, Selector('init'));
 end;
@@ -191,6 +214,13 @@ function RespondsToSelector(AInstance: id; const ASelector: string): Boolean;
 begin
   Result := (AInstance <> nil) and MessageSendBoolSel(AInstance,
     Selector('respondsToSelector:'), Selector(ASelector));
+end;
+
+function ClassImplementsSelector(AClass: pobjc_class;
+  const ASelector: string): Boolean;
+begin
+  Result := (AClass <> nil)
+    and (class_getInstanceMethod(AClass, Selector(ASelector)) <> nil);
 end;
 
 {$ENDIF}

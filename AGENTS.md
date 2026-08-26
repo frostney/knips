@@ -49,14 +49,19 @@ lwpt format --check   # formatter gate (no flag = rewrite in place)
 
 ./build/opname probe                     # toolchain verification (macOS)
 ./build/opname record --out=demo.mp4     # record; Ctrl-C stops
+./build/opname app                       # menu-bar app; drag a region, click to stop
+tools/make-app.sh                        # wrap the built binary in build/Opname.app
 ```
 
 ## Code Organization
 
 | Path | Role |
 | --- | --- |
-| `source/opname.pas` | Program: CLI surface (`record`, `displays`, `windows`, `probe`), signals |
+| `source/opname.pas` | Program: CLI surface (`app`, `record`, `displays`, `windows`, `probe`), signals |
 | `source/Opname.Options.pas` | Platform-neutral option model + validation (tested) |
+| `source/Opname.App.State.pas` | Platform-neutral app state machine, titles, paths, selection maths (tested) |
+| `source/Opname.App.pas` | Menu-bar app: status item, menu, runtime-built `OpnameAppTarget` |
+| `source/Opname.App.Overlay.pas` | Region selection overlay; runtime-built `OpnameOverlayView`/`OpnameOverlayWindow` |
 | `source/Opname.ObjC.TypeEncoding.pas` | Method type encodings for runtime classes (tested) |
 | `source/Opname.ObjC.Runtime.pas` | Runtime-built ObjC classes (the ADR-0002 primitive) |
 | `source/Opname.Capture.ShareableContent.pas` | Display/window enumeration via SCShareableContent |
@@ -66,9 +71,10 @@ lwpt format --check   # formatter gate (no flag = rewrite in place)
 | `source/capture/` | Vendored bindings: CoreMedia/CoreVideo/VideoToolbox/GCD, ScreenCaptureKit, pthread mutex |
 | `docs/` | Architecture, quick-start, tooling, code style, deployment, porting notes, spikes, ADRs |
 
-Layering: `opname.pas` → `Opname.Recording` → {`Opname.Capture.*`,
-`Opname.Export.MovieWriter`} → {`Opname.ObjC.*`, `source/capture/*`}.
-`Opname.Options` is used by every layer and depends on nothing.
+Layering: `opname.pas` → {`Opname.App`, `Opname.Recording`} →
+`Opname.Recording` → {`Opname.Capture.*`, `Opname.Export.MovieWriter`} →
+{`Opname.ObjC.*`, `source/capture/*`}. `Opname.Options` is used by every
+layer and depends on nothing; `Opname.App.State` depends only on it.
 
 ## Testing
 

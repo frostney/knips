@@ -17,6 +17,8 @@ type
     procedure TestIntegerWidthFollowsPointerSize;
     procedure TestReturnTypesLeadTheEncoding;
     procedure TestPointerAndCString;
+    procedure TestGeometryStructs;
+    procedure TestDrawRectSelector;
   end;
 
 procedure TEncodingTests.SetupTests;
@@ -28,6 +30,8 @@ begin
     TestIntegerWidthFollowsPointerSize);
   Test('the return type leads the encoding', TestReturnTypesLeadTheEncoding);
   Test('pointer and C string arguments', TestPointerAndCString);
+  Test('the geometry structs nest CGFloat fields', TestGeometryStructs);
+  Test('drawRect: encodes one CGRect by value', TestDrawRectSelector);
 end;
 
 procedure TEncodingTests.TestSelfAndCommandAreImplicit;
@@ -69,6 +73,28 @@ procedure TEncodingTests.TestPointerAndCString;
 begin
   Expect<string>(MethodTypeEncoding(otVoid, [otPointer, otCString]))
     .ToBe('v@:^v*');
+end;
+
+procedure TEncodingTests.TestGeometryStructs;
+var
+  Field: string;
+begin
+  if SizeOf(NativeInt) = 8 then
+    Field := 'd'
+  else
+    Field := 'f';
+  Expect<string>(TypeEncodingOf(otPoint))
+    .ToBe('{CGPoint=' + Field + Field + '}');
+  Expect<string>(TypeEncodingOf(otSize))
+    .ToBe('{CGSize=' + Field + Field + '}');
+  Expect<string>(TypeEncodingOf(otRect)).ToBe('{CGRect={CGPoint='
+    + Field + Field + '}{CGSize=' + Field + Field + '}}');
+end;
+
+procedure TEncodingTests.TestDrawRectSelector;
+begin
+  Expect<string>(MethodTypeEncoding(otVoid, [otRect]))
+    .ToBe('v@:' + TypeEncodingOf(otRect));
 end;
 
 begin
