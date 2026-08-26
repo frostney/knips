@@ -60,6 +60,39 @@ type
     procedure TestRejectsAudioBitRateOutOfRange;
   end;
 
+  TTrimTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestParsesBothEnds;
+    procedure TestAcceptsDecimals;
+    procedure TestEmptyStartMeansZero;
+    procedure TestEmptyEndMeansEndOfMovie;
+    procedure TestExplicitZeroEndIsNotAnOpenEnd;
+    procedure TestRejectsWrongArity;
+    procedure TestRejectsNonNumeric;
+    procedure TestIgnoresTheHostDecimalSeparator;
+  end;
+
+  TExportValidationTests = class(TTestSuite)
+  private
+    function Valid: TExportOptions;
+  public
+    procedure SetupTests; override;
+    procedure TestDefaultsPlusPathsAreValid;
+    procedure TestRequiresInput;
+    procedure TestRequiresOutput;
+    procedure TestRejectsNonMovieInput;
+    procedure TestRejectsNonGifOutput;
+    procedure TestRejectsInputEqualToOutput;
+    procedure TestRejectsFpsOutOfRange;
+    procedure TestRejectsWidthOutOfRange;
+    procedure TestAcceptsSourceWidth;
+    procedure TestRejectsNegativeTrimStart;
+    procedure TestRejectsInvertedTrim;
+    procedure TestRejectsAnExplicitZeroEnd;
+    procedure TestAcceptsOpenEndedTrim;
+  end;
+
   TDerivedValueTests = class(TTestSuite)
   public
     procedure SetupTests; override;
@@ -432,6 +465,300 @@ begin
   Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
 end;
 
+{ TTrimTests }
+
+procedure TTrimTests.SetupTests;
+begin
+  Test('parses start,end in seconds', TestParsesBothEnds);
+  Test('accepts a decimal part on either side', TestAcceptsDecimals);
+  Test('an empty start means the beginning', TestEmptyStartMeansZero);
+  Test('an empty end means the end of the movie',
+    TestEmptyEndMeansEndOfMovie);
+  Test('an explicit zero end is a real end, not an open one',
+    TestExplicitZeroEndIsNotAnOpenEnd);
+  Test('rejects one or three values', TestRejectsWrongArity);
+  Test('rejects non-numeric parts', TestRejectsNonNumeric);
+  Test('reads the decimal point the same in every locale',
+    TestIgnoresTheHostDecimalSeparator);
+end;
+
+procedure TTrimTests.TestParsesBothEnds;
+var
+  Start, Finish: Double;
+  HasEnd: Boolean;
+begin
+  Expect<Boolean>(ParseTrimRange('2,7', Start, Finish, HasEnd)).ToBe(True);
+  Expect<Boolean>(Abs(Start - 2) < 1E-9).ToBe(True);
+  Expect<Boolean>(Abs(Finish - 7) < 1E-9).ToBe(True);
+end;
+
+procedure TTrimTests.TestAcceptsDecimals;
+var
+  Start, Finish: Double;
+  HasEnd: Boolean;
+begin
+  Expect<Boolean>(ParseTrimRange(' 1.25 , 3.5 ', Start, Finish, HasEnd)).ToBe(True);
+  Expect<Boolean>(Abs(Start - 1.25) < 1E-9).ToBe(True);
+  Expect<Boolean>(Abs(Finish - 3.5) < 1E-9).ToBe(True);
+end;
+
+procedure TTrimTests.TestEmptyStartMeansZero;
+var
+  Start, Finish: Double;
+  HasEnd: Boolean;
+begin
+  Expect<Boolean>(ParseTrimRange(',4', Start, Finish, HasEnd)).ToBe(True);
+  Expect<Boolean>(Start = 0).ToBe(True);
+  Expect<Boolean>(HasEnd).ToBe(True);
+  Expect<Boolean>(Abs(Finish - 4) < 1E-9).ToBe(True);
+end;
+
+procedure TTrimTests.TestEmptyEndMeansEndOfMovie;
+var
+  Start, Finish: Double;
+  HasEnd: Boolean;
+begin
+  Expect<Boolean>(ParseTrimRange('4,', Start, Finish, HasEnd)).ToBe(True);
+  Expect<Boolean>(Abs(Start - 4) < 1E-9).ToBe(True);
+  Expect<Boolean>(HasEnd).ToBe(False);
+end;
+
+procedure TTrimTests.TestExplicitZeroEndIsNotAnOpenEnd;
+var
+  Start, Finish: Double;
+  HasEnd: Boolean;
+begin
+  // "0" is a value, not a missing value: --trim=0,0 and --trim=3,0 are
+  // empty ranges and validation has to be able to see that.
+  Expect<Boolean>(ParseTrimRange('0,0', Start, Finish, HasEnd)).ToBe(True);
+  Expect<Boolean>(HasEnd).ToBe(True);
+  Expect<Boolean>(Finish = 0).ToBe(True);
+  Expect<Boolean>(ParseTrimRange('3,0', Start, Finish, HasEnd)).ToBe(True);
+  Expect<Boolean>(HasEnd).ToBe(True);
+end;
+
+procedure TTrimTests.TestRejectsWrongArity;
+var
+  Start, Finish: Double;
+  HasEnd: Boolean;
+begin
+  Expect<Boolean>(ParseTrimRange('4', Start, Finish, HasEnd)).ToBe(False);
+  Expect<Boolean>(ParseTrimRange('1,2,3', Start, Finish, HasEnd)).ToBe(False);
+end;
+
+procedure TTrimTests.TestRejectsNonNumeric;
+var
+  Start, Finish: Double;
+  HasEnd: Boolean;
+begin
+  Expect<Boolean>(ParseTrimRange('start,4', Start, Finish, HasEnd)).ToBe(False);
+  Expect<Boolean>(ParseTrimRange('1,later', Start, Finish, HasEnd)).ToBe(False);
+end;
+
+procedure TTrimTests.TestIgnoresTheHostDecimalSeparator;
+var
+  Start, Finish: Double;
+  HasEnd: Boolean;
+  Saved: Char;
+begin
+  Saved := DefaultFormatSettings.DecimalSeparator;
+  try
+    DefaultFormatSettings.DecimalSeparator := ',';
+    Expect<Boolean>(ParseTrimRange('1.5,2.5', Start, Finish, HasEnd)).ToBe(True);
+    Expect<Boolean>(Abs(Start - 1.5) < 1E-9).ToBe(True);
+    Expect<Boolean>(Abs(Finish - 2.5) < 1E-9).ToBe(True);
+  finally
+    DefaultFormatSettings.DecimalSeparator := Saved;
+  end;
+end;
+
+{ TExportValidationTests }
+
+function TExportValidationTests.Valid: TExportOptions;
+begin
+  Result := DefaultExportOptions;
+  Result.InputPath := 'demo.mp4';
+  Result.OutputPath := 'demo.gif';
+end;
+
+procedure TExportValidationTests.SetupTests;
+begin
+  Test('defaults plus both paths validate', TestDefaultsPlusPathsAreValid);
+  Test('an input movie is required', TestRequiresInput);
+  Test('an output path is required', TestRequiresOutput);
+  Test('the input must be .mp4 or .mov', TestRejectsNonMovieInput);
+  Test('the output must be .gif for now', TestRejectsNonGifOutput);
+  Test('writing over the input is refused', TestRejectsInputEqualToOutput);
+  Test('fps outside 1..50 is rejected', TestRejectsFpsOutOfRange);
+  Test('width outside 16..4096 is rejected', TestRejectsWidthOutOfRange);
+  Test('a zero width means the movie width', TestAcceptsSourceWidth);
+  Test('a trim cannot start before zero', TestRejectsNegativeTrimStart);
+  Test('a trim cannot end before it starts', TestRejectsInvertedTrim);
+  Test('a trim ending at zero is an empty range, not an open one',
+    TestRejectsAnExplicitZeroEnd);
+  Test('a trim with no end runs to the end', TestAcceptsOpenEndedTrim);
+end;
+
+procedure TExportValidationTests.TestDefaultsPlusPathsAreValid;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+  Expect<string>(Error).ToBe('');
+  Expect<Boolean>(Options.Format = efGif).ToBe(True);
+  Expect<Boolean>(Options.InputContainer = ocMPEG4).ToBe(True);
+  Expect<Integer>(Options.FramesPerSecond).ToBe(DefaultGifFramesPerSecond);
+  Expect<Boolean>(Options.Dither).ToBe(True);
+end;
+
+procedure TExportValidationTests.TestRequiresInput;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.InputPath := '';
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+  Expect<Boolean>(Pos('--in', Error) > 0).ToBe(True);
+end;
+
+procedure TExportValidationTests.TestRequiresOutput;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.OutputPath := '';
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+  Expect<Boolean>(Pos('--out', Error) > 0).ToBe(True);
+end;
+
+procedure TExportValidationTests.TestRejectsNonMovieInput;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.InputPath := 'demo.gif';
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+  Options.InputPath := 'demo.MOV';
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+  Expect<Boolean>(Options.InputContainer = ocQuickTime).ToBe(True);
+end;
+
+procedure TExportValidationTests.TestRejectsNonGifOutput;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.OutputPath := 'demo.webm';
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+  Expect<Boolean>(Pos('.webm', Error) > 0).ToBe(True);
+  Options.OutputPath := 'demo.GIF';
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+end;
+
+procedure TExportValidationTests.TestRejectsInputEqualToOutput;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.InputPath := 'clip.mov';
+  Options.OutputPath := 'clip.mov';
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+end;
+
+procedure TExportValidationTests.TestRejectsFpsOutOfRange;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.FramesPerSecond := 0;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+  Options.FramesPerSecond := MaxGifFramesPerSecond + 1;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+  Options.FramesPerSecond := MaxGifFramesPerSecond;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+end;
+
+procedure TExportValidationTests.TestRejectsWidthOutOfRange;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.Width := MinGifWidth - 1;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+  Options.Width := MaxGifWidth + 1;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+  Options.Width := 640;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+end;
+
+procedure TExportValidationTests.TestAcceptsSourceWidth;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.Width := GifWidthFromSource;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+end;
+
+procedure TExportValidationTests.TestRejectsNegativeTrimStart;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.TrimStartSeconds := -1;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+end;
+
+procedure TExportValidationTests.TestRejectsInvertedTrim;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.TrimStartSeconds := 5;
+  Options.HasTrimEnd := True;
+  Options.TrimEndSeconds := 2;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+end;
+
+procedure TExportValidationTests.TestRejectsAnExplicitZeroEnd;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  // --trim=0,0 and --trim=3,0 used to export the whole movie because
+  // zero doubled as the "no end given" sentinel.
+  Options := Valid;
+  Options.TrimStartSeconds := 0;
+  Options.HasTrimEnd := True;
+  Options.TrimEndSeconds := 0;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+  Options.TrimStartSeconds := 3;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+end;
+
+procedure TExportValidationTests.TestAcceptsOpenEndedTrim;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.TrimStartSeconds := 5;
+  Options.HasTrimEnd := False;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+end;
+
 { TDerivedValueTests }
 
 procedure TDerivedValueTests.SetupTests;
@@ -475,6 +802,9 @@ begin
   TestRunnerProgram.AddSuite(TContainerTests.Create('ContainerForPath'));
   TestRunnerProgram.AddSuite(TAudioModeTests.Create('ParseAudioMode'));
   TestRunnerProgram.AddSuite(TValidationTests.Create('ValidateRecordingOptions'));
+  TestRunnerProgram.AddSuite(TTrimTests.Create('ParseTrimRange'));
+  TestRunnerProgram.AddSuite(TExportValidationTests.Create(
+    'ValidateExportOptions'));
   TestRunnerProgram.AddSuite(TDerivedValueTests.Create('derived values'));
   TestRunnerProgram.Run;
   ExitCode := TestResultToExitCode;

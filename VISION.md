@@ -33,7 +33,8 @@ and none of them drags `-ld_classic` into the build.
    primitive. Pause on Option-click.
 3. **Exports:** GIF (Kap's signature output; palette + LZW in pure
    Pascal, testable on Linux), APNG, WebM via a post-process step; trim
-   before export.
+   before export. *GIF and trim have landed as `opname export`; APNG and
+   WebM have not.*
 4. **Audio:** system audio and microphone as a second AVAssetWriter input
    (SCK already delivers system audio buffers).
 5. **Polish:** highlight clicks, keystroke overlay, Retina toggle, share

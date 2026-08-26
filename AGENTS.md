@@ -57,24 +57,43 @@ tools/make-app.sh                        # wrap the built binary in build/Opname
 
 | Path | Role |
 | --- | --- |
+<<<<<<< HEAD
 | `source/opname.pas` | Program: CLI surface (`app`, `record`, `displays`, `windows`, `probe`), signals |
 | `source/Opname.Options.pas` | Platform-neutral option model + validation (tested) |
 | `source/Opname.App.State.pas` | Platform-neutral app state machine, titles, paths, selection maths (tested) |
 | `source/Opname.App.pas` | Menu-bar app: status item, menu, runtime-built `OpnameAppTarget` |
 | `source/Opname.App.Overlay.pas` | Region selection overlay; runtime-built `OpnameOverlayView`/`OpnameOverlayWindow` |
+=======
+| `source/opname.pas` | Program: CLI surface (`record`, `export`, `displays`, `windows`, `probe`), signals |
+| `source/Opname.Options.pas` | Platform-neutral recording + export option models and validation (tested) |
+>>>>>>> lane/export
 | `source/Opname.ObjC.TypeEncoding.pas` | Method type encodings for runtime classes (tested) |
 | `source/Opname.ObjC.Runtime.pas` | Runtime-built ObjC classes (the ADR-0002 primitive) |
 | `source/Opname.Capture.ShareableContent.pas` | Display/window enumeration via SCShareableContent |
 | `source/Opname.Capture.Stream.pas` | SCStream wrapper; runtime-built SCStreamOutput; frame-status filter |
 | `source/Opname.Export.MovieWriter.pas` | AVAssetWriter bindings + the movie sink |
+| `source/Opname.Export.MovieReader.pas` | AVAssetReader bindings; BGRA frames + presentation stamps, with a trim range |
+| `source/Opname.Export.Bitmap.pas` | Platform-neutral BGRA buffer + box/bilinear resampling (tested) |
+| `source/Opname.Export.Gif.pas` | Platform-neutral GIF89a: median cut, dithering, LZW (tested) |
+| `source/Opname.Export.GifPipeline.pas` | Orchestrator: reader → decimate → scale → palette → GIF |
 | `source/Opname.Recording.pas` | Orchestrator: target → geometry → writer → stream → finish |
 | `source/capture/` | Vendored bindings: CoreMedia/CoreVideo/VideoToolbox/GCD, ScreenCaptureKit, pthread mutex |
 | `docs/` | Architecture, quick-start, tooling, code style, deployment, porting notes, spikes, ADRs |
 
+<<<<<<< HEAD
 Layering: `opname.pas` → {`Opname.App`, `Opname.Recording`} →
 `Opname.Recording` → {`Opname.Capture.*`, `Opname.Export.MovieWriter`} →
 {`Opname.ObjC.*`, `source/capture/*`}. `Opname.Options` is used by every
 layer and depends on nothing; `Opname.App.State` depends only on it.
+=======
+Layering: `opname.pas` → {`Opname.Recording`, `Opname.Export.GifPipeline`}
+→ {`Opname.Capture.*`, `Opname.Export.MovieWriter`,
+`Opname.Export.MovieReader`, `Opname.Export.Gif`} → {`Opname.ObjC.*`,
+`Opname.Export.Bitmap`, `source/capture/*`}. `Opname.Options` is used by
+every layer and depends on nothing. The GIF encoder is deliberately below
+the Darwin line: it has no `{$IFDEF DARWIN}` at all and is tested on
+every host.
+>>>>>>> lane/export
 
 ## Testing
 

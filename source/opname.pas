@@ -6,12 +6,15 @@ program opname;
 //   opname record --out=demo.mp4 [--display=N | --window=ID] [--rect=x,y,w,h]
 //                 [--fps=30] [--scale=auto|1|2] [--no-cursor] [--bitrate=N]
 //                 [--audio=none|system]
+//   opname export --in=demo.mp4 --out=demo.gif [--fps=20] [--width=N]
+//                 [--trim=start,end] [--no-dither]
 //   opname displays              list capturable displays
 //   opname windows               list capturable on-screen windows
 //   opname probe                 verify the ObjC runtime + framework path
 //
 // Built and tested with lwpt. Capture is ScreenCaptureKit, the file is
-// written by AVAssetWriter; see docs/architecture.md.
+// written by AVAssetWriter, and the GIF encoder is pure Pascal; see
+// docs/architecture.md.
 
 {$I Shared.inc}
 
@@ -33,6 +36,7 @@ uses
   Opname.App.Overlay,
   Opname.Capture.ShareableContent,
   Opname.Capture.Stream,
+  Opname.Export.GifPipeline,
   Opname.Export.MovieWriter,
   Opname.ObjC.Runtime,
   Opname.Recording,
@@ -138,6 +142,34 @@ begin
   Result := ValidateRecordingOptions(ARecording, AError);
 end;
 
+// Turns the parsed CLI options into a validated export request.
+function BuildExportOptions(const AOptions: TOptionArray;
+  out AExport: TExportOptions; out AError: string): Boolean;
+var
+  Trim: string;
+begin
+  Result := False;
+  AExport := DefaultExportOptions;
+  AExport.InputPath := StringValue(AOptions, 'in', '');
+  AExport.OutputPath := StringValue(AOptions, 'out', '');
+  AExport.FramesPerSecond := IntegerValue(AOptions, 'fps',
+    DefaultGifFramesPerSecond);
+  AExport.Width := IntegerValue(AOptions, 'width', GifWidthFromSource);
+  AExport.Dither := not FlagPresent(AOptions, 'no-dither');
+
+  Trim := StringValue(AOptions, 'trim', '');
+  if Trim <> '' then
+    if not ParseTrimRange(Trim, AExport.TrimStartSeconds,
+      AExport.TrimEndSeconds, AExport.HasTrimEnd) then
+    begin
+      AError := '--trim expects start,end in seconds; either side may be '
+        + 'empty (--trim=2, or --trim=,5)';
+      Exit;
+    end;
+
+  Result := ValidateExportOptions(AExport, AError);
+end;
+
 {$IFDEF DARWIN}
 
 // libc _exit(2) is async-signal-safe; nothing else in a handler is. The
@@ -215,6 +247,36 @@ begin
     Exit(ExitFailure);
   end;
   Result := ExitOk;
+end;
+
+function HandleExport(const APositionals: TStringList;
+  const AOptions: TOptionArray): Integer;
+var
+  Options: TExportOptions;
+  Session: TGifExportSession;
+  Error: string;
+begin
+  if not BuildExportOptions(AOptions, Options, Error) then
+  begin
+    WriteLn(ProgramName, ' export: ', Error);
+    Exit(ExitUsage);
+  end;
+  Session := TGifExportSession.Create(Options);
+  try
+    if not Session.Run(Error) then
+    begin
+      WriteLn(ProgramName, ' export: ', Error);
+      Exit(ExitFailure);
+    end;
+    WriteLn(Format('wrote %s: %dx%d, %d frames, %.1fs, %d kB (%d colours)',
+      [Session.Report.OutputPath, Session.Report.PixelWidth,
+      Session.Report.PixelHeight, Session.Report.FramesWritten,
+      Session.Report.DurationSeconds, Session.Report.OutputBytes div 1024,
+      Session.Report.PaletteColors]));
+    Result := ExitOk;
+  finally
+    Session.Free;
+  end;
 end;
 
 function HandleDisplays(const APositionals: TStringList;
@@ -449,6 +511,24 @@ begin
   Result := ExitUnsupported;
 end;
 
+function HandleExportUnsupported(const APositionals: TStringList;
+  const AOptions: TOptionArray): Integer;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  // The GIF encoder is platform-neutral; only reading the movie needs
+  // AVFoundation, so the same invocation fails the same way everywhere.
+  if (Length(AOptions) > 0)
+    and not BuildExportOptions(AOptions, Options, Error) then
+  begin
+    WriteLn(ProgramName, ' export: ', Error);
+    Exit(ExitUsage);
+  end;
+  WriteLn(ProgramName, ': reading movies is macOS-only in this build');
+  Result := ExitUnsupported;
+end;
+
 {$ENDIF}
 
 // Option objects are owned by the registry once the subcommand is added.
@@ -475,6 +555,26 @@ begin
   Result[8] := TStringOption.Create('audio',
     Format('Record system audio: none or system (default %s)',
     [AudioModeName(amNone)]));
+end;
+
+function ExportOptions: TOptionArray;
+begin
+  SetLength(Result, 6);
+  Result[0] := TStringOption.Create('in',
+    'Input movie; .mp4 or .mov (required)');
+  Result[1] := TStringOption.Create('out',
+    'Output file; .gif (required)');
+  Result[2] := TIntegerOption.Create('fps',
+    Format('Frames per second, %d-%d (default %d)',
+    [MinGifFramesPerSecond, MaxGifFramesPerSecond,
+    DefaultGifFramesPerSecond]));
+  Result[3] := TIntegerOption.Create('width',
+    Format('Scale to this width in pixels, %d-%d (default: the movie''s)',
+    [MinGifWidth, MaxGifWidth]));
+  Result[4] := TStringOption.Create('trim',
+    'Seconds to keep: start,end — either side may be empty');
+  Result[5] := TFlagOption.Create('no-dither',
+    'Skip Floyd-Steinberg dithering (smaller file, visible banding)');
 end;
 
 // The cli package's top-level help carries lwpt's own tagline, so the
@@ -535,6 +635,10 @@ begin
       'Record a display, region, or window to an .mp4/.mov file',
       '--out=<file> [--display=N|--window=ID] [--rect=x,y,w,h] [--fps=N] [--audio=system]',
       @HandleRecord, RecordOptions));
+    Registry.Add(TSubcommand.Create('export',
+      'Convert a recording to an animated GIF',
+      '--in=<movie> --out=<file.gif> [--fps=N] [--width=N] [--trim=start,end]',
+      @HandleExport, ExportOptions));
     Registry.Add(TSubcommand.Create('displays',
       'List capturable displays', '', @HandleDisplays, NoOptions));
     Registry.Add(TSubcommand.Create('windows',
@@ -550,6 +654,10 @@ begin
       'Record a display, region, or window (macOS only)',
       '--out=<file> [--display=N|--window=ID] [--rect=x,y,w,h] [--fps=N] [--audio=system]',
       @HandleUnsupported, RecordOptions));
+    Registry.Add(TSubcommand.Create('export',
+      'Convert a recording to an animated GIF (macOS only)',
+      '--in=<movie> --out=<file.gif> [--fps=N] [--width=N] [--trim=start,end]',
+      @HandleExportUnsupported, ExportOptions));
     Registry.Add(TSubcommand.Create('displays',
       'List capturable displays (macOS only)', '', @HandleUnsupported,
       NoOptions));
