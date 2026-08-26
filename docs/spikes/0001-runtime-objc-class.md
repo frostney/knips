@@ -65,7 +65,11 @@ Apple's headers: `SCStreamConfiguration.capturesAudio` / `sampleRate` /
 13; `kAudioFormatMPEG4AAC` is `'aac '` = 1633772320; `AVFormatIDKey`,
 `AVSampleRateKey`, `AVNumberOfChannelsKey`, `AVEncoderBitRateKey` and
 `AVMediaTypeAudio` link against AVFoundation (which re-exports AVFAudio).
-Still asserted, not proven, and clearable only by a real recording:
+**Cleared on device 2026-08-26:** `record --rect=0,0,640,360
+--audio=system` over played speech wrote h264 + AAC (48 kHz stereo) in
+one file — 332 audio samples appended, 0 dropped (early or stalled), 0
+failed, track peaks at −2.6 dB. The three claims below are proven except
+the early-PTS trim, which no buffer exercised:
 
 - that SCK dispatches `stream:didOutputSampleBuffer:ofType:` to one
   runtime-built object registered for two output types, with the right
