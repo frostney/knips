@@ -79,6 +79,12 @@ type
     HasRegion: Boolean;
     // Region in display points, relative to the display's origin.
     Region: TCaptureRegion;
+    // CGWindowIDs to keep out of a display capture — the menu-bar app
+    // puts its own recording-border window here so the frame it draws
+    // around the region never reaches the file. Display targets only: a
+    // window target's filter is built from the window itself and has
+    // nowhere to hang an exclusion list.
+    ExcludedWindowIDs: array of Cardinal;
     FramesPerSecond: Integer;
     // Pixels per point: 1, 2, or ScaleAuto.
     Scale: Integer;
@@ -278,6 +284,8 @@ end;
 
 function ValidateRecordingOptions(var AOptions: TRecordingOptions;
   out AError: string): Boolean;
+var
+  I: Integer;
 begin
   Result := False;
   AError := '';
@@ -319,6 +327,21 @@ begin
     AError := '--window needs a non-zero window id (see `knips windows`)';
     Exit;
   end;
+  if (AOptions.TargetKind = ctkWindow)
+    and (Length(AOptions.ExcludedWindowIDs) > 0) then
+  begin
+    // SCContentFilter's window initialiser takes no exclusion list, so
+    // honouring these is impossible; failing beats ignoring them and
+    // recording the border the caller asked to keep out.
+    AError := 'excluded windows apply to display recordings only';
+    Exit;
+  end;
+  for I := 0 to High(AOptions.ExcludedWindowIDs) do
+    if AOptions.ExcludedWindowIDs[I] = 0 then
+    begin
+      AError := 'an excluded window id must be non-zero';
+      Exit;
+    end;
   if AOptions.HasRegion and ((AlignDimension(AOptions.Region.Width) = 0)
     or (AlignDimension(AOptions.Region.Height) = 0)) then
   begin

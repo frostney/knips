@@ -10,7 +10,8 @@ unit Knips.Capture.ScreenCaptureKit;
     Knips.Capture.Stream, and this unit keeps only external declarations,
     which emit no method-list metadata.
   - Added: SCDisplay.frame, SCWindow.frame/owningApplication/isOnScreen/
-    windowLayer, SCContentFilter.initWithDesktopIndependentWindow:,
+    windowLayer, SCRunningApplication.processID,
+    SCContentFilter.initWithDesktopIndependentWindow:,
     SCStreamConfiguration.setSourceRect:/setScalesToFit:, the
     SCStreamFrameInfoStatus attachment key and its status values.
   - The block types and async completion pattern are unchanged.
@@ -80,6 +81,11 @@ type
   SCRunningApplication = objcclass external (NSObject)
     function bundleIdentifier: NSString; message 'bundleIdentifier';
     function applicationName: NSString; message 'applicationName';
+    { knips addition: pid_t, which is a 32-bit signed int on Darwin.
+      applicationName is a display name — 'Knips' under the bundle,
+      'knips-bin' from the shell — so the pid is the only reliable way
+      to tell our own windows apart from everybody else's. }
+    function processID: cint32; message 'processID';
   end;
 
   SCWindow = objcclass external (NSObject)

@@ -49,6 +49,9 @@ type
     procedure TestRejectsScaleOutOfRange;
     procedure TestRejectsWindowWithRect;
     procedure TestRejectsZeroWindowId;
+    procedure TestAcceptsExcludedWindows;
+    procedure TestRejectsZeroExcludedWindowId;
+    procedure TestRejectsExcludedWindowsOnAWindowTarget;
     procedure TestRejectsRectSmallerThanAlignment;
     procedure TestFillsContainer;
     procedure TestDefaultsHaveNoAudio;
@@ -258,6 +261,12 @@ begin
   Test('scale outside auto/1/2 is rejected', TestRejectsScaleOutOfRange);
   Test('--window and --rect cannot combine', TestRejectsWindowWithRect);
   Test('window target needs a window id', TestRejectsZeroWindowId);
+  Test('a display recording may exclude windows',
+    TestAcceptsExcludedWindows);
+  Test('an excluded window id of zero is rejected',
+    TestRejectsZeroExcludedWindowId);
+  Test('excluded windows are rejected on a window target',
+    TestRejectsExcludedWindowsOnAWindowTarget);
   Test('rect smaller than the alignment is rejected',
     TestRejectsRectSmallerThanAlignment);
   Test('validation fills the container from the path', TestFillsContainer);
@@ -354,6 +363,48 @@ begin
   Options := Valid;
   Options.TargetKind := ctkWindow;
   Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+end;
+
+procedure TValidationTests.TestAcceptsExcludedWindows;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := Valid;
+  SetLength(Options.ExcludedWindowIDs, 2);
+  Options.ExcludedWindowIDs[0] := 17;
+  Options.ExcludedWindowIDs[1] := 4711;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(True);
+  Expect<Integer>(Length(Options.ExcludedWindowIDs)).ToBe(2);
+end;
+
+procedure TValidationTests.TestRejectsZeroExcludedWindowId;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := Valid;
+  SetLength(Options.ExcludedWindowIDs, 2);
+  Options.ExcludedWindowIDs[0] := 17;
+  Options.ExcludedWindowIDs[1] := 0;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+  Expect<Boolean>(Pos('excluded window id', Error) > 0).ToBe(True);
+end;
+
+// The window filter has no exclusion list, so honouring these is
+// impossible; the recorder must say so rather than drop them.
+procedure TValidationTests.TestRejectsExcludedWindowsOnAWindowTarget;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.TargetKind := ctkWindow;
+  Options.WindowID := 42;
+  SetLength(Options.ExcludedWindowIDs, 1);
+  Options.ExcludedWindowIDs[0] := 17;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+  Expect<Boolean>(Pos('display recordings only', Error) > 0).ToBe(True);
 end;
 
 procedure TValidationTests.TestRejectsRectSmallerThanAlignment;

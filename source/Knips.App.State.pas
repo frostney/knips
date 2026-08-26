@@ -31,6 +31,34 @@ const
   // Longer messages are elided in the menu; the full text goes to NSLog.
   MaxErrorTitleLength = 60;
   ErrorTitlePrefix = 'Last error: ';
+  // The GIF a recording exports to sits beside it, under the same name.
+  GifFileExtension = '.gif';
+  // What the "Export as GIF…" button asks for. The CLI's own default
+  // (the movie's own width) is the right answer for a hand-written
+  // command and the wrong one for a one-click button: a Retina display
+  // recording is 2560 px wide and makes a GIF nobody can send anywhere.
+  AppGifFramesPerSecond = 20;
+  MaxAppGifWidth = 800;
+  // How much of the export's progress the palette pass is worth. It
+  // reads every frame but only resamples every Nth, so it is the cheaper
+  // of the two passes over the movie.
+  PaletteProgressPercent = 25;
+  // "Application — Window title", elided to keep the menu narrow.
+  WindowMenuSeparator = ' — ';
+  MaxWindowMenuTitleLength = 60;
+  // Enough to find the window you meant, few enough to stay a menu.
+  MaxWindowMenuEntries = 20;
+  // Points. Below this a window is a tooltip, a shadow helper, or some
+  // other thing nobody asked to record.
+  MinRecordableWindowSize = 32;
+  // Ordinary application windows; the menu bar, the Dock, and overlays
+  // (this app's own included) sit on other layers.
+  RecordableWindowLayer = 0;
+  // Points. Larger than any display Apple ships, and the ceiling on
+  // anything read back out of NSUserDefaults, which `defaults write` can
+  // put anything at all into.
+  MaxStoredRegionExtent = 32768;
+  ExportingTitlePrefix = 'Exporting… ';
 
 type
   TAppState = (asIdle, asSelecting, asRecording);
@@ -38,6 +66,17 @@ type
   TAppCommand = (
     acRecordRegion,       // idle -> selecting: show the overlay
     acRecordDisplay,      // idle -> recording: whole main display
+    // idle -> recording: one window picked from the Record Window submenu
+    acRecordWindow,
+    // idle -> recording: the region of the last region recording, which
+    // survives a relaunch in NSUserDefaults. The controller additionally
+    // requires a region to be on file; the table only says when the
+    // command could ever be legal.
+    acRecordLastRegion,
+    // idle -> idle: the Record System Audio checkbox. It changes no
+    // state, but it must not be reachable mid-recording — the stream
+    // configuration is fixed once the capture has started.
+    acToggleSystemAudio,
     acSelectionCommitted, // selecting -> recording: mouse released
     acSelectionCancelled, // selecting -> idle: Esc or an empty drag
     // selecting -> idle, asked for from the menu rather than from inside
@@ -83,7 +122,73 @@ function IsSelectionUsable(const ASelection: TCaptureRegion): Boolean;
 
 function ErrorMenuTitle(const AMessage: string): string;
 
+// The GIF a recording exports to: same directory, same stem, .gif.
+function GifPathForRecording(const ARecordingPath: string): string;
+
+// The width a one-click GIF export asks for: the recording's own, capped
+// at MaxAppGifWidth. 0 in means 0 out — the exporter's "keep the source
+// width" sentinel.
+function AppGifWidth(ASourcePixelWidth: Integer): Integer;
+
+// "Application — Title" for the Record Window submenu, elided. A window
+// with no title reads as its application alone.
+function WindowMenuItemTitle(const AApplicationName,
+  AWindowTitle: string): string;
+
+// Whether a window belongs in the Record Window submenu at all: on
+// screen, an ordinary application window (layer 0), big enough to be
+// worth recording, titled, and not one of ours. AIsOwnProcess is decided
+// by the caller from the owning process id — never from the application
+// name, which is a display name and reads 'Knips' under the bundle and
+// 'knips-bin' from the shell.
+function IsWindowRecordable(AOnScreen: Boolean; ALayer, AWidth,
+  AHeight: Integer; const AWindowTitle: string;
+  AIsOwnProcess: Boolean): Boolean;
+
+// One percentage for an export that makes two passes over the movie.
+// Always between 0 and 100, and never goes backwards between stages.
+function ExportPercent(AIsPalettePass: Boolean; AFramesDone,
+  AFramesTotal: Int64): Integer;
+
+// The playback window's title while an export is running.
+function ExportProgressTitle(APercent: Integer): string;
+
+// A region read back out of NSUserDefaults, made safe to hand to
+// ScreenCaptureKit's sourceRect. `defaults write` is a public interface:
+// anything at all can be sitting under those keys, and a negative origin
+// or an absurd extent would go straight into the capture. False when
+// nothing usable is left.
+function SanitizeStoredRegion(const AStored: TCaptureRegion;
+  out ARegion: TCaptureRegion): Boolean;
+
 implementation
+
+const
+  Ellipsis = '…';
+
+// Cuts a string to at most AMaxBytes bytes without splitting a UTF-8
+// character. Titles come out of ScreenCaptureKit and out of framework
+// error messages, so they carry non-ASCII routinely, and a Pascal string
+// holding half a character makes NSString.stringWithUTF8String: return
+// nil — which AppKit turns into an exception the moment it is set as a
+// title. Cutting on a character boundary is what keeps that off the
+// menu.
+function ElideUtf8(const AText: string; AMaxBytes: Integer): string;
+var
+  Cut: Integer;
+begin
+  Result := AText;
+  if Length(Result) <= AMaxBytes then
+    Exit;
+  Cut := AMaxBytes - Length(Ellipsis);
+  if Cut < 0 then
+    Cut := 0;
+  // Continuation bytes are 10xxxxxx; back up until the cut lands on the
+  // first byte of a character.
+  while (Cut > 0) and (Ord(Result[Cut + 1]) and $C0 = $80) do
+    Dec(Cut);
+  Result := Copy(Result, 1, Cut) + Ellipsis;
+end;
 
 function NextAppState(ACurrent: TAppState; ACommand: TAppCommand;
   out ANext: TAppState): Boolean;
@@ -94,7 +199,9 @@ begin
     asIdle:
       case ACommand of
         acRecordRegion: ANext := asSelecting;
-        acRecordDisplay: ANext := asRecording;
+        acRecordDisplay, acRecordWindow, acRecordLastRegion:
+          ANext := asRecording;
+        acToggleSystemAudio: ANext := asIdle;
       else
         Result := False;
       end;
@@ -233,9 +340,156 @@ begin
   Text := Trim(AMessage);
   if Text = '' then
     Text := 'unknown error';
-  if Length(Text) > MaxErrorTitleLength then
-    Text := Copy(Text, 1, MaxErrorTitleLength - 1) + '…';
-  Result := ErrorTitlePrefix + Text;
+  Result := ErrorTitlePrefix + ElideUtf8(Text, MaxErrorTitleLength);
+end;
+
+function GifPathForRecording(const ARecordingPath: string): string;
+begin
+  if ARecordingPath = '' then
+    Exit('');
+  Result := ChangeFileExt(ARecordingPath, GifFileExtension);
+  // ChangeFileExt on a name with no extension appends nothing in some
+  // RTL versions; make sure the export never writes over the movie.
+  if SameText(Result, ARecordingPath) then
+    Result := ARecordingPath + GifFileExtension;
+end;
+
+function AppGifWidth(ASourcePixelWidth: Integer): Integer;
+begin
+  if (ASourcePixelWidth > 0) and (ASourcePixelWidth > MaxAppGifWidth) then
+    Result := MaxAppGifWidth
+  else
+    // GifWidthFromSource: the exporter keeps the movie's own width, which
+    // is also what an unknown source width has to fall back to.
+    Result := GifWidthFromSource;
+end;
+
+function WindowMenuItemTitle(const AApplicationName,
+  AWindowTitle: string): string;
+var
+  Application, Title: string;
+begin
+  Application := Trim(AApplicationName);
+  Title := Trim(AWindowTitle);
+  if (Application <> '') and (Title <> '') then
+    Result := Application + WindowMenuSeparator + Title
+  else if Application <> '' then
+    Result := Application
+  else
+    Result := Title;
+  if Result = '' then
+    Result := 'Untitled window';
+  Result := ElideUtf8(Result, MaxWindowMenuTitleLength);
+end;
+
+function IsWindowRecordable(AOnScreen: Boolean; ALayer, AWidth,
+  AHeight: Integer; const AWindowTitle: string;
+  AIsOwnProcess: Boolean): Boolean;
+begin
+  Result := False;
+  if not AOnScreen then
+    Exit;
+  if ALayer <> RecordableWindowLayer then
+    Exit;
+  if (AWidth < MinRecordableWindowSize)
+    or (AHeight < MinRecordableWindowSize) then
+    Exit;
+  // An untitled window cannot be named in a menu, and a menu entry the
+  // user cannot tell apart from the next one is worse than no entry.
+  if Trim(AWindowTitle) = '' then
+    Exit;
+  // Recording ourselves is a hall of mirrors. The playback window is the
+  // one of ours that reaches this far — it is titled and on layer 0,
+  // unlike the overlay and the border.
+  if AIsOwnProcess then
+    Exit;
+  Result := True;
+end;
+
+// The Boolean rather than the pipeline's own stage enumeration: this unit
+// sits below the Darwin line and must not reach up into
+// Knips.Export.GifPipeline for a type.
+function ExportPercent(AIsPalettePass: Boolean; AFramesDone,
+  AFramesTotal: Int64): Integer;
+var
+  Fraction: Double;
+  Share, Base: Integer;
+begin
+  if AIsPalettePass then
+  begin
+    Base := 0;
+    Share := PaletteProgressPercent;
+  end
+  else
+  begin
+    Base := PaletteProgressPercent;
+    Share := 100 - PaletteProgressPercent;
+  end;
+  if AFramesTotal <= 0 then
+    Fraction := 0
+  else
+    Fraction := AFramesDone / AFramesTotal;
+  if Fraction < 0 then
+    Fraction := 0;
+  // The total is an estimate from the trim range and the target rate, so
+  // the count can run past it; a bar that reads 118% is a bug report.
+  if Fraction > 1 then
+    Fraction := 1;
+  Result := Base + Round(Fraction * Share);
+  if Result < 0 then
+    Result := 0;
+  if Result > 100 then
+    Result := 100;
+end;
+
+function SanitizeStoredRegion(const AStored: TCaptureRegion;
+  out ARegion: TCaptureRegion): Boolean;
+begin
+  ARegion := AStored;
+  // A negative origin is the dangerous one: it would reach sourceRect as
+  // a rectangle starting off the display. Pull it in the same way a drag
+  // that left the screen is pulled in, rather than growing the region.
+  if ARegion.Left < 0 then
+  begin
+    Inc(ARegion.Width, ARegion.Left);
+    ARegion.Left := 0;
+  end;
+  if ARegion.Top < 0 then
+  begin
+    Inc(ARegion.Height, ARegion.Top);
+    ARegion.Top := 0;
+  end;
+  if (ARegion.Width <= 0) or (ARegion.Height <= 0) then
+  begin
+    ARegion := Default(TCaptureRegion);
+    Exit(False);
+  end;
+  // Nothing beyond the largest display anyone ships is a real selection,
+  // and ResolveFilter rejects a region past the display's own bounds
+  // anyway — this only keeps the arithmetic in range until it gets there.
+  if (ARegion.Left > MaxStoredRegionExtent)
+    or (ARegion.Top > MaxStoredRegionExtent)
+    or (ARegion.Width > MaxStoredRegionExtent)
+    or (ARegion.Height > MaxStoredRegionExtent) then
+  begin
+    ARegion := Default(TCaptureRegion);
+    Exit(False);
+  end;
+  Result := IsSelectionUsable(ARegion);
+  if not Result then
+    ARegion := Default(TCaptureRegion);
+end;
+
+function ExportProgressTitle(APercent: Integer): string;
+var
+  Percent: Integer;
+begin
+  Percent := APercent;
+  if Percent < 0 then
+    Percent := 0;
+  if Percent > 100 then
+    Percent := 100;
+  Result := Format('%s%d%%', [ExportingTitlePrefix, Percent]);
 end;
 
 end.

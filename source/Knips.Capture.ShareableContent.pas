@@ -37,6 +37,10 @@ type
     WindowID: UInt32;
     Title: string;
     ApplicationName: string;
+    // The owning process. ApplicationName is a display name and differs
+    // between the shell binary and the app bundle, so this is what
+    // identifies a window as one of ours.
+    ProcessID: Integer;
     Width: Integer;
     Height: Integer;
     OnScreen: Boolean;
@@ -49,10 +53,16 @@ type
   private
     FContent: SCShareableContent;
     function DisplayObject(AIndex: Integer): SCDisplay;
+    procedure Query(ATimeoutSeconds: Double);
   public
     // Runs the framework query; raises EShareableContent on timeout or
     // framework error (typically missing Screen Recording permission).
     constructor Create;
+    // The same query on a caller's own time budget, for the one caller
+    // that cannot afford the default one: the Record Window submenu is
+    // built inside AppKit's menu tracking, where five seconds of waiting
+    // is a frozen menu. Everything else wants Create.
+    constructor CreateWithin(ATimeoutSeconds: Double);
     destructor Destroy; override;
     function DisplayCount: Integer;
     function DisplayAt(AIndex: Integer): TDisplayInfo;
@@ -88,6 +98,7 @@ const
   // 5000 x 1 ms run-loop slices, as in the prototype.
   QueryTimeoutSlices = 5000;
   RunLoopSliceSeconds = 0.001;
+  DefaultQueryTimeoutSeconds = QueryTimeoutSlices * RunLoopSliceSeconds;
 
 var
   GContentResult: SCShareableContent = nil;
@@ -143,11 +154,22 @@ end;
 { TShareableContent }
 
 constructor TShareableContent.Create;
-var
-  WaitCount: Integer;
-  Message: string;
 begin
   inherited Create;
+  Query(DefaultQueryTimeoutSeconds);
+end;
+
+constructor TShareableContent.CreateWithin(ATimeoutSeconds: Double);
+begin
+  inherited Create;
+  Query(ATimeoutSeconds);
+end;
+
+procedure TShareableContent.Query(ATimeoutSeconds: Double);
+var
+  Slices, WaitCount: Integer;
+  Message: string;
+begin
   GContentResult := nil;
   GContentError := nil;
   GContentReady := False;
@@ -155,8 +177,11 @@ begin
   SCShareableContent.getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
     ObjCBOOL(False), ObjCBOOL(True), ContentCompletionHandler);
 
+  Slices := Round(ATimeoutSeconds / RunLoopSliceSeconds);
+  if Slices < 1 then
+    Slices := 1;
   WaitCount := 0;
-  while (not GContentReady) and (WaitCount < QueryTimeoutSlices) do
+  while (not GContentReady) and (WaitCount < Slices) do
   begin
     CFRunLoopRunInMode(kCFRunLoopDefaultMode, RunLoopSliceSeconds, False);
     Inc(WaitCount);
@@ -261,9 +286,17 @@ begin
   Result.Title := NSStringToPascal(Window.title);
   Application := Window.owningApplication;
   if Application <> nil then
-    Result.ApplicationName := NSStringToPascal(Application.applicationName)
+  begin
+    Result.ApplicationName := NSStringToPascal(Application.applicationName);
+    Result.ProcessID := Application.processID;
+  end
   else
+  begin
     Result.ApplicationName := '';
+    // Not zero: pid 0 is the kernel, and a caller comparing against its
+    // own pid must never accidentally match an unknown owner.
+    Result.ProcessID := -1;
+  end;
   Result.Width := Round(Frame.size.width);
   Result.Height := Round(Frame.size.height);
   Result.OnScreen := Window.isOnScreen;

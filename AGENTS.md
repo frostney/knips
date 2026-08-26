@@ -59,9 +59,11 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | --- | --- |
 | `source/knips.pas` | Program: CLI surface (`app`, `record`, `export`, `displays`, `windows`, `probe`), signals |
 | `source/Knips.Options.pas` | Platform-neutral recording + export option models and validation (tested) |
-| `source/Knips.App.State.pas` | Platform-neutral app state machine, titles, paths, selection maths (tested) |
-| `source/Knips.App.pas` | Menu-bar app: status item, menu, runtime-built `KnipsAppTarget` |
+| `source/Knips.App.State.pas` | Platform-neutral app state machine, titles, paths, selection maths, window-menu filter, export arithmetic (tested) |
+| `source/Knips.App.pas` | Menu-bar app: status item, menu, preferences, runtime-built `KnipsAppTarget` |
 | `source/Knips.App.Overlay.pas` | Region selection overlay; runtime-built `KnipsOverlayView`/`KnipsOverlayWindow` |
+| `source/Knips.App.Border.pas` | The frame around a recorded region; runtime-built `KnipsBorderView` |
+| `source/Knips.App.Playback.pas` | Playback + GIF export window (AVKit); runtime-built `KnipsPlaybackDelegate` |
 | `source/Knips.ObjC.TypeEncoding.pas` | Method type encodings for runtime classes (tested) |
 | `source/Knips.ObjC.Runtime.pas` | Runtime-built ObjC classes (the ADR-0002 primitive) |
 | `source/Knips.Capture.ShareableContent.pas` | Display/window enumeration via SCShareableContent |
@@ -76,7 +78,9 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | `docs/` | Architecture, quick-start, tooling, code style, deployment, porting notes, spikes, ADRs |
 
 Layering: `knips.pas` → {`Knips.App`, `Knips.Recording`,
-`Knips.Export.GifPipeline`} → {`Knips.Capture.*`,
+`Knips.Export.GifPipeline`} (`Knips.App.Playback` also reaches
+`Knips.Export.GifPipeline`, so the *Export as GIF…* button runs the same
+session `knips export` does) → {`Knips.Capture.*`,
 `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`,
 `Knips.Export.Gif`} → {`Knips.ObjC.*`, `Knips.Export.Bitmap`,
 `source/capture/*`}. `Knips.Options` is used by every layer and depends
