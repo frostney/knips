@@ -2,9 +2,10 @@
 
 Native macOS screen recorder in FreePascal — *opname*, Dutch for
 recording. Pick a display, a region, or a window; get an `.mp4` or `.mov`
-back. Capture is ScreenCaptureKit, the file is written by AVAssetWriter
-with hardware H.264, and the whole thing is one dependency-light binary
-built with [lwpt](https://github.com/frostney/lwpt). It grows out of the
+back, or an animated GIF. Capture is ScreenCaptureKit, the file is
+written by AVAssetWriter with hardware H.264, the GIF encoder is pure
+Pascal, and the whole thing is one dependency-light binary built with
+[lwpt](https://github.com/frostney/lwpt). It grows out of the
 [lantaarn](https://github.com/frostney/lantaarn) capture core toward what
 [Kap](https://github.com/wulkano/Kap) was: see [VISION.md](VISION.md).
 
@@ -22,6 +23,8 @@ lwpt install && lwpt build    # produces build/opname
 ./build/opname record --out=demo.mp4                   # main display, 30 fps, Ctrl-C to stop
 ./build/opname record --out=demo.mp4 --rect=100,80,1280,720 --fps=60
 ./build/opname record --out=app.mov --window=<id>      # id from `opname windows`
+./build/opname export --in=demo.mp4 --out=demo.gif     # animated GIF, 20 fps
+./build/opname export --in=demo.mp4 --out=demo.gif --width=800 --trim=1.5,4
 ```
 
 macOS prompts once for **Screen Recording**. Flags, exit codes, and the

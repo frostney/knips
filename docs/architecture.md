@@ -45,16 +45,95 @@
 
 | Layer | Units | Notes |
 | --- | --- | --- |
-| CLI | `opname.pas` | lwpt `cli` package: `record`, `displays`, `windows`, `probe`; SIGINT/SIGTERM → `StopRequested` |
+| CLI | `opname.pas` | lwpt `cli` package: `record`, `export`, `displays`, `windows`, `probe`; SIGINT/SIGTERM → `StopRequested` |
 | Recording | `Opname.Recording` | Target → filter + geometry → writer → stream; progress; report |
 | Capture | `Opname.Capture.ShareableContent`, `Opname.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
-| Export | `Opname.Export.MovieWriter` | AVAssetWriter/Input bindings; session start; finish |
+| Export (Darwin) | `Opname.Export.MovieWriter`, `Opname.Export.MovieReader`, `Opname.Export.GifPipeline` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; the two-pass GIF export |
+| Export (neutral) | `Opname.Export.Gif`, `Opname.Export.Bitmap` | Median cut, dithering, LZW, GIF89a writer; BGRA buffer + resampling (both tested) |
 | ObjC | `Opname.ObjC.Runtime`, `Opname.ObjC.TypeEncoding` | Class assembly via libobjc; method type encodings (tested) |
 | Options | `Opname.Options` | Neutral option model, validation, derived values (tested) |
 | Vendored | `source/capture/*` | CoreMedia/CoreVideo/VideoToolbox/GCD, ScreenCaptureKit externals, pthread mutex |
 
 Nothing above the capture layer knows about `objcclass`; nothing below
 the recording layer knows about the CLI.
+
+## The GIF export
+
+`opname export` is the mirror of `record`, and it is deliberately thin on
+the Darwin side: `Opname.Export.MovieReader` turns an `.mp4`/`.mov` into
+a stream of BGRA `CVPixelBuffer`s with presentation stamps, and
+everything that decides what the file looks like —
+`Opname.Export.Bitmap` and `Opname.Export.Gif` — is platform-neutral and
+unit-tested off-device.
+
+```text
+  AVAssetReader (timeRange = --trim)
+        │  BGRA CVPixelBuffer + PTS
+        ▼
+  decimate to --fps (integer grid over the stamps, not a cadence)
+        │
+        ▼
+  BgraResample to --width (integer box reduce, then bilinear)
+        │
+        ├─ pass 1 ──▶ TGifQuantizer: 6-bit histogram over ≤32 sampled
+        │              frames ──▶ median cut ──▶ one global palette
+        │
+        └─ pass 2 ──▶ TGifEncoder: Floyd–Steinberg ──▶ changed rectangle
+                       ──▶ LZW twice, opaque and transparent, keep the
+                           shorter ──▶ GIF89a + NETSCAPE2.0 loop
+```
+
+Three decisions carry most of the weight:
+
+- **One global palette, two passes.** An `AVAssetReader` cannot seek
+  backwards, so the palette pass and the encoding pass are two readers
+  opened one after the other over the same `CMTimeRange`. A per-frame
+  local palette would need only one pass, but it makes the colours shift
+  between frames — very visible on a screen recording's flat UI — and
+  costs 768 bytes of colour table per frame. The histogram is a fixed
+  4 MB array of 64³ cells that accumulates *exact* 8-bit channel sums, so
+  the 6-bit cells decide only which colours share a median-cut box; every
+  palette entry is the count-weighted mean of the real colours in it.
+- **Decimation counts grid slots, not deadlines.** Each frame's stamp is
+  turned into a slot number, `floor((pts - first) * fps)`, and a frame is
+  emitted when its slot is past the last one emitted. The obvious
+  alternative — carrying a floating-point "next due" time forward — drops
+  frames when the source rate equals the requested one, because a stamp
+  that should land exactly on the deadline lands a few parts in 10^16
+  below it. Counting slots also means a source slower than the target
+  never accumulates a backlog of frames that are "due".
+- **Delays come from the presentation stamps.** The delay written for a
+  frame is the gap to the frame after it, rounded to centiseconds
+  (GIF's unit) and clamped to at least 2 — browsers silently turn 0 and
+  1 into 10. That is why the pipeline holds one scaled frame back: it
+  cannot write frame *n*'s graphic-control block until it has seen
+  frame *n+1*.
+- **Changed-rectangle frames, and a transparency trial.** Every frame
+  after the first is written as the bounding box of the palette indices
+  that differ from the previous frame, with disposal "leave in place". A
+  frame identical to its predecessor becomes a 1×1 frame carrying only
+  the delay. On a *real* recording the rectangle alone is not enough:
+  H.264's noise floor moves a few scattered pixels in every corner, so
+  the bounding box is almost always the whole canvas. Each frame is
+  therefore compressed twice — once plainly, once with the pixels inside
+  the rectangle that did not actually change written as a reserved
+  transparent index — and the shorter result is what reaches the file.
+  Reserving that index costs one palette slot (`GifMaxOpaqueColors`).
+
+  Trying both rather than guessing matters, because neither wins
+  everywhere: transparency collapses a varied unchanged background into
+  one long LZW run, but when the rectangle is already tight around real
+  movement it only fragments the runs LZW would have found. Measured on
+  a 1600×1200 ScreenCaptureKit recording, best-of-two is 1.92 MB against
+  3.75 MB for rectangles alone; on a synthetic clip whose only motion is
+  a small moving box it correctly declines transparency and keeps the
+  37 kB the rectangle already achieved. The second LZW pass costs about
+  20% more encoding time and nothing in quality — transparency composites
+  exactly, with no drift across frames.
+
+Memory is bounded by construction: one decoded frame (the framework's),
+one scaled frame, one pending scaled frame, and two palette-index buffers
+inside the encoder. Nothing accumulates with the length of the movie.
 
 ## The runtime-built output object
 
@@ -138,7 +217,7 @@ SCK scales later resizes into it.
 | --- | --- |
 | 0 | ok |
 | 1 | usage — options failed validation |
-| 2 | failure — framework, permission, or writer error (message printed) |
+| 2 | failure — framework, permission, writer, or reader error (message printed) |
 | 3 | unsupported — not a macOS build |
 
 A second Ctrl-C during finalisation calls `_exit(2)`; the file may be

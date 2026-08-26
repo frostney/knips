@@ -1,9 +1,10 @@
 unit Opname.Options;
 
-// Recording options as the CLI hands them to the recorder: what to
-// capture, at what rate, into which container. Everything here is
+// Recording and export options as the CLI hands them to the recorder
+// and the exporter: what to capture, at what rate, into which
+// container; and which movie to turn into which GIF. Everything here is
 // platform-neutral and unit-tested; the macOS layer only consumes the
-// validated record.
+// validated records.
 
 {$I Shared.inc}
 
@@ -28,6 +29,16 @@ const
   MaxScale = 2;
   // Bumped once per release that changes the CLI surface.
   OpnameVersion = '0.1.0';
+
+  // GIF delays are whole centiseconds, so anything above 50 fps cannot
+  // be represented and 20 is what Kap-sized clips actually want.
+  DefaultGifFramesPerSecond = 20;
+  MinGifFramesPerSecond = 1;
+  MaxGifFramesPerSecond = 50;
+  // 0 = keep the movie's own width.
+  GifWidthFromSource = 0;
+  MinGifWidth = 16;
+  MaxGifWidth = 4096;
 
 type
   TCaptureRegion = record
@@ -60,6 +71,28 @@ type
     Container: TOutputContainer;
   end;
 
+  // GIF is the only export in this milestone; APNG and WebM join the
+  // enumeration rather than the record when they arrive.
+  TExportFormat = (efGif);
+
+  TExportOptions = record
+    InputPath: string;
+    OutputPath: string;
+    Format: TExportFormat;
+    // The container the input is read from, filled by validation.
+    InputContainer: TOutputContainer;
+    FramesPerSecond: Integer;
+    // Target width in pixels; GifWidthFromSource keeps the movie's own.
+    Width: Integer;
+    TrimStartSeconds: Double;
+    // False runs to the end of the movie. A separate flag rather than a
+    // sentinel value, so an explicit --trim=3,0 is an empty range and
+    // gets rejected instead of quietly meaning "to the end".
+    HasTrimEnd: Boolean;
+    TrimEndSeconds: Double;
+    Dither: Boolean;
+  end;
+
 function DefaultRecordingOptions: TRecordingOptions;
 
 // "left,top,width,height" in points. Rejects anything else.
@@ -84,6 +117,25 @@ function SuggestedBitRate(APixelWidth, APixelHeight,
   AFramesPerSecond: Integer): Integer;
 
 function ContainerFileType(AContainer: TOutputContainer): string;
+
+function DefaultExportOptions: TExportOptions;
+
+// Export format from the output path's extension; False for unknown ones.
+function ExportFormatForPath(const APath: string;
+  out AFormat: TExportFormat): Boolean;
+
+// "start,end" in seconds with an optional decimal part; either side may
+// be left empty ("2," keeps everything from 2 s on, ",5" keeps the first
+// five seconds). AHasEnd distinguishes an omitted end from an explicit
+// zero. Always reads '.' as the decimal point, whatever the host locale
+// says.
+function ParseTrimRange(const AText: string;
+  out AStartSeconds, AEndSeconds: Double; out AHasEnd: Boolean): Boolean;
+
+// Checks ranges and cross-field rules; fills derived fields
+// (Format, InputContainer). One-line human message on failure.
+function ValidateExportOptions(var AOptions: TExportOptions;
+  out AError: string): Boolean;
 
 implementation
 
@@ -218,6 +270,122 @@ begin
   begin
     AError := Format('--rect must be at least %dx%d points',
       [DimensionAlignment, DimensionAlignment]);
+    Exit;
+  end;
+  Result := True;
+end;
+
+function DefaultExportOptions: TExportOptions;
+begin
+  Result := Default(TExportOptions);
+  Result.Format := efGif;
+  Result.InputContainer := ocMPEG4;
+  Result.FramesPerSecond := DefaultGifFramesPerSecond;
+  Result.Width := GifWidthFromSource;
+  Result.TrimStartSeconds := 0;
+  Result.HasTrimEnd := False;
+  Result.TrimEndSeconds := 0;
+  Result.Dither := True;
+end;
+
+function ExportFormatForPath(const APath: string;
+  out AFormat: TExportFormat): Boolean;
+begin
+  AFormat := efGif;
+  Result := LowerCase(ExtractFileExt(APath)) = '.gif';
+end;
+
+// A fixed decimal point: --trim is a machine-readable flag, not a
+// number typed into a form, so the host locale must not change it.
+function InvariantSettings: TFormatSettings;
+begin
+  Result := DefaultFormatSettings;
+  Result.DecimalSeparator := '.';
+  Result.ThousandSeparator := #0;
+end;
+
+function ParseTrimRange(const AText: string;
+  out AStartSeconds, AEndSeconds: Double; out AHasEnd: Boolean): Boolean;
+var
+  Parts: TStringArray;
+  Settings: TFormatSettings;
+begin
+  Result := False;
+  AStartSeconds := 0;
+  AEndSeconds := 0;
+  AHasEnd := False;
+  Parts := AText.Split([',']);
+  if Length(Parts) <> 2 then
+    Exit;
+  Settings := InvariantSettings;
+  if Trim(Parts[0]) <> '' then
+    if not TryStrToFloat(Trim(Parts[0]), AStartSeconds, Settings) then
+      Exit;
+  if Trim(Parts[1]) <> '' then
+  begin
+    if not TryStrToFloat(Trim(Parts[1]), AEndSeconds, Settings) then
+      Exit;
+    AHasEnd := True;
+  end;
+  Result := True;
+end;
+
+function ValidateExportOptions(var AOptions: TExportOptions;
+  out AError: string): Boolean;
+begin
+  Result := False;
+  AError := '';
+  if AOptions.InputPath = '' then
+  begin
+    AError := 'an input movie is required (--in=demo.mp4)';
+    Exit;
+  end;
+  if not ContainerForPath(AOptions.InputPath, AOptions.InputContainer) then
+  begin
+    AError := 'unsupported input extension "'
+      + ExtractFileExt(AOptions.InputPath) + '" (use .mp4 or .mov)';
+    Exit;
+  end;
+  if AOptions.OutputPath = '' then
+  begin
+    AError := 'an output path is required (--out=demo.gif)';
+    Exit;
+  end;
+  if not ExportFormatForPath(AOptions.OutputPath, AOptions.Format) then
+  begin
+    AError := 'unsupported output extension "'
+      + ExtractFileExt(AOptions.OutputPath) + '" (use .gif)';
+    Exit;
+  end;
+  if SameText(ExpandFileName(AOptions.InputPath),
+    ExpandFileName(AOptions.OutputPath)) then
+  begin
+    AError := '--in and --out are the same file';
+    Exit;
+  end;
+  if (AOptions.FramesPerSecond < MinGifFramesPerSecond)
+    or (AOptions.FramesPerSecond > MaxGifFramesPerSecond) then
+  begin
+    AError := Format('--fps must be between %d and %d for a GIF',
+      [MinGifFramesPerSecond, MaxGifFramesPerSecond]);
+    Exit;
+  end;
+  if (AOptions.Width <> GifWidthFromSource)
+    and ((AOptions.Width < MinGifWidth) or (AOptions.Width > MaxGifWidth)) then
+  begin
+    AError := Format('--width must be between %d and %d pixels',
+      [MinGifWidth, MaxGifWidth]);
+    Exit;
+  end;
+  if AOptions.TrimStartSeconds < 0 then
+  begin
+    AError := '--trim cannot start before zero';
+    Exit;
+  end;
+  if AOptions.HasTrimEnd
+    and (AOptions.TrimEndSeconds <= AOptions.TrimStartSeconds) then
+  begin
+    AError := '--trim must end after it starts';
     Exit;
   end;
   Result := True;
