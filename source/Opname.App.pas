@@ -890,6 +890,10 @@ begin
     // Accessory: a menu-bar-only process — no Dock tile, no main menu,
     // and windows can still become key (the overlay needs that).
     Application.setActivationPolicy(NSApplicationActivationPolicyAccessory);
+    // A status item created before the app has finished launching gets a
+    // window the menu bar never adopts (height 0, never visible — seen
+    // on device). finishLaunching first; run tolerates the early call.
+    Application.finishLaunching;
     Controller := TAppController.Create;
     try
       if not Controller.Setup(AError) then
