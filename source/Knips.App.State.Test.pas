@@ -1,6 +1,6 @@
 program Knips.App.State.Test;
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 uses
   StrUtils,

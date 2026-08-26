@@ -1,6 +1,6 @@
 program Knips.Options.Test;
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 uses
   SysUtils,

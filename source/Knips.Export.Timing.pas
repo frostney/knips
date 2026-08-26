@@ -35,7 +35,7 @@ unit Knips.Export.Timing;
 // Platform-neutral and unit-tested, like everything else that decides
 // what the exported file looks like.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 interface
 

@@ -15,7 +15,7 @@ unit Knips.Export.MovieReader;
 // would be legal; failures are still reported as strings because the
 // caller has to turn them into an exit code.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 interface
 

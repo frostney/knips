@@ -6,7 +6,7 @@ program Knips.Export.Gif.Test;
 // That is the only way to prove the LZW code-width dance and the
 // changed-rectangle frames without a real GIF viewer in the loop.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 uses
   Classes,

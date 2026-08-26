@@ -28,7 +28,7 @@ unit Knips.Export.Gif;
 // Reserving the transparent index costs one palette slot, so the encoder
 // works with at most GifMaxColors - 1 real colours.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 interface
 

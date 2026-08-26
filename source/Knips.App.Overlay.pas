@@ -25,7 +25,7 @@ unit Knips.App.Overlay;
 // Everything in this unit runs on the main thread, inside NSApp's run
 // loop; the capture-queue rules do not apply here.
 
-{$I Shared.inc}
+{$I Knips.inc}
 {$IFDEF DARWIN}
 {$modeswitch objectivec2}
 {$ENDIF}

@@ -5,7 +5,7 @@ program Knips.Export.Timing.Test;
 // them must track the true elapsed time. Either alone is easy; the pair
 // is what the implementation is for.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 uses
   Math,

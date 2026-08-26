@@ -8,7 +8,7 @@ unit Knips.ObjC.TypeEncoding;
 // argument-frame bookkeeping; a wrong one corrupts message forwarding,
 // so the builder exists to keep them out of hand-typed literals.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 interface
 

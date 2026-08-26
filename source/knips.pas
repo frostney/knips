@@ -18,7 +18,7 @@ program knips;
 // written by AVAssetWriter, and the GIF encoder is pure Pascal; see
 // docs/architecture.md.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 uses
   {$IFDEF DARWIN}
@@ -440,12 +440,12 @@ const
   // Every action AppKit will dispatch on the target: the menu items, the
   // status-item button, the deferred one-shots, the playback window's
   // buttons, and the Record Window submenu's delegate callback.
-  TargetSelectors: array[0..15] of string = (
+  TargetSelectors: array[0..17] of string = (
     'recordRegion:', 'recordDisplay:', 'recordWindow:', 'recordLastRegion:',
     'toggleSystemAudio:', 'stopRecording:', 'cancelSelection:',
     'revealRecordings:', 'quitKnips:', 'timerFired:', 'startPending:',
     'stopPending:', 'menuNeedsUpdate:', 'exportGif:', 'revealRecording:',
-    'closePlayback:');
+    'closePlayback:', 'toggleCamera:', 'restoreCamera:');
 var
   Instance: id;
   I: Integer;

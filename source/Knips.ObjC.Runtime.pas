@@ -13,7 +13,7 @@ unit Knips.ObjC.Runtime;
 // verified against the 3.2.2 sources; nothing is hand-declared here except
 // the fixed-signature objc_msgSend aliases.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 interface
 

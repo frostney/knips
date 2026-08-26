@@ -6,7 +6,7 @@ unit Knips.Capture.ShareableContent;
 // synchronous object. Creating one triggers the Screen Recording
 // permission prompt on first use.
 
-{$I Shared.inc}
+{$I Knips.inc}
 {$IFDEF DARWIN}
 {$modeswitch objectivec2}
 {$modeswitch cblocks}

@@ -1,6 +1,6 @@
 program Knips.ObjC.TypeEncoding.Test;
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 uses
   SysUtils,

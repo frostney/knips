@@ -22,7 +22,7 @@ unit Knips.ThreadManager;
 // before Classes and SysUtils — so every RTL critical section in unit
 // initialization is created through it.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 interface
 

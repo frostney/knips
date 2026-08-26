@@ -19,7 +19,7 @@ unit Knips.Capture.Stream;
 // There is no cthreads in this program, so nothing on that path may raise,
 // use try..finally, or WriteLn (the prototype's rules, carried over).
 
-{$I Shared.inc}
+{$I Knips.inc}
 {$IFDEF DARWIN}
 {$modeswitch objectivec2}
 {$modeswitch cblocks}

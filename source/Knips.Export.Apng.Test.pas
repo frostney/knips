@@ -7,7 +7,7 @@ program Knips.Export.Apng.Test;
 // exact — unlike the GIF path there is no palette to hide behind, so a
 // single wrong filter byte shows up as a wrong pixel.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 uses
   Classes,

@@ -32,7 +32,7 @@ unit Knips.Export.Apng;
 // Nothing here knows about macOS: `lwpt test` decodes the encoder's own
 // output on any host.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 interface
 

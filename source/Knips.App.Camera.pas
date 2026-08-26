@@ -61,7 +61,7 @@ unit Knips.App.Camera;
 // foreign-thread code and follows the capture-queue rules: it writes two
 // plain Booleans and nothing else.
 
-{$I Shared.inc}
+{$I Knips.inc}
 {$IFDEF DARWIN}
 {$modeswitch objectivec2}
 {$modeswitch cblocks}

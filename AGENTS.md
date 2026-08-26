@@ -3,7 +3,7 @@
 ## Hard Constraints
 
 - **FreePascal only.** FPC 3.2.2, Delphi mode, flags centralised in
-  `source/Shared.inc` (`{$I Shared.inc}` per unit). No second compiled
+  `source/Knips.inc` (`{$I Knips.inc}` per unit). No second compiled
   language, no Swift/ObjC shims. Per-unit modeswitches (`objectivec2`,
   `cblocks`, `cvar`) are the sanctioned addition for Darwin units — see
   [docs/code-style.md](docs/code-style.md).

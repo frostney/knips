@@ -30,7 +30,7 @@ unit Knips.App.Playback;
 // Everything runs on the main thread; the capture-queue rules do not
 // apply here.
 
-{$I Shared.inc}
+{$I Knips.inc}
 {$IFDEF DARWIN}
 {$modeswitch objectivec2}
 {$ENDIF}
@@ -447,6 +447,22 @@ begin
     FCloseButton.setEnabled(AEnabled);
 end;
 
+// Dequeues and dispatches whatever events are already waiting, without
+// ever blocking. Dispatching (not dropping) keeps window moves and the
+// titlebar close button honest; commands are inert behind the Busy
+// lockout.
+procedure DrainPendingEvents;
+var
+  Event: NSEvent;
+begin
+  repeat
+    Event := NSApp.nextEventMatchingMask_untilDate_inMode_dequeue(
+      NSAnyEventMask, nil, NSDefaultRunLoopMode, True);
+    if Event <> nil then
+      NSApp.sendEvent(Event);
+  until Event = nil;
+end;
+
 procedure TPlaybackWindow.HandleProgress(AStage: TGifExportStage;
   AFramesDone, AFramesTotal: Int64);
 var
@@ -454,6 +470,15 @@ var
 begin
   if FWindow = nil then
     Exit;
+  // Service the event queue on EVERY frame, not just whole percents: the
+  // window server shows the beachball when the app stops DEQUEUEING
+  // events for a few seconds, and on a long export one percent can take
+  // longer than that. untilDate nil never waits — this drains what is
+  // pending and returns. The Busy lockout keeps anything it dispatches
+  // from acting; the zero-timeout slice below is what lets the
+  // CoreAnimation commit draw the new title.
+  DrainPendingEvents;
+  CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, True);
   Percent := ExportPercent(AStage = gesPalette, AFramesDone, AFramesTotal);
   // Only whole percents reach AppKit; a per-frame setTitle: on a long
   // recording is thousands of layout passes for the same string.

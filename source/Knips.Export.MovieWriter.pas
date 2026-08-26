@@ -33,7 +33,7 @@ unit Knips.Export.MovieWriter;
 // Counters shared with the main thread — and the appends with each
 // other — sit under a pthread mutex (no cthreads in this program).
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 interface
 

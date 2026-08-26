@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-- Delphi mode via `source/Shared.inc`; style enforced by `lwpt format`.
+- Delphi mode via `source/Knips.inc`; style enforced by `lwpt format`.
 - Namespaced units (`Knips.<Layer>.<Name>.pas`), flat under `source/`;
   tests co-located as `*.Test.pas`.
 - Darwin units add `{$modeswitch objectivec2}` / `cblocks` / `cvar`
@@ -24,7 +24,7 @@ Pascal identifier is free.
 
 ## Compiler mode and modeswitches
 
-- Default: `{$mode delphi}{$H+}` from `source/Shared.inc`.
+- Default: `{$mode delphi}{$H+}` from `source/Knips.inc`.
 - Darwin units (`Knips.Capture.*`, `Knips.Export.*`,
   `Knips.Recording`, `Knips.ObjC.Runtime`) enable `objectivec2` (to
   call `objcclass external` bindings), `cblocks` (to pass a global

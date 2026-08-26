@@ -1,6 +1,6 @@
 program Knips.Export.Bitmap.Test;
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 uses
   SysUtils,

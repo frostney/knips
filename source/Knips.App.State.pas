@@ -8,7 +8,7 @@ unit Knips.App.State;
 // Knips.App.Overlay hold the Cocoa objects and call into this unit for
 // every decision that does not need a framework.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 interface
 

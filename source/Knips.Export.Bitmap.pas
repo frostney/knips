@@ -9,7 +9,7 @@ unit Knips.Export.Bitmap;
 // aliases text badly, so a large reduction is done in two steps: an
 // integer box average first, then bilinear for the remainder.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 interface
 

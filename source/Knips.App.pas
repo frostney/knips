@@ -28,7 +28,7 @@ unit Knips.App;
 // "Last error: …" menu item, and the app returns to idle without
 // retrying — a denied Screen Recording grant must not become a loop.
 
-{$I Shared.inc}
+{$I Knips.inc}
 {$IFDEF DARWIN}
 {$modeswitch objectivec2}
 {$ENDIF}

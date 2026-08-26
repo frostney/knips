@@ -26,7 +26,7 @@ unit Knips.Export.Pipeline;
 // come through here at all: it decodes nothing. See
 // Knips.Export.MovieTrim.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 interface
 

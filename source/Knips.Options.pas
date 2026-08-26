@@ -6,7 +6,7 @@ unit Knips.Options;
 // platform-neutral and unit-tested; the macOS layer only consumes the
 // validated records.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 interface
 

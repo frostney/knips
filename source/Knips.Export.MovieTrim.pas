@@ -18,7 +18,7 @@ unit Knips.Export.MovieTrim;
 // is no path from a GIF and none to one. Knips.Options refuses the rest
 // before this unit is reached.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 interface
 

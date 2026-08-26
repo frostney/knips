@@ -9,7 +9,7 @@ unit Knips.Recording;
 // are mutex-guarded). Stop arrives through a signal-safe flag set by the
 // program's SIGINT/SIGTERM handler.
 
-{$I Shared.inc}
+{$I Knips.inc}
 
 interface
 

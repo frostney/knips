@@ -92,4 +92,12 @@ PLIST
 
 printf 'APPL????' > "$CONTENTS/PkgInfo"
 
+# Ad-hoc sign the finished bundle. An UNSIGNED bundle gets a limbo TCC
+# identity: requestAccessForMediaType for the camera is silently dropped
+# — no prompt, no error, status stays NotDetermined (measured on device;
+# Screen Recording, oddly, still prompts). The ad-hoc signature gives
+# tccd a resolvable identity. Each build's signature differs, so grants
+# still re-prompt per rebuild until a real Developer ID signs releases.
+codesign --force --deep -s - "$APP"
+
 echo "$APP"
