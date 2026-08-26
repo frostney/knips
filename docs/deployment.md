@@ -5,8 +5,8 @@
 - Release build: `lwpt build --mode release` → `build/opname`, a single
   arm64 binary linking only system frameworks.
 - `tools/make-app.sh` wraps that binary in `build/Opname.app`, an
-  `LSUIElement` bundle whose executable is a two-line launcher running
-  `opname app`.
+  `LSUIElement` bundle whose executable is the binary itself; the binary
+  detects the bundle launch from its own path and runs app mode.
 - Distribution needs code signing with the Screen Recording entitlement
   story in mind: TCC grants are per-binary identity, so ad-hoc-signed
   builds re-prompt on every rebuild.
@@ -35,18 +35,19 @@ open build/Opname.app
 ```text
 build/Opname.app/Contents/
   Info.plist        CFBundleIdentifier org.opname.app, CFBundleName Opname,
-                    CFBundleExecutable Opname, LSUIElement true,
+                    CFBundleExecutable opname-bin, LSUIElement true,
                     LSMinimumSystemVersion 13.0, version from Opname.Options
   PkgInfo           APPL????
-  MacOS/Opname      #!/bin/sh — exec "$(dirname "$0")/opname-bin" app
   MacOS/opname-bin  the built binary, CLI intact
 ```
 
-The launcher exists so the binary keeps its command-line surface: run
-directly it still prints help, and `opname record …` still works from the
-bundle. The two files must not differ only in case — the default macOS
-volume is case-insensitive, which is why the binary is `opname-bin` and
-not `opname`.
+`CFBundleExecutable` is the binary itself, not a launcher script: a
+script that execs the binary breaks the LaunchServices handshake AppKit
+needs before the menu bar will adopt a status item (seen on device — the
+item's window stayed height 0 and invisible). Launched from a bundle
+with no arguments, the binary infers app mode from its own path
+(`.app/Contents/MacOS/`); run from a shell it keeps the full CLI, and
+`Contents/MacOS/opname-bin record …` works from inside the bundle too.
 
 The script takes an optional path to a binary other than `build/opname`,
 and rewrites the bundle from scratch each time. `build/` is git-ignored,

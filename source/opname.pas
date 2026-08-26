@@ -604,6 +604,19 @@ begin
   Result := (First = '--help') or (First = '-h') or (First = 'help');
 end;
 
+// True when this process was started as an app bundle (Opname.app). The
+// bundle's CFBundleExecutable is the binary itself: a launcher script
+// that execs it breaks the LaunchServices handshake AppKit needs before
+// the menu bar will adopt a status item (seen on device — the item's
+// window stayed height 0 and invisible when exec'd from a script, and
+// the same binary worked when the bundle pointed at it directly). So the
+// bundle passes no arguments and the binary infers app mode from its
+// own path.
+function LaunchedFromBundle: Boolean;
+begin
+  Result := Pos('.app/Contents/MacOS/', ParamStr(0)) > 0;
+end;
+
 var
   Registry: TSubcommandRegistry;
   NoOptions: TOptionArray;
@@ -668,7 +681,13 @@ begin
       'Verify the runtime-built ObjC class and framework linking (macOS only)',
       '', @HandleUnsupported, NoOptions));
     {$ENDIF}
-    if WantsTopLevelHelp then
+    if (ParamCount = 0) and LaunchedFromBundle then
+      {$IFDEF DARWIN}
+      ExitCode := HandleApp(nil, NoOptions)
+      {$ELSE}
+      ExitCode := ExitUnsupported
+      {$ENDIF}
+    else if WantsTopLevelHelp then
     begin
       PrintTopLevelHelp(Registry);
       ExitCode := ExitOk;

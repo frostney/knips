@@ -6,12 +6,14 @@
 # stable identity for anything that keys off one. It does NOT decide the
 # Screen Recording grant — TCC keys that on the code signature of the
 # process that actually asks, which here is Contents/MacOS/opname-bin, not
-# the bundle. See docs/deployment.md. The binary keeps its CLI:
-# CFBundleExecutable points at a two-line launcher
-# that execs the real binary with the `app` subcommand, so `opname` with no
-# arguments still prints help. The two live side by side under
-# Contents/MacOS and must not differ only in case — the default macOS
-# volume is case-insensitive, and `Opname` would overwrite `opname`.
+# the bundle. See docs/deployment.md.
+#
+# CFBundleExecutable is the binary itself, NOT a launcher script: a
+# script that execs the binary breaks the LaunchServices handshake
+# AppKit needs before the menu bar will adopt a status item (seen on
+# device — height-0, invisible item). The binary detects a bundle launch
+# from its own path and runs app mode with no arguments; from a shell it
+# keeps the full CLI.
 #
 # Usage: tools/make-app.sh [path-to-opname-binary]
 # Run `lwpt build` (or `lwpt build --mode release`) first.
@@ -26,7 +28,6 @@ MACOS=$CONTENTS/MacOS
 
 BUNDLE_IDENTIFIER=org.opname.app
 BUNDLE_NAME=Opname
-LAUNCHER=Opname
 RECORDER=opname-bin
 
 if [ ! -x "$BINARY" ]; then
@@ -43,12 +44,6 @@ mkdir -p "$MACOS"
 cp "$BINARY" "$MACOS/$RECORDER"
 chmod +x "$MACOS/$RECORDER"
 
-cat > "$MACOS/$LAUNCHER" <<LAUNCH
-#!/bin/sh
-exec "\$(dirname "\$0")/$RECORDER" app
-LAUNCH
-chmod +x "$MACOS/$LAUNCHER"
-
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -58,7 +53,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleExecutable</key>
-  <string>$LAUNCHER</string>
+  <string>$RECORDER</string>
   <key>CFBundleIdentifier</key>
   <string>$BUNDLE_IDENTIFIER</string>
   <key>CFBundleInfoDictionaryVersion</key>
