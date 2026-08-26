@@ -72,6 +72,16 @@ implementation
 uses
   Knips.ObjC.TypeEncoding;
 
+type
+  // autosaveName is on NSStatusItem since 10.12; FPC 3.2.2's CocoaAll
+  // predates it. External category: a binding, not a class of ours
+  // (ADR-0002 allows exactly this). Setting the name makes AppKit apply
+  // the position saved under "NSStatusItem Preferred Position <name>".
+  KnipsStatusItemAutosave = objccategory external (NSStatusItem)
+    procedure SetAutosaveName(AName: NSString);
+      message 'setAutosaveName:';
+  end;
+
 const
   TargetClassName = 'KnipsAppTarget';
   TargetSuperclassName = 'NSObject';
@@ -113,6 +123,19 @@ const
     'window list unavailable — check Screen Recording permission';
   IdleToolTip = 'Knips — click for the menu';
   RecordingToolTip = 'Knips — click to stop recording';
+
+  // The status item's autosave name, and the AppKit-owned defaults key
+  // derived from it. AppKit stores the item's distance from the RIGHT
+  // edge of the menu bar under that key and honours it on creation; on a
+  // notched Mac with a full menu bar a brand-new item is otherwise
+  // placed around the centre — behind the notch, invisible, with no
+  // indicator (measured on device, repeatedly). Seeding the position
+  // once, only when the key is absent, makes the first launch land among
+  // the visible icons; after that the key belongs to AppKit and to the
+  // user's own Cmd-drags.
+  StatusItemAutosaveName = 'knips';
+  StatusItemPositionKey = 'NSStatusItem Preferred Position knips';
+  StatusItemSeedFromRight = 280.0;
 
   // NSUserDefaults keys. The system-audio checkbox and the last region
   // are the only two things the app remembers between launches.
@@ -936,6 +959,15 @@ begin
   FProcessID := NSProcessInfo.processInfo.processIdentifier;
   LoadPreferences;
 
+  // Seed the item's position once, before AppKit reads it: without a
+  // saved position a new item lands near the middle of a full menu bar,
+  // which on a notched display means behind the notch. Only when the
+  // key is absent — a position the user has dragged to is theirs.
+  if NSUserDefaults.standardUserDefaults.objectForKey(
+    NSSTR(StatusItemPositionKey)) = nil then
+    NSUserDefaults.standardUserDefaults.setDouble_forKey(
+      StatusItemSeedFromRight, NSSTR(StatusItemPositionKey));
+
   FStatusItem := NSStatusBar.systemStatusBar.statusItemWithLength(
     NSVariableStatusItemLength);
   if FStatusItem = nil then
@@ -945,6 +977,7 @@ begin
   end;
   // statusItemWithLength: hands back an autoreleased item.
   FStatusItem.retain;
+  FStatusItem.setAutosaveName(NSSTR(StatusItemAutosaveName));
 
   BuildMenu;
 
