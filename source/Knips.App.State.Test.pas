@@ -84,7 +84,8 @@ type
     procedure TestGifPathNeverOverwritesTheMovie;
     procedure TestGifPathOfNothingIsNothing;
     procedure TestWidthKeepsSmallRecordings;
-    procedure TestWidthCapsWideRecordings;
+    procedure TestWidthIsThePointSizeOfARetinaRecording;
+    procedure TestWidthDeclinesWhatTheExporterWouldReject;
     procedure TestPercentSpansBothPasses;
     procedure TestPercentSurvivesABadTotal;
     procedure TestProgressTitleClamps;
@@ -582,9 +583,12 @@ begin
   Test('a movie with no extension still exports to a .gif',
     TestGifPathNeverOverwritesTheMovie);
   Test('no recording means no GIF path', TestGifPathOfNothingIsNothing);
-  Test('a narrow recording keeps its own width',
+  Test('a one-pixel-per-point recording keeps its own width',
     TestWidthKeepsSmallRecordings);
-  Test('a wide recording is capped', TestWidthCapsWideRecordings);
+  Test('a Retina recording exports at its point size',
+    TestWidthIsThePointSizeOfARetinaRecording);
+  Test('a point size the exporter would refuse is not asked for',
+    TestWidthDeclinesWhatTheExporterWouldReject);
   Test('the percentage spans both passes', TestPercentSpansBothPasses);
   Test('the percentage survives an estimate that was too low',
     TestPercentSurvivesABadTotal);
@@ -615,16 +619,35 @@ end;
 
 procedure TExportTests.TestWidthKeepsSmallRecordings;
 begin
-  // GifWidthFromSource is the exporter's "keep the movie's own width".
-  Expect<Integer>(AppGifWidth(640)).ToBe(GifWidthFromSource);
-  Expect<Integer>(AppGifWidth(MaxAppGifWidth)).ToBe(GifWidthFromSource);
-  Expect<Integer>(AppGifWidth(0)).ToBe(GifWidthFromSource);
+  // GifWidthFromSource is the exporter's "keep the movie's own width",
+  // and at one pixel per point there is nothing to divide away.
+  Expect<Integer>(AppGifWidth(640, 1)).ToBe(GifWidthFromSource);
+  Expect<Integer>(AppGifWidth(2560, 1)).ToBe(GifWidthFromSource);
+  // An unknown width or scale has nowhere else to go either.
+  Expect<Integer>(AppGifWidth(0, 2)).ToBe(GifWidthFromSource);
+  Expect<Integer>(AppGifWidth(1800, 0)).ToBe(GifWidthFromSource);
 end;
 
-procedure TExportTests.TestWidthCapsWideRecordings;
+procedure TExportTests.TestWidthIsThePointSizeOfARetinaRecording;
 begin
-  Expect<Integer>(AppGifWidth(MaxAppGifWidth + 1)).ToBe(MaxAppGifWidth);
-  Expect<Integer>(AppGifWidth(2560)).ToBe(MaxAppGifWidth);
+  // The whole point: a 2x recording exports at half its pixel width, so
+  // the scaler runs one exact integer box reduction and stops. No cap —
+  // a 2560 pt recording asks for 2560, and the exporter's own advice
+  // line is where "that will be big" belongs.
+  Expect<Integer>(AppGifWidth(1800, 2)).ToBe(900);
+  Expect<Integer>(AppGifWidth(2560, 2)).ToBe(1280);
+  Expect<Integer>(AppGifWidth(5120, 2)).ToBe(2560);
+end;
+
+procedure TExportTests.TestWidthDeclinesWhatTheExporterWouldReject;
+begin
+  // Below MinGifWidth and above MaxGifWidth the export would fail
+  // validation; falling back to the movie's own width still produces a
+  // file, which is the better of the two failures.
+  Expect<Integer>(AppGifWidth(30, 2)).ToBe(GifWidthFromSource);
+  Expect<Integer>(AppGifWidth(MaxGifWidth * 2 + 2, 2))
+    .ToBe(GifWidthFromSource);
+  Expect<Integer>(AppGifWidth(MaxGifWidth * 2, 2)).ToBe(MaxGifWidth);
 end;
 
 procedure TExportTests.TestPercentSpansBothPasses;

@@ -65,8 +65,7 @@
 | Layer | Units | Notes |
 | --- | --- | --- |
 | CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `export`, `displays`, `windows`, `probe`; SIGINT/SIGTERM → `StopRequested` |
-| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Camera`, `Knips.App.State` | Status item + menu, selection overlay, the camera picture-in-picture window, and the neutral state machine (tested) |
-| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, and the neutral state machine (tested) |
+| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window, and the neutral state machine (tested) |
 | Recording | `Knips.Recording` | Target → filter + geometry → writer → stream; progress; report |
 | Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
 | Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.MovieTrim`, `Knips.Export.Pipeline` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; AVAssetExportSession passthrough trim; the shared GIF/APNG pipeline |
@@ -77,7 +76,7 @@
 
 Nothing above the capture layer knows about `objcclass`; nothing below
 the recording layer knows about the CLI. The one edge that crosses
-sideways is `Knips.App.Playback` → `Knips.Export.GifPipeline`: the
+sideways is `Knips.App.Playback` → `Knips.Export.Pipeline`: the
 playback window's *Export as GIF…* button runs the same session the
 `export` subcommand does, rather than a second implementation of it.
 
@@ -101,7 +100,7 @@ frames they pick or how long each is shown.
   decimate to --fps (integer grid over the stamps, not a cadence)
         │
         ▼
-  BgraResample to --width (integer box reduce, then bilinear)
+  BgraResample to --width (integer box reduce, then bicubic)
         │
         ├─ .gif  pass 1 ─▶ TGifQuantizer: exact-colour histogram over ≤32
         │                   sampled frames ─▶ median cut ─▶ one global palette
@@ -114,7 +113,47 @@ frames they pick or how long each is shown.
                               ─▶ acTL/fcTL/fdAT
 ```
 
-Four decisions carry most of the weight:
+Five decisions carry most of the weight:
+
+- **The scaler is a box pre-pass and a Catmull-Rom bicubic.** A screen
+  recording is text and hairlines, and the thing that made the GIFs look
+  blurry was the resampling, not the palette. `BgraResample` reduces in
+  two steps. First an *integer* box average, whenever both axes shrink
+  by 2x or more: for a reduction that large a box is the correct
+  antialiasing filter and nothing cheaper is. Whatever fractional ratio
+  is left over then goes through Catmull-Rom — four taps an axis, two of
+  them negative, separable into a horizontal pass and a vertical one —
+  and not through the two-tap bilinear it used to, which is a triangle
+  filter and on 8 px type is a blur. The negative lobes overshoot on a
+  hard edge and both passes clamp to [0, 255]; the clamped overshoot is
+  the crispness, and on dark-mode text it produces no visible halo.
+
+  The weights are fixed point, ten bits, and the rounding residue of
+  each destination pixel is handed to its heaviest tap so the four sum
+  to exactly one — which is what makes a flat area come back unchanged
+  and a 1:1 resize the identity. Measured against a `Double` kernel over
+  the same 1800×1000 → 800×444 frame, fixed point is 42 ms a frame
+  against 68, and unlike the floating-point version it is bit-identical
+  on every host, so the neutral suite can assert exact bytes.
+
+  When the box pass lands *on* the target size there is no second pass
+  at all — the export is one integer average and stops. That is not a
+  rare case: it is what the app's one-click GIF arranges deliberately,
+  by asking for the recording's point size (see
+  `Knips.App.State.AppGifWidth`). On a 2x display a 1800×1000 pixel
+  recording exports at 900×500, an exact halving. Measured on a real
+  6.1 s 1800×1000 region recording, PSNR against the source frame after
+  putting each result back at capture size:
+
+  | app default | canvas | GIF | PSNR |
+  | --- | --- | --- | --- |
+  | old: 800 px cap, box + bilinear | 800×444 | 374 kB | 24.58 dB |
+  | 800 px cap, box + bicubic | 800×444 | — | 25.48 dB |
+  | new: point size, exact box 2:1 | 900×500 | 418 kB | 27.63 dB |
+
+  The wider canvas costs 12% more bytes for 27% more pixels: an exact
+  box reduce leaves longer runs of identical colour than a fractional
+  resample does, and LZW is paid in runs.
 
 - **One global palette, two passes.** An `AVAssetReader` cannot seek
   backwards, so the palette pass and the encoding pass are two readers

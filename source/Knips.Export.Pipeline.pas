@@ -151,7 +151,7 @@ type
     FReader: TMovieReader;
     FScaled: TBgraImage;
     FPending: TBgraImage;
-    FScratch: TBgraImage;
+    FScratch: TResampleScratch;
     FStartSeconds: Double;
     FRangeSeconds: Double;
     // The decimation grid, in whole slots of 1/fps counted from the

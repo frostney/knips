@@ -35,10 +35,10 @@ const
   GifFileExtension = '.gif';
   // What the "Export as GIF…" button asks for. The CLI's own default
   // (the movie's own width) is the right answer for a hand-written
-  // command and the wrong one for a one-click button: a Retina display
-  // recording is 2560 px wide and makes a GIF nobody can send anywhere.
+  // command and the wrong one for a one-click button: a Retina region
+  // is captured at two pixels per point, and a GIF at that width is
+  // both enormous and, at 256 colours, no sharper for it.
   AppGifFramesPerSecond = 20;
-  MaxAppGifWidth = 800;
   // How much of the export's progress the palette pass is worth. It
   // reads every frame but only resamples every Nth, so it is the cheaper
   // of the two passes over the movie.
@@ -178,10 +178,19 @@ function IsCameraOriginUsable(const AOrigin: TCameraOrigin; AVisibleX,
 // The GIF a recording exports to: same directory, same stem, .gif.
 function GifPathForRecording(const ARecordingPath: string): string;
 
-// The width a one-click GIF export asks for: the recording's own, capped
-// at MaxAppGifWidth. 0 in means 0 out — the exporter's "keep the source
-// width" sentinel.
-function AppGifWidth(ASourcePixelWidth: Integer): Integer;
+// The width a one-click GIF export asks for: the recording's own *point*
+// size, which is its pixel width divided by the scale it was captured
+// at. On the 2x display that is nearly every Mac, that makes the export
+// an exact 2:1 integer box reduction — the resampling that keeps text
+// legible — where any other width lands on a fractional ratio and
+// softens it. There is no upper cap: a wide recording makes a wide GIF,
+// and `export` already says so on stderr rather than deciding for you.
+//
+// GifWidthFromSource (0) is the "keep the movie's own width" sentinel,
+// and is the answer whenever points and pixels are the same thing, the
+// scale is unknown, or the point size falls outside what the exporter
+// will accept.
+function AppGifWidth(ASourcePixelWidth, ASourceScale: Integer): Integer;
 
 // "Application — Title" for the Record Window submenu, elided. A window
 // with no title reads as its application alone.
@@ -407,14 +416,19 @@ begin
     Result := ARecordingPath + GifFileExtension;
 end;
 
-function AppGifWidth(ASourcePixelWidth: Integer): Integer;
+function AppGifWidth(ASourcePixelWidth, ASourceScale: Integer): Integer;
+var
+  Points: Integer;
 begin
-  if (ASourcePixelWidth > 0) and (ASourcePixelWidth > MaxAppGifWidth) then
-    Result := MaxAppGifWidth
-  else
-    // GifWidthFromSource: the exporter keeps the movie's own width, which
-    // is also what an unknown source width has to fall back to.
-    Result := GifWidthFromSource;
+  Result := GifWidthFromSource;
+  if (ASourcePixelWidth <= 0) or (ASourceScale <= 1) then
+    Exit;
+  Points := ASourcePixelWidth div ASourceScale;
+  // Outside the exporter's own bounds the request would be rejected
+  // outright, and a rejected export is worse than a wide one.
+  if (Points < MinGifWidth) or (Points > MaxGifWidth) then
+    Exit;
+  Result := Points;
 end;
 
 function WindowMenuItemTitle(const AApplicationName,

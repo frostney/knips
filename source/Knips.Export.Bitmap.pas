@@ -5,15 +5,27 @@ unit Knips.Export.Bitmap;
 // CVPixelBuffer and hands over its base address, and everything from
 // there on is arithmetic that a Linux test runner can check.
 //
-// Downscaling a screen recording by more than 2x with bilinear alone
-// aliases text badly, so a large reduction is done in two steps: an
-// integer box average first, then bilinear for the remainder.
+// Downscaling a screen recording by more than 2x with any two-tap
+// kernel aliases text badly, so a large reduction is done in two steps:
+// an integer box average first — correct antialiasing for a >=2x
+// reduction, and nothing else is — then a resample for the remainder.
+//
+// That remainder used to be bilinear, and bilinear is what made the
+// GIFs look soft: two taps per axis is a triangle filter, which on
+// screen text is a blur. The remainder is Catmull-Rom bicubic instead.
+// Four taps per axis, two of them negative, so an edge comes out of the
+// filter with its contrast intact rather than averaged away; the
+// negative lobes overshoot on a hard black-on-white edge and the
+// overshoot is clamped to [0, 255], which is exactly the sharpening
+// that makes small text readable. Bilinear stays exported: it is the
+// baseline the co-located suite measures the bicubic path against.
 
 {$I Knips.inc}
 
 interface
 
 uses
+  Math,
   SysUtils;
 
 const
@@ -34,6 +46,14 @@ type
     Pixels: TBytes;
   end;
 
+  // The buffers BgraResample reuses between frames, so a long export
+  // allocates once rather than per frame: Reduced takes the integer box
+  // pre-pass, Rows takes the bicubic's horizontal pass.
+  TResampleScratch = record
+    Reduced: TBgraImage;
+    Rows: TBgraImage;
+  end;
+
 // Allocates (or resizes) the image; contents are undefined afterwards.
 procedure BgraImageResize(var AImage: TBgraImage; AWidth, AHeight: Integer);
 
@@ -52,6 +72,18 @@ procedure BgraResizeBilinear(const ASource: PByte; ASourceBytesPerRow,
   ASourceWidth, ASourceHeight: Integer; const ADestination: PByte;
   ADestinationBytesPerRow, ADestinationWidth, ADestinationHeight: Integer);
 
+// Catmull-Rom bicubic resample between two BGRA buffers of any sizes,
+// separable: a horizontal pass into AScratch (destination width by
+// source height), then a vertical pass onto the target. Samples are
+// taken at pixel centres like the bilinear one, so a 1:1 resize is a
+// byte-for-byte copy. Both passes clamp to [0, 255]; the kernel's
+// negative lobes overshoot on hard edges by design, and the clamp is
+// where the overshoot is cut rather than wrapped.
+procedure BgraResizeBicubic(const ASource: PByte; ASourceBytesPerRow,
+  ASourceWidth, ASourceHeight: Integer; const ADestination: PByte;
+  ADestinationBytesPerRow, ADestinationWidth, ADestinationHeight: Integer;
+  var AScratch: TBgraImage);
+
 // Averages AFactorX x AFactorY source pixels into one destination pixel.
 // The destination must be ASourceWidth div AFactorX wide.
 procedure BgraBoxReduce(const ASource: PByte; ASourceBytesPerRow,
@@ -59,11 +91,13 @@ procedure BgraBoxReduce(const ASource: PByte; ASourceBytesPerRow,
   ADestinationBytesPerRow, AFactorX, AFactorY: Integer);
 
 // The resize the exporter actually calls: a box pre-pass for large
-// reductions, then bilinear onto the target. AScratch is reused between
-// frames so a long export allocates once.
+// reductions, then bicubic onto the target — skipped entirely when the
+// box pass already landed on the target size, which is what the app's
+// point-size GIF default arranges. AScratch is reused between frames so
+// a long export allocates once.
 procedure BgraResample(const ASource: PByte; ASourceBytesPerRow,
   ASourceWidth, ASourceHeight: Integer; var ADestination: TBgraImage;
-  var AScratch: TBgraImage);
+  var AScratch: TResampleScratch);
 
 // Height that keeps the source aspect ratio at ATargetWidth; never 0.
 function ScaledHeightForWidth(ASourceWidth, ASourceHeight,
@@ -75,12 +109,26 @@ const
   // Bilinear weights are 0..FractionOne in fixed point.
   FractionBits = 8;
   FractionOne = 1 shl FractionBits;
+  // Catmull-Rom weights are signed fixed point summing to WeightOne.
+  // Ten bits: the largest partial sum a tap can reach is 255 * 1024 *
+  // the kernel's L1 norm (5/4), nowhere near a 32-bit Integer, and
+  // every weight is an integer so two runs of the same resize agree
+  // bit for bit on any host — which a Double kernel would not.
+  WeightBits = 10;
+  WeightOne = 1 shl WeightBits;
+  CubicTaps = 4;
 
 type
   TSampleAxis = record
     Low: array of Integer;
     High: array of Integer;
     Fraction: array of Integer;
+  end;
+
+  // CubicTaps entries per destination index, laid out flat.
+  TCubicAxis = record
+    Tap: array of Integer;
+    Weight: array of Integer;
   end;
 
 procedure BgraImageResize(var AImage: TBgraImage; AWidth, AHeight: Integer);
@@ -214,6 +262,145 @@ begin
   end;
 end;
 
+// Same pixel-centre mapping as BuildSampleAxis, but over four taps at
+// Floor(Position) - 1 .. + 2, replicated at the edges. The weights are
+// rounded to fixed point and the rounding residue is handed to the
+// heaviest tap, so every destination pixel's weights sum to exactly
+// WeightOne: a flat area comes back unchanged and a 1:1 resize is the
+// identity, neither of which survives naive per-weight rounding.
+procedure BuildCubicAxis(ASourceLength, ADestinationLength: Integer;
+  out AAxis: TCubicAxis);
+var
+  I, K, Base, Tap, Sum, Heaviest, HeaviestWeight, Rounded: Integer;
+  Position, T: Double;
+  Weights: array[0..CubicTaps - 1] of Double;
+begin
+  SetLength(AAxis.Tap, ADestinationLength * CubicTaps);
+  SetLength(AAxis.Weight, ADestinationLength * CubicTaps);
+  for I := 0 to ADestinationLength - 1 do
+  begin
+    Position := (I + 0.5) * ASourceLength / ADestinationLength - 0.5;
+    Base := Floor(Position);
+    T := Position - Base;
+    // Catmull-Rom, the a = -1/2 member of the cubic family: it passes
+    // through its samples (so t = 0 is the identity) and its two
+    // negative lobes are what put the contrast back into an edge.
+    Weights[0] := ((-0.5 * T + 1.0) * T - 0.5) * T;
+    Weights[1] := (1.5 * T - 2.5) * T * T + 1.0;
+    Weights[2] := ((-1.5 * T + 2.0) * T + 0.5) * T;
+    Weights[3] := (0.5 * T - 0.5) * T * T;
+    Sum := 0;
+    Heaviest := 0;
+    HeaviestWeight := Low(Integer);
+    for K := 0 to CubicTaps - 1 do
+    begin
+      Tap := Base - 1 + K;
+      if Tap < 0 then
+        Tap := 0;
+      if Tap > ASourceLength - 1 then
+        Tap := ASourceLength - 1;
+      AAxis.Tap[I * CubicTaps + K] := Tap;
+      Rounded := Round(Weights[K] * WeightOne);
+      AAxis.Weight[I * CubicTaps + K] := Rounded;
+      Inc(Sum, Rounded);
+      if Rounded > HeaviestWeight then
+      begin
+        HeaviestWeight := Rounded;
+        Heaviest := K;
+      end;
+    end;
+    Inc(AAxis.Weight[I * CubicTaps + Heaviest], WeightOne - Sum);
+  end;
+end;
+
+// Fixed point back to a byte, rounded and clamped. The clamp is not
+// defensive: Catmull-Rom genuinely overshoots both ends on a hard edge,
+// and cutting the overshoot is the crispness. `shr` is only ever
+// reached on a non-negative value — on a signed Integer it is not an
+// arithmetic shift.
+function CubicToByte(AValue: Integer): Byte; inline;
+begin
+  if AValue <= 0 then
+    Exit(0);
+  AValue := (AValue + WeightOne div 2) shr WeightBits;
+  if AValue > 255 then
+    Result := 255
+  else
+    Result := Byte(AValue);
+end;
+
+procedure BgraResizeBicubic(const ASource: PByte; ASourceBytesPerRow,
+  ASourceWidth, ASourceHeight: Integer; const ADestination: PByte;
+  ADestinationBytesPerRow, ADestinationWidth, ADestinationHeight: Integer;
+  var AScratch: TBgraImage);
+var
+  Horizontal, Vertical: TCubicAxis;
+  X, Y, K, Channel, Base, Total: Integer;
+  Taps: array[0..CubicTaps - 1] of PByte;
+  Weights: array[0..CubicTaps - 1] of Integer;
+  Source, Target: PByte;
+begin
+  if (ASource = nil) or (ADestination = nil) or (ASourceWidth <= 0)
+    or (ASourceHeight <= 0) or (ADestinationWidth <= 0)
+    or (ADestinationHeight <= 0) then
+    Exit;
+  // The horizontal pass narrows first, so the vertical pass reads the
+  // smaller of the two intermediates on a downscale.
+  BgraImageResize(AScratch, ADestinationWidth, ASourceHeight);
+  if BgraImageIsEmpty(AScratch) then
+    Exit;
+  BuildCubicAxis(ASourceWidth, ADestinationWidth, Horizontal);
+  BuildCubicAxis(ASourceHeight, ADestinationHeight, Vertical);
+
+  for Y := 0 to ASourceHeight - 1 do
+  begin
+    Source := ASource + Y * ASourceBytesPerRow;
+    Target := @AScratch.Pixels[Y * AScratch.BytesPerRow];
+    for X := 0 to ADestinationWidth - 1 do
+    begin
+      Base := X * CubicTaps;
+      for K := 0 to CubicTaps - 1 do
+      begin
+        Taps[K] := Source + Horizontal.Tap[Base + K] * BgraBytesPerPixel;
+        Weights[K] := Horizontal.Weight[Base + K];
+      end;
+      for Channel := 0 to BgraBytesPerPixel - 1 do
+      begin
+        Total := 0;
+        for K := 0 to CubicTaps - 1 do
+          Inc(Total, (Taps[K] + Channel)^ * Weights[K]);
+        (Target + Channel)^ := CubicToByte(Total);
+      end;
+      Inc(Target, BgraBytesPerPixel);
+    end;
+  end;
+
+  for Y := 0 to ADestinationHeight - 1 do
+  begin
+    Base := Y * CubicTaps;
+    for K := 0 to CubicTaps - 1 do
+    begin
+      Taps[K] := @AScratch.Pixels[Vertical.Tap[Base + K]
+        * AScratch.BytesPerRow];
+      Weights[K] := Vertical.Weight[Base + K];
+    end;
+    Target := ADestination + Y * ADestinationBytesPerRow;
+    for X := 0 to ADestinationWidth - 1 do
+    begin
+      for Channel := 0 to BgraBytesPerPixel - 1 do
+      begin
+        Total := 0;
+        for K := 0 to CubicTaps - 1 do
+          Inc(Total, (Taps[K] + Channel)^ * Weights[K]);
+        (Target + Channel)^ := CubicToByte(Total);
+      end;
+      for K := 0 to CubicTaps - 1 do
+        Inc(Taps[K], BgraBytesPerPixel);
+      Inc(Target, BgraBytesPerPixel);
+    end;
+  end;
+end;
+
 procedure BgraBoxReduce(const ASource: PByte; ASourceBytesPerRow,
   ASourceWidth, ASourceHeight: Integer; const ADestination: PByte;
   ADestinationBytesPerRow, AFactorX, AFactorY: Integer);
@@ -257,7 +444,7 @@ end;
 
 procedure BgraResample(const ASource: PByte; ASourceBytesPerRow,
   ASourceWidth, ASourceHeight: Integer; var ADestination: TBgraImage;
-  var AScratch: TBgraImage);
+  var AScratch: TResampleScratch);
 var
   FactorX, FactorY: Integer;
 begin
@@ -275,19 +462,36 @@ begin
   FactorY := ASourceHeight div ADestination.Height;
   if (FactorX >= BoxReduceThreshold) and (FactorY >= BoxReduceThreshold) then
   begin
-    BgraImageResize(AScratch, ASourceWidth div FactorX,
+    BgraImageResize(AScratch.Reduced, ASourceWidth div FactorX,
       ASourceHeight div FactorY);
+    if BgraImageIsEmpty(AScratch.Reduced) then
+      Exit;
     BgraBoxReduce(ASource, ASourceBytesPerRow, ASourceWidth, ASourceHeight,
-      @AScratch.Pixels[0], AScratch.BytesPerRow, FactorX, FactorY);
-    BgraResizeBilinear(@AScratch.Pixels[0], AScratch.BytesPerRow,
-      AScratch.Width, AScratch.Height, @ADestination.Pixels[0],
-      ADestination.BytesPerRow, ADestination.Width, ADestination.Height);
+      @AScratch.Reduced.Pixels[0], AScratch.Reduced.BytesPerRow,
+      FactorX, FactorY);
+    // An integer reduction that lands on the target is already the
+    // answer, and it is the exact answer — a 2x Retina recording
+    // exported at its own point size is this case, and it is the whole
+    // reason the app asks for point size. Resampling it again would
+    // only put back the softness the box pass just avoided.
+    if (AScratch.Reduced.Width = ADestination.Width)
+      and (AScratch.Reduced.Height = ADestination.Height) then
+    begin
+      Move(AScratch.Reduced.Pixels[0], ADestination.Pixels[0],
+        Length(ADestination.Pixels));
+      Exit;
+    end;
+    BgraResizeBicubic(@AScratch.Reduced.Pixels[0],
+      AScratch.Reduced.BytesPerRow, AScratch.Reduced.Width,
+      AScratch.Reduced.Height, @ADestination.Pixels[0],
+      ADestination.BytesPerRow, ADestination.Width, ADestination.Height,
+      AScratch.Rows);
     Exit;
   end;
 
-  BgraResizeBilinear(ASource, ASourceBytesPerRow, ASourceWidth,
+  BgraResizeBicubic(ASource, ASourceBytesPerRow, ASourceWidth,
     ASourceHeight, @ADestination.Pixels[0], ADestination.BytesPerRow,
-    ADestination.Width, ADestination.Height);
+    ADestination.Width, ADestination.Height, AScratch.Rows);
 end;
 
 end.

@@ -6,11 +6,10 @@
 - `lwpt install` → `lwpt build` → `./build/knips probe` → `./build/knips
   record --out=demo.mp4`, Ctrl-C to stop.
 - `./build/knips app` is the menu-bar version: click the icon, drag a
-  rectangle, click again to stop. **Camera** adds a draggable floating
-  camera window that gets recorded along with everything else.
   rectangle, click again to stop. A red frame marks the region while it
-  records, and the finished clip opens in a playback window with a
-  one-click GIF export.
+  records, the finished clip opens in a playback window with a one-click
+  GIF export, and **Camera** adds a draggable floating camera window
+  that gets recorded along with everything else.
 - `./build/knips export --in=demo.mp4 --out=demo.gif` turns the
   recording into an animated GIF, optionally trimmed and scaled;
   `--out=demo.apng` writes truecolour APNG instead, and `--out=cut.mp4
@@ -94,7 +93,7 @@ window with AVKit's transport controls and three buttons:
 
 | Button | What it does |
 | --- | --- |
-| Export as GIF… | Writes `<recording>.gif` beside the movie at 20 fps, at the recording's own width or 800 px, whichever is smaller, and reveals it in Finder. |
+| Export as GIF… | Writes `<recording>.gif` beside the movie at 20 fps, at the recording's own **point** size (pixel width ÷ capture scale), and reveals it in Finder. On a 2x display that is an exact 2:1 reduction, which is what keeps small text readable; use `knips export --width=N` for anything narrower. |
 | Reveal in Finder | Shows the `.mp4`. |
 | Close | Closes the window and releases the player. |
 

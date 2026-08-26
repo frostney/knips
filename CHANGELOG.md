@@ -19,8 +19,13 @@ conventional commits by git-cliff (`cliff.toml`).
   reaches the file.
 - `app`: a finished recording opens in a playback window (AVKit) with
   *Export as GIF…*, *Reveal in Finder*, and *Close*. The export writes
-  `<recording>.gif` beside the movie at 20 fps and at most 800 px wide,
-  reporting progress in the window title.
+  `<recording>.gif` beside the movie at 20 fps and at the recording's
+  own point size — its pixel width divided by the scale it was captured
+  at — reporting progress in the window title. On the 2x display that is
+  nearly every Mac that makes the export an exact 2:1 integer reduction,
+  which is the sharpest a downscale gets; the previous 800 px cap landed
+  on a fractional ratio and visibly softened text. There is no cap: a
+  wide recording makes a wide GIF, and `export` says so on stderr.
 - `app`: *Record Window* submenu (on-screen application windows, refreshed
   at most once every five seconds and never listing Knips's own windows),
   *Record Last Region*, and a *Record System Audio* checkbox. The checkbox
@@ -44,6 +49,13 @@ conventional commits by git-cliff (`cliff.toml`).
 - `export` from `.mp4`/`.mov` to an animated GIF: median-cut palette,
   Floyd–Steinberg dithering and LZW in pure Pascal, with `--fps`,
   `--width`, and `--trim=start,end`.
+- `export`: the scaler's fractional step is Catmull-Rom bicubic rather
+  than bilinear, and an integer box reduction that already lands on the
+  target width now stops there instead of resampling its own output.
+  Two taps an axis is a triangle filter and blurs small text; four taps
+  with clamped negative lobes keeps the edge. Both GIF and APNG go
+  through it. Measured on a real 1800×1000 region recording at 800×444,
+  +2.9 dB against a Lanczos reference and 19% more edge contrast.
 - `export --out=x.apng`: animated PNG in pure Pascal — 8-bit truecolour
   (no quantisation), changed-rectangle subframes with
   `dispose_op=NONE`/`blend_op=SOURCE`, PNG line filters, and the RTL's

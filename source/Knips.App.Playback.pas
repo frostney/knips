@@ -76,6 +76,7 @@ type
     FPath: string;
     FPixelWidth: Integer;
     FPixelHeight: Integer;
+    FScale: Integer;
     FExporting: Boolean;
     FLastPercent: Integer;
     FOnError: TPlaybackErrorEvent;
@@ -89,10 +90,13 @@ type
     destructor Destroy; override;
     // Opens the window on APath. APixelWidth/Height come from the
     // recording's report and only set the initial aspect ratio; a zero
-    // pair falls back to 16:9. False when the window could not be made.
-    // Raises EObjCRuntime when the delegate class cannot be registered.
+    // pair falls back to 16:9. AScale is the report's pixels per point,
+    // and is what the GIF export's default width is derived from — it
+    // is not used for the window's geometry at all. False when the
+    // window could not be made. Raises EObjCRuntime when the delegate
+    // class cannot be registered.
     function Show(ATarget: id; const APath: string;
-      APixelWidth, APixelHeight: Integer): Boolean;
+      APixelWidth, APixelHeight, AScale: Integer): Boolean;
     // Asks AppKit to close, which arrives back as windowWillClose:.
     procedure CommandClose;
     procedure CommandReveal;
@@ -278,7 +282,7 @@ begin
 end;
 
 function TPlaybackWindow.Show(ATarget: id; const APath: string;
-  APixelWidth, APixelHeight: Integer): Boolean;
+  APixelWidth, APixelHeight, AScale: Integer): Boolean;
 var
   ContentHeight, VideoHeight, Right: Double;
   ContentRect: NSRect;
@@ -297,6 +301,7 @@ begin
   FPath := APath;
   FPixelWidth := APixelWidth;
   FPixelHeight := APixelHeight;
+  FScale := AScale;
   FExporting := False;
   FLastPercent := -1;
 
@@ -515,7 +520,7 @@ begin
   Options.InputPath := FPath;
   Options.OutputPath := GifPathForRecording(FPath);
   Options.FramesPerSecond := AppGifFramesPerSecond;
-  Options.Width := AppGifWidth(FPixelWidth);
+  Options.Width := AppGifWidth(FPixelWidth, FScale);
   if not ValidateExportOptions(Options, Error) then
   begin
     ReportError(Error);

@@ -240,7 +240,7 @@ type
     function ShowBorderForPending: Cardinal;
     procedure HideBorder;
     procedure ShowPlayback(const APath: string; APixelWidth,
-      APixelHeight: Integer);
+      APixelHeight, AScale: Integer);
     procedure HandlePlaybackError(const AMessage: string);
     function Transition(ACommand: TAppCommand): Boolean;
     function ResolveDisplayIndex(ADisplayID: UInt32; out AIndex: Integer;
@@ -1086,7 +1086,7 @@ begin
 end;
 
 procedure TAppController.ShowPlayback(const APath: string; APixelWidth,
-  APixelHeight: Integer);
+  APixelHeight, AScale: Integer);
 begin
   if FPlayback = nil then
   begin
@@ -1096,7 +1096,8 @@ begin
   // One window per recording: Show closes whatever was open first, so a
   // second clip replaces the first rather than stacking players that all
   // hold their files open.
-  if not FPlayback.Show(FTarget, APath, APixelWidth, APixelHeight) then
+  if not FPlayback.Show(FTarget, APath, APixelWidth, APixelHeight,
+    AScale) then
     // Falling back to the old behaviour is better than a finished
     // recording that never says so.
     Reveal(APath);
@@ -1575,7 +1576,7 @@ procedure TAppController.FinishRecording(AShowPlayback: Boolean);
 var
   Error, Path: string;
   Finished: Boolean;
-  PixelWidth, PixelHeight: Integer;
+  PixelWidth, PixelHeight, Scale: Integer;
 begin
   if FSession = nil then
     Exit;
@@ -1585,6 +1586,9 @@ begin
   Path := FSession.Report.OutputPath;
   PixelWidth := FSession.Report.PixelWidth;
   PixelHeight := FSession.Report.PixelHeight;
+  // Pixels per point, and so the divisor the one-click GIF export sizes
+  // itself by: at 2x it turns the export into an exact halving.
+  Scale := FSession.Report.Scale;
   Finished := FSession.FinishCapture(Error);
   if not Finished then
     RecordError(Error);
@@ -1597,7 +1601,7 @@ begin
   // Finder window) flashing up on the last turn before terminate: is
   // noise, not information.
   if AShowPlayback and Finished and (Path <> '') then
-    ShowPlayback(Path, PixelWidth, PixelHeight);
+    ShowPlayback(Path, PixelWidth, PixelHeight, Scale);
 end;
 
 procedure TAppController.CommandRevealRecordings;
