@@ -5,6 +5,8 @@
 - Prereqs: macOS on Apple silicon, FPC 3.2.2, lwpt ≥ 0.7.0 on PATH.
 - `lwpt install` → `lwpt build` → `./build/opname probe` → `./build/opname
   record --out=demo.mp4`, Ctrl-C to stop.
+- `./build/opname app` is the menu-bar version: click the icon, drag a
+  rectangle, click again to stop.
 - Grant Screen Recording on first run; a rebuilt binary re-prompts.
 - `lwpt test` runs the neutral suites on any OS, including Linux CI.
 
@@ -39,9 +41,40 @@ before touching code.
 Press Ctrl-C once. The last line reports size, duration, and frame
 counts; open the file in QuickTime Player.
 
+## The menu bar app
+
+```sh
+./build/opname app          # runs until you quit from the menu
+tools/make-app.sh           # or wrap it: build/Opname.app, double-clickable
+```
+
+A `◉` appears in the menu bar. Clicking it opens:
+
+| Item | What it does |
+| --- | --- |
+| Record Region… | Dims every screen, crosshair; drag a rectangle, release to start. **Esc** cancels. |
+| Record Display | Records the main display straight away. |
+| Stop Recording | Enabled only while recording. |
+| Cancel selection | Enabled only while selecting. The overlay covers the menu bar, so this only matters if the overlay failed to open. |
+| Recordings folder | Opens `~/Movies/opname/` in Finder. |
+| Last error: … | Only visible after a failure; the full text is in Console.app. |
+| Quit opname | Stops a running recording first. |
+
+While recording the title reads `⏺ 0:07` and ticks once a second, and the
+menu is detached so **one click on the icon stops** — Kap's gesture. The
+price of that gesture is that Quit is unreachable until you stop; one
+click does it. The finished file lands in
+`~/Movies/opname/opname-YYYYMMDD-HHMMSS.mp4` and is revealed in Finder.
+
+If Screen Recording has not been granted, the recording fails
+immediately, the icon goes back to `◉`, and the reason shows up as
+`Last error: …`. opname does not retry — grant the permission in System
+Settings › Privacy & Security › Screen Recording and click again.
+
 ## Flags
 
 ```text
+opname app                       menu-bar app; no options
 opname record --out=<file>       .mp4 or .mov (required; replaced if present)
               [--display=N]      index from `opname displays` (default: main)
               [--window=ID]      one window, id from `opname windows`

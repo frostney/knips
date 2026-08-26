@@ -17,12 +17,16 @@ lwpt install && lwpt build    # produces build/opname
 ## Usage
 
 ```sh
+./build/opname app                                     # menu bar: drag a region, click to stop
 ./build/opname probe                                   # verify the toolchain path once
 ./build/opname displays                                # what can be recorded
 ./build/opname record --out=demo.mp4                   # main display, 30 fps, Ctrl-C to stop
 ./build/opname record --out=demo.mp4 --rect=100,80,1280,720 --fps=60
 ./build/opname record --out=app.mov --window=<id>      # id from `opname windows`
 ```
+
+`tools/make-app.sh` wraps the built binary in a menu-bar-only
+`build/Opname.app` ([docs/deployment.md](docs/deployment.md)).
 
 macOS prompts once for **Screen Recording**. Flags, exit codes, and the
 verification loop are in [docs/quick-start.md](docs/quick-start.md).

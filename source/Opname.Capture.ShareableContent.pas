@@ -58,6 +58,10 @@ type
     function DisplayAt(AIndex: Integer): TDisplayInfo;
     // -1 selects the main display. The result is retained; release it.
     function RetainDisplay(AIndex: Integer): SCDisplay;
+    // The enumeration index of a CGDirectDisplayID, or -1 when the
+    // display is not shareable. The menu-bar app uses it to turn the
+    // NSScreen the user dragged on into a --display index.
+    function IndexOfDisplayID(ADisplayID: UInt32): Integer;
     function WindowCount: Integer;
     function WindowAt(AIndex: Integer): TWindowInfo;
     // nil when no window has that id. The result is retained; release it.
@@ -69,6 +73,10 @@ type
 function DisplayBackingScale(ADisplayID: UInt32): Integer;
 
 function NSStringToPascal(const AString: NSString): string;
+
+// The other direction, for titles the app hands to AppKit. The result is
+// autoreleased, as every +stringWith… is.
+function PascalToNSString(const AValue: string): NSString;
 
 {$ENDIF}
 
@@ -103,6 +111,11 @@ begin
     Result := ''
   else
     Result := string(AString.UTF8String);
+end;
+
+function PascalToNSString(const AValue: string): NSString;
+begin
+  Result := NSString.stringWithUTF8String(PAnsiChar(AValue));
 end;
 
 function DisplayBackingScale(ADisplayID: UInt32): Integer;
@@ -219,6 +232,16 @@ begin
     Result := DisplayObject(AIndex);
   if Result <> nil then
     Result.retain;
+end;
+
+function TShareableContent.IndexOfDisplayID(ADisplayID: UInt32): Integer;
+var
+  I: Integer;
+begin
+  Result := -1;
+  for I := 0 to DisplayCount - 1 do
+    if DisplayObject(I).displayID = ADisplayID then
+      Exit(I);
 end;
 
 function TShareableContent.WindowCount: Integer;

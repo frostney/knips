@@ -2,6 +2,7 @@ program opname;
 
 // opname — a native macOS screen recorder in FreePascal.
 //
+//   opname app                   menu-bar app: drag a region, click to stop
 //   opname record --out=demo.mp4 [--display=N | --window=ID] [--rect=x,y,w,h]
 //                 [--fps=30] [--scale=auto|1|2] [--no-cursor] [--bitrate=N]
 //   opname displays              list capturable displays
@@ -27,6 +28,8 @@ uses
   CLI.Options,
   CLI.Subcommands,
   {$IFDEF DARWIN}
+  Opname.App,
+  Opname.App.Overlay,
   Opname.Capture.ShareableContent,
   Opname.Capture.Stream,
   Opname.Export.MovieWriter,
@@ -182,6 +185,21 @@ begin
   end;
 end;
 
+// The menu-bar app. Nothing is captured until the user asks; the process
+// simply installs a status item and hands itself to NSApp's run loop.
+function HandleApp(const APositionals: TStringList;
+  const AOptions: TOptionArray): Integer;
+var
+  Error: string;
+begin
+  if not RunMenuBarApp(Error) then
+  begin
+    WriteLn(ProgramName, ' app: ', Error);
+    Exit(ExitFailure);
+  end;
+  Result := ExitOk;
+end;
+
 function HandleDisplays(const APositionals: TStringList;
   const AOptions: TOptionArray): Integer;
 var
@@ -255,6 +273,50 @@ begin
   Result := ExitOk;
 end;
 
+// Checks that each app runtime class carries the methods AppKit will
+// dispatch on it. False (with a printed reason) fails the probe.
+function CheckAppRuntimeClasses: Boolean;
+
+  function HasMethod(const AClassName, ASelector: string): Boolean;
+  begin
+    Result := ClassImplementsSelector(LookUpClass(AClassName), ASelector);
+    if not Result then
+      WriteLn(AClassName, ': no implementation for ', ASelector);
+  end;
+
+var
+  Instance: id;
+  Selector: string;
+begin
+  Result := False;
+  if not HasMethod(OverlayViewClassName, 'drawRect:') then
+    Exit;
+  if not HasMethod(OverlayViewClassName, 'mouseUp:') then
+    Exit;
+  if not HasMethod(OverlayWindowClassName, 'canBecomeKeyWindow') then
+    Exit;
+  Selector := 'stopRecording:';
+  Instance := InstantiateClass(LookUpClass(AppTargetClassName));
+  if Instance = nil then
+  begin
+    WriteLn(AppTargetClassName, ': instantiation failed');
+    Exit;
+  end;
+  try
+    if not RespondsToSelector(Instance, Selector) then
+    begin
+      WriteLn(AppTargetClassName, ': does not respond to ', Selector);
+      Exit;
+    end;
+  finally
+    ReleaseInstance(Instance);
+  end;
+  WriteLn('runtime classes ', AppTargetClassName, ', ',
+    OverlayViewClassName, ', ', OverlayWindowClassName,
+    ': registered and answering');
+  Result := True;
+end;
+
 // The spike check (ADR-0002): register the runtime-built stream output
 // class, instantiate it, confirm it answers the SCStreamOutput selector,
 // and touch ScreenCaptureKit + AVFoundation so linking is exercised. If
@@ -293,6 +355,24 @@ begin
     on E: Exception do
     begin
       WriteLn('runtime class: ', E.Message);
+      Exit;
+    end;
+  end;
+
+  // The menu bar and the overlay ride on the same primitive, so the gate
+  // has to cover them too: register, then check that the overrides AppKit
+  // dispatches on are really installed, and that a target instance
+  // answers an action selector. A registration that silently dropped a
+  // method would otherwise only show up as a dead menu or an undrawn
+  // overlay on someone's machine.
+  try
+    EnsureAppClasses;
+    if not CheckAppRuntimeClasses then
+      Exit;
+  except
+    on E: Exception do
+    begin
+      WriteLn('app runtime classes: ', E.Message);
       Exit;
     end;
   end;
@@ -428,6 +508,9 @@ begin
   Registry := TSubcommandRegistry.Create;
   try
     {$IFDEF DARWIN}
+    Registry.Add(TSubcommand.Create('app',
+      'Run the menu-bar app: drag a region, click the icon to stop', '',
+      @HandleApp, NoOptions));
     Registry.Add(TSubcommand.Create('record',
       'Record a display, region, or window to an .mp4/.mov file',
       '--out=<file> [--display=N|--window=ID] [--rect=x,y,w,h] [--fps=N]',
@@ -440,6 +523,9 @@ begin
       'Verify the runtime-built ObjC class and framework linking', '',
       @HandleProbe, NoOptions));
     {$ELSE}
+    Registry.Add(TSubcommand.Create('app',
+      'Run the menu-bar app (macOS only)', '', @HandleUnsupported,
+      NoOptions));
     Registry.Add(TSubcommand.Create('record',
       'Record a display, region, or window (macOS only)',
       '--out=<file> [--display=N|--window=ID] [--rect=x,y,w,h] [--fps=N]',
