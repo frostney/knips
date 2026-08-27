@@ -104,6 +104,7 @@ var
   GContentResult: SCShareableContent = nil;
   GContentError: NSError = nil;
   GContentReady: Boolean = False;
+  GContentQueryActive: Boolean = False;
 
 procedure ContentCompletionHandler(AContent: id; AError: id); cdecl;
 begin
@@ -170,36 +171,48 @@ var
   Slices, WaitCount: Integer;
   Message: string;
 begin
-  GContentResult := nil;
-  GContentError := nil;
-  GContentReady := False;
-
-  SCShareableContent.getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
-    ObjCBOOL(False), ObjCBOOL(True), ContentCompletionHandler);
-
-  Slices := Round(ATimeoutSeconds / RunLoopSliceSeconds);
-  if Slices < 1 then
-    Slices := 1;
-  WaitCount := 0;
-  while (not GContentReady) and (WaitCount < Slices) do
-  begin
-    CFRunLoopRunInMode(kCFRunLoopDefaultMode, RunLoopSliceSeconds, False);
-    Inc(WaitCount);
-  end;
-
-  if not GContentReady then
+  // The wait below pumps a nested run loop over these process globals.
+  // A second Query entered from inside that pump would clobber the
+  // outer one's result and leak its retain; refuse instead. Callers are
+  // all main-thread, so a plain flag is enough.
+  if GContentQueryActive then
     raise EShareableContent.Create(
-      'timed out waiting for ScreenCaptureKit; grant Screen Recording in '
-      + 'System Settings > Privacy & Security and retry');
-  if GContentError <> nil then
-  begin
-    Message := NSStringToPascal(GContentError.localizedDescription);
-    GContentError.release;
+      'a shareable-content query is already running');
+  GContentQueryActive := True;
+  try
+    GContentResult := nil;
     GContentError := nil;
-    raise EShareableContent.Create('ScreenCaptureKit: ' + Message);
+    GContentReady := False;
+
+    SCShareableContent.getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
+      ObjCBOOL(False), ObjCBOOL(True), ContentCompletionHandler);
+
+    Slices := Round(ATimeoutSeconds / RunLoopSliceSeconds);
+    if Slices < 1 then
+      Slices := 1;
+    WaitCount := 0;
+    while (not GContentReady) and (WaitCount < Slices) do
+    begin
+      CFRunLoopRunInMode(kCFRunLoopDefaultMode, RunLoopSliceSeconds, False);
+      Inc(WaitCount);
+    end;
+
+    if not GContentReady then
+      raise EShareableContent.Create(
+        'timed out waiting for ScreenCaptureKit; grant Screen Recording in '
+        + 'System Settings > Privacy & Security and retry');
+    if GContentError <> nil then
+    begin
+      Message := NSStringToPascal(GContentError.localizedDescription);
+      GContentError.release;
+      GContentError := nil;
+      raise EShareableContent.Create('ScreenCaptureKit: ' + Message);
+    end;
+    FContent := GContentResult;
+    GContentResult := nil;
+  finally
+    GContentQueryActive := False;
   end;
-  FContent := GContentResult;
-  GContentResult := nil;
 end;
 
 destructor TShareableContent.Destroy;

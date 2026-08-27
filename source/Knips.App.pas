@@ -134,7 +134,8 @@ const
   // the visible icons; after that the key belongs to AppKit and to the
   // user's own Cmd-drags.
   StatusItemAutosaveName = 'knips';
-  StatusItemPositionKey = 'NSStatusItem Preferred Position knips';
+  StatusItemPositionKey = 'NSStatusItem Preferred Position '
+    + StatusItemAutosaveName;
   StatusItemSeedFromRight = 280.0;
 
   // NSUserDefaults keys. The system-audio checkbox and the last region
@@ -891,6 +892,15 @@ var
 begin
   if FWindowMenu = nil then
     Exit;
+  // Mid-export the event drain can deliver this too; the shareable
+  // content query pumps a nested run loop on process globals, which is
+  // exactly what must not re-enter while an export owns the thread.
+  if Busy then
+  begin
+    FWindowMenu.removeAllItems;
+    AddInertItem(FWindowMenu, NoWindowsTitle);
+    Exit;
+  end;
   try
     if not WindowEntriesFresh then
       RefreshWindowEntries;
@@ -1395,8 +1405,21 @@ end;
 
 procedure TAppController.CommandExportGif;
 begin
-  if FPlayback <> nil then
+  if FPlayback = nil then
+    Exit;
+  // A click on the status item opens NSMenu's tracking loop inside
+  // sendEvent, which does not return until the menu is dismissed — and
+  // the export drains events, so that would stall it indefinitely.
+  // Detach the menu for the duration; a click on the bare item then
+  // dispatches nothing at all.
+  if FStatusItem <> nil then
+    FStatusItem.setMenu(nil);
+  try
     FPlayback.CommandExportGif;
+  finally
+    // Reattaches the menu for the current state.
+    RefreshStatusItem;
+  end;
 end;
 
 procedure TAppController.CommandRevealRecording;
@@ -1608,6 +1631,8 @@ procedure TAppController.CommandRevealRecordings;
 var
   Directory: string;
 begin
+  if Busy then
+    Exit;
   Directory := RecordingsDirectory(GetUserDir);
   if not ForceDirectories(Directory) then
   begin
@@ -1623,7 +1648,9 @@ end;
 // the transition table at all — there is no camera state to be in.
 procedure TAppController.CommandToggleCamera;
 begin
-  if FCamera = nil then
+  // Legal in every STATE, but not while an export owns the main thread:
+  // startRunning blocks for the better part of a second mid-frame.
+  if Busy or (FCamera = nil) then
     Exit;
   FLastError := '';
   if FCamera.Visible then
@@ -1656,7 +1683,7 @@ end;
 
 procedure TAppController.CommandRestoreCamera;
 begin
-  if (FCamera = nil) or FCamera.Visible then
+  if Busy or (FCamera = nil) or FCamera.Visible then
     Exit;
   // Authorized only. A NotDetermined status here would fire a permission
   // prompt the user never asked for, seconds after login, and still not

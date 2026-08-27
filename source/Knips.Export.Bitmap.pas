@@ -446,7 +446,7 @@ procedure BgraResample(const ASource: PByte; ASourceBytesPerRow,
   ASourceWidth, ASourceHeight: Integer; var ADestination: TBgraImage;
   var AScratch: TResampleScratch);
 var
-  FactorX, FactorY: Integer;
+  FactorX, FactorY, Row: Integer;
 begin
   if BgraImageIsEmpty(ADestination) or (ASource = nil) then
     Exit;
@@ -477,8 +477,13 @@ begin
     if (AScratch.Reduced.Width = ADestination.Width)
       and (AScratch.Reduced.Height = ADestination.Height) then
     begin
-      Move(AScratch.Reduced.Pixels[0], ADestination.Pixels[0],
-        Length(ADestination.Pixels));
+      // Row by row: the two images agree on width and height but not
+      // necessarily on BytesPerRow, and a single Move sized from the
+      // destination would read past a tighter source.
+      for Row := 0 to ADestination.Height - 1 do
+        Move(AScratch.Reduced.Pixels[Row * AScratch.Reduced.BytesPerRow],
+          ADestination.Pixels[Row * ADestination.BytesPerRow],
+          ADestination.Width * 4);
       Exit;
     end;
     BgraResizeBicubic(@AScratch.Reduced.Pixels[0],

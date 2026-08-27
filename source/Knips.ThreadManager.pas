@@ -16,7 +16,7 @@ unit Knips.ThreadManager;
 // primitives only. Thread creation, suspension, and threadvar handling
 // keep the NoThreadManager stubs: the RTL still never creates or adopts
 // threads, and ScreenCaptureKit's GCD capture queue stays foreign, which
-// is the ADR-0004 invariant this unit preserves.
+// is the ADR-0003 invariant this unit preserves.
 //
 // It must appear in the program uses clause immediately after cmem —
 // before Classes and SysUtils — so every RTL critical section in unit
@@ -279,6 +279,11 @@ end;
 
 procedure TMRTLEventWaitForTimeout(AEvent: PRTLEvent; ATimeout: LongInt);
 begin
+  // A negative timeout must not wrap into InfiniteTimeout via the
+  // Cardinal cast; treat it as "check once, then give up", as cthreads
+  // does.
+  if ATimeout < 0 then
+    ATimeout := 0;
   EventWait(PEventRec(AEvent), Cardinal(ATimeout), True);
 end;
 

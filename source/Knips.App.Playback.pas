@@ -473,17 +473,19 @@ procedure TPlaybackWindow.HandleProgress(AStage: TGifExportStage;
 var
   Percent: Integer;
 begin
-  if FWindow = nil then
-    Exit;
   // Service the event queue on EVERY frame, not just whole percents: the
   // window server shows the beachball when the app stops DEQUEUEING
   // events for a few seconds, and on a long export one percent can take
   // longer than that. untilDate nil never waits — this drains what is
   // pending and returns. The Busy lockout keeps anything it dispatches
   // from acting; the zero-timeout slice below is what lets the
-  // CoreAnimation commit draw the new title.
+  // CoreAnimation commit draw the new title. Deliberately BEFORE the
+  // window check: closing the window mid-export must not stop the
+  // draining, or the beachball returns for the rest of the export.
   DrainPendingEvents;
   CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, True);
+  if FWindow = nil then
+    Exit;
   Percent := ExportPercent(AStage = gesPalette, AFramesDone, AFramesTotal);
   // Only whole percents reach AppKit; a per-frame setTitle: on a long
   // recording is thousands of layout passes for the same string.
@@ -513,9 +515,14 @@ var
   Pool: NSAutoreleasePool;
   Error: string;
   Succeeded: Boolean;
+  WarnWidth, WarnHeight: Integer;
+  WarnBytes: Int64;
 begin
   if (FWindow = nil) or FExporting or (FPath = '') then
     Exit;
+  WarnWidth := 0;
+  WarnHeight := 0;
+  WarnBytes := 0;
   Options := DefaultExportOptions;
   Options.InputPath := FPath;
   Options.OutputPath := GifPathForRecording(FPath);
@@ -553,6 +560,12 @@ begin
         Session.Verbose := False;
         Session.OnProgress := HandleProgress;
         Succeeded := Session.Run(Error);
+        if Succeeded then
+        begin
+          WarnWidth := Session.Report.PixelWidth;
+          WarnHeight := Session.Report.PixelHeight;
+          WarnBytes := Session.Report.OutputBytes;
+        end;
       finally
         Session.Free;
       end;
@@ -566,7 +579,16 @@ begin
       FWindow.setTitle(PascalToNSString(ExtractFileName(FPath)));
   end;
   if Succeeded then
-    Reveal(Options.OutputPath)
+  begin
+    // The CLI prints this advice on stderr; the app has no stderr, so a
+    // large result lands on the same "Last error" line everything else
+    // uses — advisory, not failure, and the export did complete.
+    Error := LargeExportWarning(efGif, WarnWidth, WarnHeight,
+      Options.FramesPerSecond, WarnBytes);
+    if Error <> '' then
+      ReportError(Error);
+    Reveal(Options.OutputPath);
+  end
   else
     ReportError('GIF export: ' + Error);
 end;

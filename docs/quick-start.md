@@ -93,7 +93,7 @@ window with AVKit's transport controls and three buttons:
 
 | Button | What it does |
 | --- | --- |
-| Export as GIF… | Writes `<recording>.gif` beside the movie at 20 fps, at the recording's own **point** size (pixel width ÷ capture scale), and reveals it in Finder. On a 2x display that is an exact 2:1 reduction, which is what keeps small text readable; use `knips export --width=N` for anything narrower. |
+| Export as GIF… | Writes `<recording>.gif` beside the movie at 20 fps and reveals it in Finder. Retina recordings export at their **point** size (pixel width ÷ capture scale — an exact 2:1 reduction, which is what keeps small text readable); scale-1 recordings cap at 800 px. A large result is noted on the `Last error:` line. Use `knips export --width=N` for anything else. |
 | Reveal in Finder | Shows the `.mp4`. |
 | Close | Closes the window and releases the player. |
 

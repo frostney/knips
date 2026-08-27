@@ -98,6 +98,6 @@ printf 'APPL????' > "$CONTENTS/PkgInfo"
 # Screen Recording, oddly, still prompts). The ad-hoc signature gives
 # tccd a resolvable identity. Each build's signature differs, so grants
 # still re-prompt per rebuild until a real Developer ID signs releases.
-codesign --force --deep -s - "$APP"
+codesign --force -s - "$APP"
 
 echo "$APP"

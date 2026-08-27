@@ -20,3 +20,6 @@ build/
 
 # Session-local agent handoff state — never committed.
 .agent/
+
+# ScreenCaptureKit/AVFoundation sandbox temp files (x.mp4.sb-*)
+*.sb-*

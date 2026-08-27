@@ -620,12 +620,17 @@ end;
 procedure TExportTests.TestWidthKeepsSmallRecordings;
 begin
   // GifWidthFromSource is the exporter's "keep the movie's own width",
-  // and at one pixel per point there is nothing to divide away.
+  // and at one pixel per point there is nothing to divide away — up to
+  // the sendable-size cap, which point size cannot justify removing at
+  // scale 1.
   Expect<Integer>(AppGifWidth(640, 1)).ToBe(GifWidthFromSource);
-  Expect<Integer>(AppGifWidth(2560, 1)).ToBe(GifWidthFromSource);
-  // An unknown width or scale has nowhere else to go either.
+  Expect<Integer>(AppGifWidth(2560, 1)).ToBe(MaxAppGifWidth);
+  // An unknown width has nowhere else to go; an unknown scale behaves
+  // like scale 1, cap included — safety cannot depend on a field nobody
+  // filled in.
   Expect<Integer>(AppGifWidth(0, 2)).ToBe(GifWidthFromSource);
-  Expect<Integer>(AppGifWidth(1800, 0)).ToBe(GifWidthFromSource);
+  Expect<Integer>(AppGifWidth(1800, 0)).ToBe(MaxAppGifWidth);
+  Expect<Integer>(AppGifWidth(640, 0)).ToBe(GifWidthFromSource);
 end;
 
 procedure TExportTests.TestWidthIsThePointSizeOfARetinaRecording;
@@ -641,12 +646,12 @@ end;
 
 procedure TExportTests.TestWidthDeclinesWhatTheExporterWouldReject;
 begin
-  // Below MinGifWidth and above MaxGifWidth the export would fail
-  // validation; falling back to the movie's own width still produces a
-  // file, which is the better of the two failures.
+  // Below MinGifWidth the export would fail validation; falling back to
+  // the movie's own width still produces a file. Above MaxGifWidth the
+  // answer is the exporter's maximum — never the sentinel, which would
+  // resolve to the full pixel width, twice what was just refused.
   Expect<Integer>(AppGifWidth(30, 2)).ToBe(GifWidthFromSource);
-  Expect<Integer>(AppGifWidth(MaxGifWidth * 2 + 2, 2))
-    .ToBe(GifWidthFromSource);
+  Expect<Integer>(AppGifWidth(MaxGifWidth * 2 + 2, 2)).ToBe(MaxGifWidth);
   Expect<Integer>(AppGifWidth(MaxGifWidth * 2, 2)).ToBe(MaxGifWidth);
 end;
 

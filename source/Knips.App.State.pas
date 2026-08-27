@@ -18,6 +18,9 @@ uses
   Knips.Options;
 
 const
+  // The one-click export's sendable-size cap for scale-1 recordings,
+  // where no integer reduction exists to justify the full width.
+  MaxAppGifWidth = 800;
   // Menu-bar glyphs. Both are drawn as the status item's plain title, so
   // they inherit the menu bar's foreground colour in light and dark mode.
   IdleGlyph = '◉';
@@ -183,13 +186,12 @@ function GifPathForRecording(const ARecordingPath: string): string;
 // at. On the 2x display that is nearly every Mac, that makes the export
 // an exact 2:1 integer box reduction — the resampling that keeps text
 // legible — where any other width lands on a fractional ratio and
-// softens it. There is no upper cap: a wide recording makes a wide GIF,
-// and `export` already says so on stderr rather than deciding for you.
+// softens it. Scale-1 recordings gain nothing from the point size (it
+// IS the pixel size), so they keep the MaxAppGifWidth sendable-size cap;
+// a too-wide point size is clamped to the exporter's maximum rather
+// than falling back to something wider still.
 //
-// GifWidthFromSource (0) is the "keep the movie's own width" sentinel,
-// and is the answer whenever points and pixels are the same thing, the
-// scale is unknown, or the point size falls outside what the exporter
-// will accept.
+// GifWidthFromSource (0) is the "keep the movie's own width" sentinel.
 function AppGifWidth(ASourcePixelWidth, ASourceScale: Integer): Integer;
 
 // "Application — Title" for the Record Window submenu, elided. A window
@@ -420,14 +422,25 @@ function AppGifWidth(ASourcePixelWidth, ASourceScale: Integer): Integer;
 var
   Points: Integer;
 begin
-  Result := GifWidthFromSource;
-  if (ASourcePixelWidth <= 0) or (ASourceScale <= 1) then
-    Exit;
+  // Unknown width: leave the choice to the exporter.
+  if ASourcePixelWidth <= 0 then
+    Exit(GifWidthFromSource);
+  // Scale 1: there is no integer reduction to land on, so the sharpness
+  // argument for the point size does not apply — keep the sendable-size
+  // cap the point-size default replaced for Retina recordings.
+  if ASourceScale <= 1 then
+  begin
+    if ASourcePixelWidth > MaxAppGifWidth then
+      Exit(MaxAppGifWidth);
+    Exit(GifWidthFromSource);
+  end;
   Points := ASourcePixelWidth div ASourceScale;
-  // Outside the exporter's own bounds the request would be rejected
-  // outright, and a rejected export is worse than a wide one.
-  if (Points < MinGifWidth) or (Points > MaxGifWidth) then
-    Exit;
+  if Points < MinGifWidth then
+    Exit(GifWidthFromSource);
+  // Never answer a too-wide request with something wider still: the
+  // sentinel would resolve to the full pixel width.
+  if Points > MaxGifWidth then
+    Exit(MaxGifWidth);
   Result := Points;
 end;
 

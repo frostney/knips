@@ -467,25 +467,21 @@ path/width/percentage arithmetic; it is platform-neutral and has a
 co-located suite, so the only untested part of the app is the Cocoa
 plumbing.
 
-Four more classes are built through `Knips.ObjC.Runtime`, none of them
 Five more classes are built through `Knips.ObjC.Runtime`, none of them
 an `objcclass`:
 
 | Runtime class | Superclass | Methods |
 | --- | --- | --- |
-| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `toggleCamera:`, `restoreCamera:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:` |
+| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `recordWindow:`, `recordLastRegion:`, `toggleSystemAudio:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `toggleCamera:`, `restoreCamera:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:`, `exportGif:`, `revealRecording:`, `closePlayback:`, `menuNeedsUpdate:` |
 | `KnipsOverlayView` | `NSView` | `drawRect:`, `mouseDown:`, `mouseDragged:`, `mouseUp:`, `keyDown:`, `acceptsFirstResponder` |
 | `KnipsOverlayWindow` | `NSWindow` | `canBecomeKeyWindow` (a borderless window answers NO, and then Esc never reaches the view) |
 | `KnipsCameraView` | `NSView` | `acceptsFirstMouse:` (Knips is an Accessory app, so without it the first click on the camera window is eaten as the activating click and dragging takes two) |
-| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `recordWindow:`, `recordLastRegion:`, `toggleSystemAudio:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:`, `exportGif:`, `revealRecording:`, `closePlayback:`, `menuNeedsUpdate:` |
-| `KnipsOverlayView` | `NSView` | `drawRect:`, `mouseDown:`, `mouseDragged:`, `mouseUp:`, `keyDown:`, `acceptsFirstResponder` |
-| `KnipsOverlayWindow` | `NSWindow` | `canBecomeKeyWindow` (a borderless window answers NO, and then Esc never reaches the view) |
 | `KnipsBorderView` | `NSView` | `drawRect:` — the frame drawn around a region while it records |
 | `KnipsPlaybackDelegate` | `NSObject` | `windowWillClose:` — the one teardown path for the playback window |
 
 `KnipsCameraView` is the exception to what follows: it has no ivar and no
 `try..except`, because its one body returns a constant and never calls
-back into Pascal. The other three each carry an `knipsOwner` pointer ivar
+back into Pascal. The others each carry an `knipsOwner` pointer ivar
 back to the owning Pascal object, cleared before the Objective-C instance
 goes away — the same rule as the stream output object.
 `KnipsOverlayView` adds an `knipsIndex`
@@ -538,7 +534,7 @@ anyway. Display and window recordings get no frame.
 **The playback window** (`Knips.App.Playback`). A finished recording
 opens in an ordinary titled window with an `AVPlayerView` and three
 buttons whose target is the same `KnipsAppTarget`. *Export as GIF…* runs
-`TGifExportSession` inline on the main thread — nothing here may pump a
+`TExportSession` inline on the main thread — nothing here may pump a
 nested run loop, so the window is unresponsive while it works and the
 title carries the progress instead (`Exporting… 42%`, from the pipeline's
 new per-frame `OnProgress`). The buttons are disabled first, which is

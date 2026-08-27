@@ -24,8 +24,11 @@ conventional commits by git-cliff (`cliff.toml`).
   at — reporting progress in the window title. On the 2x display that is
   nearly every Mac that makes the export an exact 2:1 integer reduction,
   which is the sharpest a downscale gets; the previous 800 px cap landed
-  on a fractional ratio and visibly softened text. There is no cap: a
-  wide recording makes a wide GIF, and `export` says so on stderr.
+  on a fractional ratio and visibly softened text. A Retina recording
+  has no cap — its point size is already half its pixels — while a
+  scale-1 recording keeps an 800 px cap, and an oversized result is
+  called out on the app's own "Last error" line, since a bundle has no
+  stderr.
 - `app`: *Record Window* submenu (on-screen application windows, refreshed
   at most once every five seconds and never listing Knips's own windows),
   *Record Last Region*, and a *Record System Audio* checkbox. The checkbox
