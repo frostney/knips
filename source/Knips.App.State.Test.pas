@@ -16,7 +16,7 @@ type
     procedure SetupTests; override;
     procedure TestIdleStartsSelectionOrDisplay;
     procedure TestIdleStartsWindowOrLastRegion;
-    procedure TestSystemAudioTogglesOnlyWhileIdle;
+    procedure TestAudioTogglesOnlyWhileIdle;
     procedure TestLiveEffectsToggleOnlyWhileIdle;
     procedure TestIdleRejectsStop;
     procedure TestSelectingCommitsOrCancels;
@@ -63,6 +63,25 @@ type
     procedure TestShortMessagesArePrefixed;
     procedure TestLongMessagesAreElided;
     procedure TestEmptyMessageStillReads;
+  end;
+
+  TAudioMenuTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestTheTwoCheckboxesCoverAllFourModes;
+    procedure TestAnUnavailableMicrophoneSaysWhy;
+    procedure TestTheLegacyCheckboxMigratesOnce;
+    procedure TestAStoredValueBeatsTheLegacyCheckbox;
+  end;
+
+  TCameraRideTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestTheCameraTravelsWithTheRectangle;
+    procedure TestARectangleThatDidNotMoveIsNotWorthAFrame;
+    procedure TestAResizeMovesNothingByItself;
+    procedure TestRidingIsMeasuredFromTheDockNotTheLastTick;
+    procedure TestWindowBoundsFlipIntoAppKitSpace;
   end;
 
   TCameraTests = class(TTestSuite)
@@ -152,8 +171,8 @@ begin
     TestIdleStartsSelectionOrDisplay);
   Test('idle accepts a window and a repeat of the last region',
     TestIdleStartsWindowOrLastRegion);
-  Test('the system-audio checkbox only toggles while idle',
-    TestSystemAudioTogglesOnlyWhileIdle);
+  Test('the two audio checkboxes only toggle while idle',
+    TestAudioTogglesOnlyWhileIdle);
   Test('the two live-effect checkboxes only toggle while idle',
     TestLiveEffectsToggleOnlyWhileIdle);
   Test('idle rejects stop', TestIdleRejectsStop);
@@ -191,22 +210,34 @@ begin
     .ToBe(False);
 end;
 
-// The stream configuration is fixed once the capture has started, so the
-// checkbox is a legal command in exactly one state — and it leaves that
-// state where it found it.
-procedure TTransitionTests.TestSystemAudioTogglesOnlyWhileIdle;
+// The stream configuration is fixed once the capture has started, so
+// each audio checkbox is a legal command in exactly one state — and
+// leaves that state where it found it. This is the rule the one Record
+// System Audio checkbox had; the submenu that replaced it added a second
+// checkbox, not a second rule.
+procedure TTransitionTests.TestAudioTogglesOnlyWhileIdle;
 var
   Next: TAppState;
 begin
   Next := asRecording;
   Expect<Boolean>(NextAppState(asIdle, acToggleSystemAudio, Next)).ToBe(True);
   Expect<Integer>(Ord(Next)).ToBe(Ord(asIdle));
+  Next := asRecording;
+  Expect<Boolean>(NextAppState(asIdle, acToggleMicrophone, Next)).ToBe(True);
+  Expect<Integer>(Ord(Next)).ToBe(Ord(asIdle));
   Expect<Boolean>(NextAppState(asRecording, acToggleSystemAudio, Next))
+    .ToBe(False);
+  Expect<Boolean>(NextAppState(asRecording, acToggleMicrophone, Next))
     .ToBe(False);
   Expect<Boolean>(NextAppState(asSelecting, acToggleSystemAudio, Next))
     .ToBe(False);
+  Expect<Boolean>(NextAppState(asSelecting, acToggleMicrophone, Next))
+    .ToBe(False);
   Expect<Boolean>(IsCommandEnabled(asIdle, acToggleSystemAudio)).ToBe(True);
+  Expect<Boolean>(IsCommandEnabled(asIdle, acToggleMicrophone)).ToBe(True);
   Expect<Boolean>(IsCommandEnabled(asRecording, acToggleSystemAudio))
+    .ToBe(False);
+  Expect<Boolean>(IsCommandEnabled(asRecording, acToggleMicrophone))
     .ToBe(False);
 end;
 
@@ -1399,6 +1430,198 @@ begin
     'clip.mp4', False)).ToBe(True);
 end;
 
+{ TAudioMenuTests }
+
+procedure TAudioMenuTests.SetupTests;
+begin
+  Test('the two checkboxes cover all four audio modes',
+    TestTheTwoCheckboxesCoverAllFourModes);
+  Test('an unavailable microphone says why in its title',
+    TestAnUnavailableMicrophoneSaysWhy);
+  Test('the old Record System Audio checkbox migrates once',
+    TestTheLegacyCheckboxMigratesOnce);
+  Test('a stored value beats the old checkbox',
+    TestAStoredValueBeatsTheLegacyCheckbox);
+end;
+
+// The whole mapping, and it is the natural product: neither ticked is
+// none, one is that one, both is both. This is what makes two
+// independent checkboxes a complete replacement for a four-way choice.
+procedure TAudioMenuTests.TestTheTwoCheckboxesCoverAllFourModes;
+begin
+  Expect<Boolean>(AudioModeFromToggles(False, False) = amNone).ToBe(True);
+  Expect<Boolean>(AudioModeFromToggles(True, False) = amSystem).ToBe(True);
+  Expect<Boolean>(AudioModeFromToggles(False, True) = amMicrophone).ToBe(True);
+  Expect<Boolean>(AudioModeFromToggles(True, True) = amBoth).ToBe(True);
+  // And the mapping agrees with what the recorder asks of a mode, in
+  // both directions — the two predicates below are what actually
+  // configure the stream.
+  Expect<Boolean>(AudioModeCapturesSystem(
+    AudioModeFromToggles(True, False))).ToBe(True);
+  Expect<Boolean>(AudioModeCapturesMicrophone(
+    AudioModeFromToggles(True, False))).ToBe(False);
+  Expect<Boolean>(AudioModeCapturesSystem(
+    AudioModeFromToggles(False, True))).ToBe(False);
+  Expect<Boolean>(AudioModeCapturesMicrophone(
+    AudioModeFromToggles(False, True))).ToBe(True);
+  Expect<Boolean>(AudioModeCapturesSystem(
+    AudioModeFromToggles(True, True))).ToBe(True);
+  Expect<Boolean>(AudioModeCapturesMicrophone(
+    AudioModeFromToggles(True, True))).ToBe(True);
+end;
+
+// A greyed-out line with no explanation is the thing users file bugs
+// about, so the reason rides in the title as well as in the tooltip.
+procedure TAudioMenuTests.TestAnUnavailableMicrophoneSaysWhy;
+begin
+  Expect<string>(MicrophoneMenuItemTitle(True)).ToBe(MicrophoneMenuTitle);
+  Expect<string>(MicrophoneMenuItemTitle(False))
+    .ToBe(MicrophoneMenuTitle + NoMicrophoneSuffix);
+end;
+
+// The upgrade path. Nobody who had the checkbox ticked should find the
+// next launch recording silence.
+procedure TAudioMenuTests.TestTheLegacyCheckboxMigratesOnce;
+begin
+  Expect<Boolean>(MigratedSystemAudio(False, False, True)).ToBe(True);
+  Expect<Boolean>(MigratedSystemAudio(False, False, False)).ToBe(False);
+end;
+
+// Once the new key exists it is the only answer — including when it says
+// False, which is a value the old Boolean cannot be told apart from and
+// is why the caller passes "has the key" separately. Without that, a
+// user who deliberately switched system audio OFF would have it switched
+// back on by the stale legacy key on every launch.
+procedure TAudioMenuTests.TestAStoredValueBeatsTheLegacyCheckbox;
+begin
+  Expect<Boolean>(MigratedSystemAudio(True, False, True)).ToBe(False);
+  Expect<Boolean>(MigratedSystemAudio(True, True, False)).ToBe(True);
+end;
+
+{ TCameraRideTests }
+
+procedure TCameraRideTests.SetupTests;
+begin
+  Test('the camera travels with the rectangle',
+    TestTheCameraTravelsWithTheRectangle);
+  Test('a rectangle that did not move is not worth a frame',
+    TestARectangleThatDidNotMoveIsNotWorthAFrame);
+  Test('a rectangle that only resized moves the camera nowhere',
+    TestAResizeMovesNothingByItself);
+  Test('riding is measured from the dock, not from the last tick',
+    TestRidingIsMeasuredFromTheDockNotTheLastTick);
+  Test('window bounds flip into AppKit''s screen space',
+    TestWindowBoundsFlipIntoAppKitSpace);
+end;
+
+// The whole of the ride: the corner the dock chose is kept, and the
+// window moves by exactly what the rectangle moved by. Not "the nearest
+// corner of the new rectangle", which would teleport the picture from one
+// corner to another the moment the rectangle's midline crossed it.
+procedure TCameraRideTests.TestTheCameraTravelsWithTheRectangle;
+var
+  Docked, Ridden: TCameraOrigin;
+begin
+  Docked.X := 120;
+  Docked.Y := 80;
+  Ridden := CameraRideOrigin(Docked, CameraRect(100, 60, 800, 600),
+    CameraRect(340, 210, 800, 600));
+  Expect<Double>(Ridden.X).ToBe(360);
+  Expect<Double>(Ridden.Y).ToBe(230);
+  // And backwards, which is what a pan to the left is.
+  Ridden := CameraRideOrigin(Docked, CameraRect(100, 60, 800, 600),
+    CameraRect(40, 10, 800, 600));
+  Expect<Double>(Ridden.X).ToBe(60);
+  Expect<Double>(Ridden.Y).ToBe(30);
+end;
+
+procedure TCameraRideTests.TestARectangleThatDidNotMoveIsNotWorthAFrame;
+begin
+  Expect<Boolean>(IsCameraRideMovement(CameraRect(100, 60, 800, 600),
+    CameraRect(100, 60, 800, 600))).ToBe(False);
+  // Under the epsilon on both axes at once is still not a movement: the
+  // live animator lands a fraction of a point from its target and stays
+  // there for many ticks after a pan settles.
+  Expect<Boolean>(IsCameraRideMovement(CameraRect(100, 60, 800, 600),
+    CameraRect(100.2, 60.2, 800, 600))).ToBe(False);
+  // Either axis on its own is enough — a purely horizontal pan is a pan.
+  Expect<Boolean>(IsCameraRideMovement(CameraRect(100, 60, 800, 600),
+    CameraRect(100.6, 60, 800, 600))).ToBe(True);
+  Expect<Boolean>(IsCameraRideMovement(CameraRect(100, 60, 800, 600),
+    CameraRect(100, 60.6, 800, 600))).ToBe(True);
+end;
+
+// A recorded window that is resized rather than moved keeps its origin,
+// and the camera keeps its offset from that origin. Re-deciding a corner
+// on every resize would make the picture hop about while the user drags
+// a window edge.
+procedure TCameraRideTests.TestAResizeMovesNothingByItself;
+var
+  Docked, Ridden: TCameraOrigin;
+begin
+  Docked.X := 120;
+  Docked.Y := 80;
+  Ridden := CameraRideOrigin(Docked, CameraRect(100, 60, 800, 600),
+    CameraRect(100, 60, 400, 300));
+  Expect<Double>(Ridden.X).ToBe(120);
+  Expect<Double>(Ridden.Y).ToBe(80);
+  Expect<Boolean>(IsCameraRideMovement(CameraRect(100, 60, 800, 600),
+    CameraRect(100, 60, 400, 300))).ToBe(False);
+end;
+
+// Thirty ticks a second for ten minutes is eighteen thousand additions.
+// Feeding each result back in as the next input would accumulate every
+// rounding error in all of them; the dock's own rectangle and origin are
+// the anchor for every position, however many ticks have passed.
+procedure TCameraRideTests.TestRidingIsMeasuredFromTheDockNotTheLastTick;
+var
+  Docked, Stepwise, Direct: TCameraOrigin;
+  Rect: TCameraRect;
+  I: Integer;
+begin
+  Docked.X := 120;
+  Docked.Y := 80;
+  Rect := CameraRect(100, 60, 800, 600);
+  // The stepwise arm re-anchors on ITS OWN last answer and the previous
+  // tick's rect — the accumulating shape the implementation must not
+  // have. Only an anchored implementation makes both arms agree after a
+  // thousand fractional steps; an accumulator drifts by the sum of the
+  // rounding errors and fails the exact comparison.
+  Stepwise := Docked;
+  for I := 1 to 1000 do
+    Stepwise := CameraRideOrigin(Stepwise,
+      CameraRect(100 + (I - 1) / 3, 60 + (I - 1) / 7, 800, 600),
+      CameraRect(100 + I / 3, 60 + I / 7, 800, 600));
+  Direct := CameraRideOrigin(Docked, Rect,
+    CameraRect(100 + 1000 / 3, 60 + 1000 / 7, 800, 600));
+  Expect<Boolean>(Abs(Stepwise.X - Direct.X) < 0.001).ToBe(True);
+  Expect<Boolean>(Abs(Stepwise.Y - Direct.Y) < 0.001).ToBe(True);
+end;
+
+// CGWindowListCopyWindowInfo answers in Quartz's global space: origin at
+// the TOP left of the primary display, y downwards. AppKit's global space
+// has its origin at the same display's BOTTOM left, y upwards.
+procedure TCameraRideTests.TestWindowBoundsFlipIntoAppKitSpace;
+var
+  Rect: TCameraRect;
+begin
+  // A 1390x1053 window 39 points below the top of a 1169-point primary
+  // display — the menu bar's own inset on this machine.
+  Rect := WindowBoundsScreenRect(233, 39, 1390, 1053, 1169);
+  Expect<Double>(Rect.X).ToBe(233);
+  Expect<Double>(Rect.Y).ToBe(77);
+  Expect<Double>(Rect.Width).ToBe(1390);
+  Expect<Double>(Rect.Height).ToBe(1053);
+  // A window flush with the bottom of the primary display sits at y = 0,
+  // which is the one value that settles which corner each space starts in.
+  Rect := WindowBoundsScreenRect(0, 1169 - 300, 500, 300, 1169);
+  Expect<Double>(Rect.Y).ToBe(0);
+  // A window on a display *above* the primary one has a negative Quartz
+  // y and comes back above the primary display's top edge.
+  Rect := WindowBoundsScreenRect(0, -400, 500, 300, 1169);
+  Expect<Double>(Rect.Y).ToBe(1269);
+end;
+
 begin
   TestRunnerProgram.AddSuite(TTransitionTests.Create('NextAppState'));
   TestRunnerProgram.AddSuite(TTitleTests.Create('StatusItemTitle'));
@@ -1410,6 +1633,9 @@ begin
   TestRunnerProgram.AddSuite(TCameraSnapTests.Create('camera corner snap'));
   TestRunnerProgram.AddSuite(TCameraDockTests.Create(
     'camera docking into a region'));
+  TestRunnerProgram.AddSuite(TCameraRideTests.Create(
+    'camera riding a moving rectangle'));
+  TestRunnerProgram.AddSuite(TAudioMenuTests.Create('the Audio submenu'));
   TestRunnerProgram.AddSuite(TExportTests.Create('one-click GIF export'));
   TestRunnerProgram.AddSuite(TWindowMenuTests.Create('Record Window submenu'));
   TestRunnerProgram.Run;

@@ -73,24 +73,69 @@ A `◉` appears in the menu bar. Clicking it opens:
 | Record Display | Records the main display straight away. |
 | Record Window ▸ | Up to 20 on-screen application windows as *Application — Title*, refreshed at most once every five seconds. Knips's own windows are never listed. If the list cannot be read within a second the submenu says so instead of stalling. |
 | Record Last Region | Repeats the last region recording — same display, same rectangle. Survives a relaunch. |
-| Stop Recording | Enabled only while recording. |
+| Stop Recording | Enabled only while recording, and shows **⌘⇧2** — the system-wide shortcut below. |
 | Cancel selection | Enabled only while selecting. The overlay covers the menu bar, so this only matters if the overlay failed to open. |
 | Camera | Floating camera window; checked while it is up. Available in every state, recording included. |
 | Circular Camera | A checkbox. On, the camera window is a circle instead of a rounded rectangle. Applies to the window on screen straight away and is remembered between launches. |
 | Zoom on Click | A checkbox. On, a click inside the recorded area zooms the *recording* to 2× around the click, holds for 0.8 s after the last click, and eases back. Nothing on screen moves — only what the file shows. Remembered between launches; not changeable mid-recording. |
 | Follow Mouse (region) | A checkbox. On, a **region** recording pans to keep the pointer inside the middle third of the frame; the red frame moves with it. Whole-display and window recordings ignore it — a display has nowhere to pan. Remembered between launches; not changeable mid-recording. |
-| Record System Audio | A checkbox. On, recordings get an AAC track of the system mix. Remembered between launches; not changeable mid-recording. |
+| Audio ▸ | Two independent checkboxes, **System Audio** and **Microphone**. Tick either, both, or neither: each ticked source becomes its own AAC track in the file. Remembered between launches; not changeable mid-recording. |
 | Recordings folder | Opens `~/Movies/knips/` in Finder. |
 | Last error: … | Only visible after a failure, and after anything that switched a recording setting off for one recording; the full text is in `~/Library/Logs/Knips.log`. |
 | Quit Knips | Stops a running recording first. |
 
 While recording the title reads `⏺ 0:07` and ticks once a second, and the
-menu is detached so **one click on the icon stops** — Kap's gesture. The
+menu is detached so **one click on the icon stops** — Kap's gesture — as
+does **⌘⇧2** from anywhere. The
 price of that gesture is that Quit is unreachable from the icon until you
 stop; one click does it. (⌘Q works if a playback window has put the app's
 menu bar up; it stops and finalises the recording first, exactly as the
 menu's Quit does.) The finished file lands in
 `~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4`.
+
+**⌘⇧2 stops a recording from anywhere.** It is the one thing the icon
+cannot do: while Knips records, the icon has no menu (a click stops it),
+and the window you are demonstrating in is the last place you should
+have to leave. The shortcut is registered with the system — it costs no
+extra permission, and no key you press anywhere else is ever seen by
+Knips — and it *only* stops. It never starts a recording, because a
+global shortcut that starts one starts one by accident; outside a
+recording it does nothing at all.
+
+If the shortcut could not be registered (something else in this process
+already holds it), the `Last error: …` line says so and the app carries
+on without it. **Pressing the keys is the one part of this a test cannot
+check** — this project's tooling never synthesises input, and the
+system reports success for registering a chord it will not actually
+deliver. `knips probe` verifies the registration and the constants;
+whether the chord really fires is a human check:
+
+```sh
+./build/knips app
+# Menu ▸ Record Display, then press ⌘⇧2 anywhere.
+# The icon should go back to ◉ and a playback window should open.
+```
+
+**Audio.** *Audio ▸ System Audio* and *Audio ▸ Microphone* are
+independent, so all four combinations are reachable: neither is a silent
+recording, either alone is that one source, and both gives you two
+separate AAC tracks (see [Audio](#audio) below for what to do with two
+tracks). If you upgraded from a version with *Record System Audio*, the
+box you had ticked comes across as *System Audio*.
+
+The microphone needs macOS 15 — where ScreenCaptureKit has no microphone
+capture the item is disabled and says so — and it needs the Microphone
+privacy grant, which is separate from Screen Recording. The first
+microphone recording prompts for it.
+
+Knips does **not** refuse a recording over that grant, and the reason is
+measured: on this macOS ScreenCaptureKit captured the microphone
+perfectly well while the privacy status still read *not determined*, so
+refusing on it would refuse recordings that work. Instead, ticking
+*Microphone* while the grant reads denied says so straight away on the
+`Last error: …` line — and, whatever the cause, a finished recording
+whose microphone delivered **no audio at all** says that too. That last
+check is the one that cannot be fooled: it counts what actually arrived.
 
 **The recording frame.** A region recording puts a red frame around the
 rectangle for as long as it runs, so there is never a doubt about what is
@@ -163,10 +208,12 @@ button's
 defaults do not cover — a different rate, a width, a trim — use
 `knips export` (below).
 
-**Remembered settings.** Record System Audio, Zoom on Click, Follow
+**Remembered settings.** The two Audio checkboxes, Zoom on Click, Follow
 Mouse and the last region live in `NSUserDefaults` under
-`KnipsRecordSystemAudio`, `KnipsZoomOnClick`, `KnipsFollowMouse` and
-`KnipsLastRegion*`.
+`KnipsAudioSystem`, `KnipsAudioMicrophone`, `KnipsZoomOnClick`,
+`KnipsFollowMouse` and `KnipsLastRegion*`. `KnipsRecordSystemAudio` is
+the key the single old checkbox used; it is read once, only when
+`KnipsAudioSystem` has never been written, and is never written again.
 The bare binary and `Knips.app` keep separate domains (`knips` versus the
 bundle identifier), so a setting made in one is not seen by the other:
 
@@ -210,14 +257,34 @@ picture is cropped to a disc about the middle of the frame; the switch
 happens live, about the window's own centre, and the choice is
 remembered.
 
-**A region recording docks it.** Start a *Record Region…* or *Record Last
-Region* while the camera is up and it moves into the nearest corner
-*inside* the rectangle being recorded, so it ends up in the file — Kap's
-picture-in-picture, without any compositing. When the recording stops it
-travels back to where it was before. Nothing happens for a display or
-window recording, or if the camera is off. With **Follow Mouse** on it
-docks once, to the region as it starts, and then stays put rather than
-sliding around while the region pans.
+The circle **loses the sides of the picture, it does not move the
+middle**. A square window over a wider feed keeps the horizontal centre
+and throws away equal slices left and right — so if you are sitting off
+to one side of the frame, the circle is where you notice. Move the
+camera's *view*, not the window: sit centred, or use the rectangle.
+
+**A recording docks it, and it rides along.** Start a *Record Region…*,
+*Record Last Region* or *Record Window* while the camera is up and it
+moves into the nearest corner *inside* the rectangle being recorded.
+When the recording stops it travels back to where it was before. Nothing
+happens for a display recording — that already contains the camera
+wherever it stands — or if the camera is off.
+
+For a **region**, that puts the camera in the file: Kap's
+picture-in-picture, without any compositing. For a **window** it does
+not — a window recording captures that one window and nothing drawn on
+top of it — so docking there is about the screen: the picture sits beside
+the thing you are demonstrating instead of somewhere behind it.
+
+And it **stays inside** the rectangle while the rectangle moves. With
+*Follow Mouse* on, a region pans across the display and the camera pans
+with it, keeping the corner it started in. A recorded window goes
+wherever you drag it, and the camera follows about five times a second.
+Drag the picture yourself mid-recording and it carries on following from
+wherever you dropped it — you keep the corner you chose, not the one the
+dock picked. Close a recorded window mid-take and the camera simply
+stops following rather than chasing a window that is not there; it stays
+where it last was.
 
 Where you left it and whether it was on are remembered, so — **once
 camera access is granted** — the next launch brings it back to the same
@@ -251,9 +318,10 @@ Two known limits, both cheap to work around:
   you switch it off and on again.
 - The position is written when the camera is switched off or Knips quits
   from the menu. Force-quitting loses the last move.
-- A drag you make *during* a docked region recording is not kept: when the
+- A drag you make *during* a docked recording is not kept: when the
   recording stops, the camera returns to where it stood before the
-  recording moved it.
+  recording moved it. It returns to the screen it was on, too, even if
+  you recorded on a different one.
 
 ## Exporting
 
@@ -465,8 +533,8 @@ Mixing in-process is deliberately not in this version.
 Recording. From a terminal the grant belongs to the terminal app, so
 macOS prompts once for it (or you enable it under System Settings ▸
 Privacy & Security ▸ Microphone). `Knips.app` carries its own
-`NSMicrophoneUsageDescription` so it can prompt as itself once the
-menu-bar app gains an audio option; today `--audio` is CLI-only.
+`NSMicrophoneUsageDescription` so it can prompt as itself; the app's
+Audio ▸ Microphone checkbox and the CLI's `--audio` share the grant.
 
 ## Verifying a change end-to-end
 

@@ -80,7 +80,7 @@
 | App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window, and the neutral state machine (tested) |
 | Recording | `Knips.Recording` | Target → filter + geometry → writer → stream; progress; report |
 | CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `export`, `displays`, `windows`, `probe`; SIGINT/SIGTERM → `StopRequested` |
-| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Live`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window, the live-effect animator, and the neutral state machine (tested) |
+| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Live`, `Knips.App.Hotkey`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window, the live-effect animator, the global stop hotkey, and the neutral state machine (tested) |
 | Recording | `Knips.Recording`, `Knips.Recording.LiveMath` | Target → filter + geometry → writer → stream; progress; report. The live-effect arithmetic is neutral and tested |
 | Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
 | Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.MovieTrim`, `Knips.Export.Pipeline` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; AVAssetExportSession passthrough trim; the shared GIF/APNG pipeline |
@@ -545,9 +545,10 @@ machine:
      │  Record Display / Record Window / Record Last Region ───▶     │
      │◀─────────────────────────────────────────────────────────────┘
 
-  asIdle ──Record System Audio──▶ asIdle   (a self-transition: the command
-         ──Zoom on Click───────▶            is legal only where the stream
-         ──Follow Mouse────────▶            configuration is not yet fixed)
+  asIdle ──Audio ▸ System Audio─▶ asIdle  (a self-transition: the command
+         ──Audio ▸ Microphone──▶           is legal only where the stream
+         ──Zoom on Click───────▶           configuration is not yet fixed)
+         ──Follow Mouse────────▶
 ```
 
 `Knips.App.State` owns the transition table, the status-item title, the
@@ -562,7 +563,7 @@ an `objcclass`:
 
 | Runtime class | Superclass | Methods |
 | --- | --- | --- |
-| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `recordWindow:`, `recordLastRegion:`, `toggleSystemAudio:`, `toggleZoomOnClick:`, `toggleFollowMouse:`, `liveTick:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `toggleCamera:`, `toggleCameraShape:`, `restoreCamera:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:`, `exportGif:`, `revealRecording:`, `closePlayback:`, `menuNeedsUpdate:` |
+| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `recordWindow:`, `recordLastRegion:`, `toggleSystemAudio:`, `toggleMicrophone:`, `toggleZoomOnClick:`, `toggleFollowMouse:`, `liveTick:`, `cameraRideTick:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `toggleCamera:`, `toggleCameraShape:`, `restoreCamera:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:`, `exportGif:`, `revealRecording:`, `closePlayback:`, `menuNeedsUpdate:` |
 | `KnipsOverlayView` | `NSView` | `drawRect:`, `mouseDown:`, `mouseDragged:`, `mouseUp:`, `keyDown:`, `acceptsFirstResponder` |
 | `KnipsOverlayWindow` | `NSWindow` | `canBecomeKeyWindow` (a borderless window answers NO, and then Esc never reaches the view) |
 | `KnipsCameraView` | `NSView` | `acceptsFirstMouse:` (Knips is an Accessory app, so without it the first click on the camera window is eaten as the activating click and dragging takes two); `mouseDown:`, `mouseDragged:`, `mouseUp:` — the drag, done here rather than by `movableByWindowBackground` so the corner snap has a drag end; `snapTick:` — one step of the snap ease, so the ease needs no nested run loop and no second runtime class |
@@ -652,11 +653,10 @@ that itself: it fires an `OnClosed` event at the end of
 window unit knows about `NSWindow`; the activation policy is the app's
 business.
 
-**Remembered settings.** Two, both in `NSUserDefaults`:
-`KnipsRecordSystemAudio` (the checkbox) and `KnipsLastRegion*` (the
-display id and rectangle behind *Record Last Region*). The region is
 **Remembered settings.** Four, all in `NSUserDefaults`:
-`KnipsRecordSystemAudio` (the checkbox), `KnipsZoomOnClick` and
+`KnipsAudioSystem` and `KnipsAudioMicrophone` (the Audio submenu's
+two checkboxes, [below](#the-audio-submenu)),
+`KnipsZoomOnClick` and
 `KnipsFollowMouse` (both off by default, which is what `boolForKey:`
 answers for a key that was never written, so nothing registers defaults;
 see [Live effects](#live-effects-zoom-on-click-and-follow-mouse)), and
@@ -702,6 +702,162 @@ stops it, and Quit finalises any session still open before calling
 has installed the main menu ([below](#dock-and-the-main-menu)): it runs
 the same `quitKnips:`, with the same finalisation and the same refusal
 mid-export.
+
+### The Audio submenu
+
+*Audio* is a submenu holding **two independent checkboxes** — *System
+Audio* and *Microphone* — which between them offer all four of the
+`TAudioMode`s the recorder has taken since the CLI grew `--audio`:
+neither ticked is `none`, one is that one, both is `both`
+(`AudioModeFromToggles` in `Knips.App.State`, tested). They sit behind
+one *Audio* item rather than loose in the root menu because between them
+they are one setting — what the recording listens to.
+
+It replaces a single *Record System Audio* checkbox, and the reason is a
+regression in experience rather than a bug: the app offered exactly one
+of the four modes, so a user who **spoke** into a take got a silent file
+and concluded that Knips does not record audio. It did; it just never
+offered them the source they meant.
+
+Each checkbox is its own selector (`toggleSystemAudio:`,
+`toggleMicrophone:`) and its own command (`acToggleSystemAudio`,
+`acToggleMicrophone`), both idle-only for the same reason the
+live-effect checkboxes are: what a stream captures is fixed when the
+capture starts, and a source switched on mid-take would silently do
+nothing.
+
+**One key each, and a one-way migration.** `KnipsAudioSystem` and
+`KnipsAudioMicrophone` — separate keys written by separate procedures,
+which is the rule the cross-write incident below established and not a
+stylistic choice. `objectForKey:` separates *never written* from a
+legitimate `False`, and only a never-written `KnipsAudioSystem` consults
+the Boolean this replaced: `KnipsRecordSystemAudio` true starts the app
+with **System Audio** ticked, so nobody who had the box ticked finds the
+next launch recording silence. That "has the key" test is load-bearing
+in the other direction too — without it, a user who deliberately
+switched system audio *off* would have the stale legacy key switch it
+back on at every launch. The old key is read once and never written, and
+deliberately not deleted: `defaults` is a public interface and a
+downgrade should still find what it wrote. Measured on device: with
+`KnipsRecordSystemAudio=true` and no new key, the app launches with
+*System Audio* ticked and *Microphone* clear.
+
+**Microphone availability, in two independent layers.**
+
+1. *Does this Mac have it at all.* `SCStreamConfiguration.captureMicrophone`
+   is macOS 15 and the project floor is 13, so `StreamSupportsMicrophone`
+   is asked once at `Setup`. Where it answers NO the *Microphone* item is
+   disabled, the reason rides in the title (`Microphone — needs macOS
+   15`) as well as in a tooltip — a greyed-out line that does not say why
+   is what users file bugs about — and a stored tick is dropped at load,
+   so a checkbox that cannot work never starts out ticked. *System Audio*
+   has no equivalent: it is macOS 13, like the floor.
+2. *May this binary use it.* The Microphone TCC grant is separate from
+   Screen Recording and separate from the Camera, and **a source that
+   delivers nothing is invisible from inside ScreenCaptureKit** —
+   `setCaptureMicrophone:` takes, `startCapture` succeeds, and the
+   microphone output simply never produces a sample. That is the same
+   shape the camera's denied grant takes
+   ([spike 0001](spikes/0001-runtime-objc-class.md)), and left alone it
+   produces exactly the failure this feature exists to end: a finished
+   file with a silent second track and no explanation anywhere.
+
+   `Knips.Capture.Stream.MicrophoneAccess` **warns**, and it warns at the
+   moment the user ticks *Microphone* — not when a recording starts. Both
+   halves of that are deliberate.
+
+   *Warns rather than refuses*, because on macOS 26 a signed bundle whose
+   AVFoundation microphone status read *NotDetermined* recorded 421 760
+   microphone samples at −39 dB, with no prompt answered, and the status
+   still read *NotDetermined* afterwards. ScreenCaptureKit's
+   `captureMicrophone` plainly does not go through the gate that API
+   reports, so refusing on it could refuse a recording that would have
+   worked — a worse failure than the one being prevented.
+
+   *At toggle time*, because that is the only moment it can be seen. The
+   app is idle, so the menu is attached and the `Last error:` line is on
+   screen; the same warning issued as a recording starts would be written
+   while the menu is detached, and would fire again after every recording
+   whose microphone had in fact worked.
+
+**The guarantee is the sample count**, because it needs to know nothing
+about which gate said no — and it also covers a grant revoked
+mid-recording, a device unplugged, and any future framework refusing in
+some way nothing here anticipates. When a recording asked for the
+microphone and `Report.AppendedMicrophoneSamples` is 0,
+`FinishRecording` records an error. Never a `Fail` — the video is
+finished and on disk either way.
+
+Which error depends on the *other* three counters. Microphone buffers
+that arrive before the first video frame have no timeline to sit on and
+are dropped and counted (`DroppedMicrophoneEarly`), as are buffers
+arriving while their writer input is not ready. A take short enough to
+park every buffer there has a perfectly good grant, so the message only
+points at System Settings when all three of those counters are zero;
+otherwise it reports the counts and leaves the permission out of it.
+
+### The global stop hotkey
+
+**⌘⇧2 stops a running recording from anywhere.** Kap has the same
+gesture, and it is the one thing a recorder is asked for that the status
+item cannot do: while Knips records, the status item has *no menu*
+(a single click stops it, above), and the window the user is
+demonstrating in is the last place they should have to leave.
+
+`Knips.App.Hotkey` registers it with Carbon's `RegisterEventHotKey` and
+an `InstallEventHandler` on `GetApplicationEventTarget`. **Carbon is the
+point, not an accident of the bindings**: it is the only route to a
+global hotkey that costs no TCC grant. The window server matches the
+chord and posts an event to the registering process, so no key pressed
+anywhere else is ever seen by this app. Both alternatives —
+`NSEvent.addGlobalMonitorForEventsMatchingMask:` and a `CGEventTap` —
+need Input Monitoring, which is a *"Knips wants to read everything you
+type"* dialog in exchange for one shortcut.
+
+The API surface is header-verified against FPC 3.2.2's `univint`
+(`MacOSAll` re-exports `CarbonEvents` and `CarbonEventsCore`) and read
+back at run time by `knips probe`: `kVK_ANSI_2` = 19, `cmdKey` = 256,
+`shiftKey` = 512. `NewEventHandlerUPP` is deliberately **not** used — on
+every architecture this project targets a UPP *is* the function pointer,
+the symbol is not in the framework at all (linking against it fails
+outright, measured), and Apple's header defines the call as the
+identity. The `cdecl` handler is cast straight to `EventHandlerUPP`, and
+carries the same `try..except` every other foreign-frame callback in
+this app does.
+
+**The hotkey fires exactly one thing: a stop.** Not a toggle. A global
+chord that could *start* a recording is a global chord that starts one
+by accident, and the transition table only accepts `acStopRecording` in
+`asRecording` anyway — outside that state the handler runs, finds
+nothing to stop, and returns. It goes through the same `CommandStop` the
+status-item click does, deferred by the same `stopPending:` one-shot, so
+there is one stop path and not two. The handler runs on the main
+thread's run loop, which `NSApplication.run` drives.
+
+The chord is shown on the *Stop Recording* item with `setKeyEquivalent:`
+and a `⌘⇧` modifier mask. That is **display only** — a key equivalent on
+a menu that is detached fires for nobody, which is precisely the state
+the menu is in while a recording runs. What it buys is the one place the
+shortcut can be discovered.
+
+**One measured surprise, and it is why registration success proves
+little.** `RegisterEventHotKey` answers `noErr` for a chord the system
+already owns: registering ⌘⇧3, the screenshot shortcut, returns 0 just
+as ⌘⇧2 does. What the system keeps is the *delivery*, not the
+registration. The case that *is* caught is a second registration by the
+same process — `eventHotKeyExistsErr` (−9878). A failed install is a
+`Last error:` line and nothing more; the app is perfectly usable without
+it. Whether a real keypress arrives is a human check
+(docs/quick-start.md), because this project's test tooling may not
+synthesise input; what `knips probe` and the harness *can* prove is that
+the handler is wired — a `kEventHotKeyPressed` event built and sent to
+`GetApplicationEventTarget` reaches the Pascal callback, is ignored when
+its `EventHotKeyID` is not ours, and stops arriving after `Remove`.
+
+Unregistered on the way out, in `CommandQuit` before anything else:
+`terminate:` never returns, so the destructor is not a place this can
+happen, and a chord left held by a departing process is a chord the next
+Knips cannot have.
 
 **Getting out of a selection.** Inside the overlay, Esc or a click without
 a drag cancel. The overlay sits above the menu bar, so the status item is
@@ -861,7 +1017,44 @@ travelling. There is no nested run loop anywhere in the camera unit.
 same reason *Camera* is. Checked, the window becomes a **square** 180×180
 — a disc needs equal sides — with the layer's corner radius at half the
 side; `resize-aspect-fill` was already cropping, so the switch reads as a
-re-crop rather than a resize. Applied live: the window resizes about its
+re-crop rather than a resize.
+
+**The circle loses the sides; it does not move the middle.** That
+distinction is worth stating because the switch is routinely *reported*
+as moving the centre of the picture. `resize-aspect-fill` scales the
+feed to cover the layer and centres what is left over, so a square layer
+over a wider feed keeps the horizontal centre exactly and discards equal
+slices left and right. A presenter sitting off to one side of the frame
+is inside the 4:3 rectangle and outside the square, which looks like the
+picture moved and is the sides being lost.
+
+Measured on device rather than argued. The camera window was captured by
+window id in both shapes (`screencapture -l`), giving a 480×360 pixel
+rectangle and a 360×360 circle. Sliding a 240×240 patch of the rectangle
+across and scoring SSIM against the middle of the circle peaks **exactly
+at x = 60 px** — which is `(480 − 360) / 2`, the perfectly centred crop —
+and falls away on both sides:
+
+| crop x-offset (px) | 0 | 40 | 56 | 59 | **60** | 61 | 64 | 80 | 120 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| SSIM | .613 | .659 | .729 | .805 | **.832** | .800 | .706 | .608 | .560 |
+
+The peak is one device pixel wide — half a point — so the crop is
+centred to the limit of the measurement. (It is .832 rather than 1.0
+because the two captures are different live frames of a person who
+moved.) There is nothing off-centre to fix; what the switch costs is 25 %
+of the width from each side.
+
+**What the switch does move, by up to a few points, is the window** —
+and only against a screen edge. `SetShape` re-centres and then clamps
+back onto the screen, and a 240-wide rectangle re-centred from a
+180-wide circle sitting `CameraWindowMargin` from the right edge does
+not fit. Measured: a circle at x = 1596 on an 1800-point screen becomes
+a rectangle at x = 1560 rather than the centred 1566, so the visual
+centre shifts 6 points left and the round trip back to a circle lands at
+1590 rather than 1596. Staying on screen is worth more than six points
+of centre, and the alternative — snapping to the nearest corner instead
+— would move it further. Applied live: the window resizes about its
 own centre, clamped back onto the screen, and the layer's frame and radius
 follow. Docked, "onto the screen" means into the region *inset by
 `CameraWindowMargin`* — the same inset the dock and the snap use, so a
@@ -872,17 +1065,152 @@ restore the window by its corner and quietly shift its centre. Persisted under `
 `CameraShapeFromStored`, which treats anything that is not the circle as
 the rectangle — `defaults write` is a public interface.
 
-*Docking into a region.* When a **region** recording starts with the
-camera up, the window moves into the nearest corner *inside* the region,
-inset by the same margin, so the picture-in-picture is composited into the
-file the way Kap does it — still with no compositing code, just a window
-in the right place. `Knips.App` flips the capture region (top-left display
-points) into AppKit's bottom-left space with `RegionScreenRect` and hands
-`TCameraPreview.DockTo` a rectangle; the camera remembers where it was and
-`Undock` puts it back on every stop path (`FinishRecording`, `Fail`, and
-the `StartCapture` failure branch). The move in is a **single
-`setFrame`**, not an ease: the capture is about to open on that frame and
-a camera sliding into place would live in the file for ever.
+*Docking into what is being recorded.* When a recording starts with the
+camera up, the window moves into the nearest corner *inside* the
+rectangle being captured, inset by the same margin, so the
+picture-in-picture is composited into the file the way Kap does it —
+still with no compositing code, just a window in the right place.
+
+- A **region** recording docks into the region. `Knips.App` flips the
+  capture region (top-left display points) into AppKit's bottom-left
+  space with `RegionScreenRect` and hands `TCameraPreview.DockTo` a
+  rectangle.
+- A **window** recording docks into the recorded window's own frame,
+  read straight from the window server with
+  `CGWindowListCopyWindowInfo` (`kCGWindowListOptionIncludingWindow`)
+  and flipped by `WindowBoundsScreenRect` — Quartz's global space has
+  its origin at the *top* left of the primary display. `SCShareableContent`
+  is not used for this: it carries no frame, it is asynchronous, and it
+  pumps the run loop, which the start path and a timer both must not.
+- A **display** recording docks nothing. It already contains the camera
+  wherever it stands.
+
+**A window recording does not put the camera in the file, and that is
+stated rather than implied.** `SCContentFilter.initWithDesktopIndependentWindow:`
+composits that one window and nothing on top of it. Docking there is
+about the *screen*: the presenter wants the picture beside the thing
+they are demonstrating, and a picture-in-picture stranded in the corner
+of a window they have since dragged away is the complaint that produced
+this. For the file, a region recording is the mode that composites.
+
+The camera remembers where it was and `Undock` puts it back on every
+stop path (`FinishRecording`, `Fail`, and the `StartCapture` failure
+branch). The move in is a **single `setFrame`**, not an ease: the
+capture is about to open on that frame and a camera sliding into place
+would live in the file for ever.
+
+*Riding a rectangle that moves.* The dock is once; staying inside is
+continuous, because both docked rectangles move. Follow Mouse pans a
+region across the display, and a recorded window goes wherever the user
+drags it — ScreenCaptureKit's desktop-independent capture follows it
+there. A camera left at the rectangle's *initial* corner is out of shot
+the moment either happens.
+
+`TCameraPreview.RideTo` is one unanimated `setFrame:` per tick, exactly
+what `TRecordingBorder.MoveTo` does for the frame and for the same
+reason: this runs under a live capture, where an ease is an ease in the
+file. It keeps **the corner the dock chose** and travels by exactly the
+rectangle's displacement — deliberately not "the nearest corner of the
+new rectangle", which would teleport the picture across the shot the
+moment the rectangle's midline crossed it. Positions are computed from
+the dock's own rectangle and origin (`CameraRideOrigin` in
+`Knips.App.State`, tested) rather than accumulated tick by tick, so ten
+minutes at thirty hertz drift by nothing.
+
+**Two clocks, because two different things move the two rectangles.**
+
+- A **region** rides the live animator's own tick
+  (`Knips.App.Live.UpdateCamera`), in the same turn that moves the
+  capture and the frame around it — so the three cannot disagree by a
+  frame. The animator gets the camera as a second follower beside the
+  border and asks it nothing: `RideTo` answers for itself whether a ride
+  is live, so a camera that is off, undocked or being dragged costs one
+  call and no window-server traffic.
+- A **window** is polled at 5 Hz (`cameraRideTick:`). Nothing in this
+  process knows when a user drags a window, the poll is a round trip
+  rather than arithmetic on numbers the app already has, and a
+  picture-in-picture a fifth of a second behind a window drag reads as
+  *it follows* while thirty hertz of window-server traffic buys nothing
+  anybody can see. A window that has **gone** — closed mid-recording —
+  answers with zero entries, and the ride stops rather than chasing a
+  rectangle that no longer exists, leaving the camera where it last was.
+  Not an error: closing a window mid-take is the user's business.
+
+Both rides were measured on device by driving the app under `lldb` (no
+input synthesised — the actions are the app's own selectors, and the
+recorded window is one created in-process and moved with `setFrame…`):
+
+| what moved | window moved by | camera moved by |
+| --- | --- | --- |
+| recorded window | +200, +150 | +200, +150 |
+| recorded window | −320, −90 | −320, −90 |
+| recorded window | 0, 0 | 0, 0 (the epsilon) |
+| panned region | border −182, +298 | camera −182, +298 |
+| panned region | border +10, +7 | camera +10, +7 |
+| panned region | border +554, −192 | camera +554, −192 |
+| panned region | border −477, 0 | camera −477, 0 |
+
+The region rows are the point of the shared tick: the camera's
+displacement equals the *frame's* at every sample, because both are moved
+in the turn that moved the capture. The dock itself lands where the maths
+says — a camera whose home is (1596, 926) docking into a window at
+(300, 300, 900, 628) goes to (996, 724), the top-right corner inside it
+inset by `CameraWindowMargin`. And the stop restores it to (1596, 926)
+exactly.
+
+**The followers are positioned from the animator's INTENT, and that is
+measured to be right — a plausible-sounding alternative was tried and
+rejected.** The worry was a two-timeline problem: `UpdateSourceRect` is
+fire-and-forget and coalescing, so the rectangle the animator intends
+must run ahead of the rectangle the capture is reading from, and a camera
+placed from the intent would then be displaced in the *file* by that
+difference, every frame — a picture-in-picture visibly swimming around
+its corner. The fix would be to move the followers on the rectangle whose
+`updateConfiguration:` completion had landed, so window and content share
+one clock.
+
+It was built and measured, and it is wrong. Recording a region ride over
+a flat backdrop makes the camera window's left edge the only structure in
+the picture, so a threshold crossing tracks it to a fraction of a pixel:
+
+| followers positioned from | camera edge deviation in the file |
+| --- | --- |
+| the animator's intent (shipped) | **max 1.4 px = 0.7 pt**, mean 0.11 px |
+| the last *completed* update | **max 162 px = 81 pt**, 104 frames >8 px off |
+
+`updateConfiguration:` takes effect when it is **issued**; its completion
+handler is a later acknowledgement, not the moment the compositor
+switches. So the window server's `setFrame:` and ScreenCaptureKit's
+reconfiguration, both issued from the same tick, already land together —
+and deliberately delaying the window by one completion *introduces* a
+displacement of one tick's worth of pan, which at the start of a fast
+pan is the better part of a hundred points. The instrument that caught
+this also caught an earlier version of itself being wrong: an
+"applied rectangle" poll that waited for nothing to be in flight fired
+twice a second instead of thirty times, and reported a 626 pt lag that
+did not exist. Logging ScreenCaptureKit's own sent/completed counters
+alongside — they advance every tick, with zero refusals — is what showed
+the framework was never the slow part.
+
+What that investigation *did* find worth changing is in
+`TCameraPreview.ApplyFrame`: it used to hand the preview layer a new
+frame on every call, including the up-to-thirty-a-second calls that only
+move the window. Re-setting an `AVCaptureVideoPreviewLayer`'s frame to
+the value it already has is not a no-op — it is a geometry change that
+recomputes how the video sits in its bounds, interleaved with frames
+arriving from the capture session. A move now touches the window and
+nothing else; the layer is handed a frame only on a real size change,
+which is a shape switch and nothing else.
+
+**Three owners, one frame, and they take turns.** A drag, the corner
+snap that follows one, and the ride. `RideTo` refuses outright while
+either of the other two has the window, and marks itself *stale*; the
+next tick then re-anchors on wherever they left it. So a picture dragged
+to the other corner mid-recording carries on riding **from there**
+instead of being yanked back — and a shape change, which also moves the
+window, is absorbed the same way. Zoom moves nothing: it crops inside
+the same on-screen rectangle, so neither the frame nor the camera has
+any business moving for it.
 
 The move back is eased, and **where** it happens is load-bearing.
 `UndockCamera` runs *after* `FSession.FinishCapture` returns, not before
@@ -899,17 +1227,25 @@ finish"), so after it returns there is nothing left for the movement to
 land in. The border can go early because it is a static window being
 removed; a window in *motion* cannot.
 
-Three deliberate limits. Display and window recordings do nothing (a
-display capture already contains the camera wherever it stands, and a
-window capture would not contain it whatever we did). A camera that is
-**off** does nothing. And the dock happens **once, at the start**: a
-Follow Mouse recording pans its region across the display and the camera
-does not chase it, because a picture-in-picture that slides around by
-itself mid-take is worse than one that ends up outside a rectangle the
-user is steering. While docked, a drag snaps to the *region's* corners
-rather than the screen's; the position restored on stop is still the
-pre-recording one, and that is also what `SaveOrigin` writes out, so a
-recording can never quietly rewrite where the camera lives.
+A camera that is **off** does nothing at all, on every path. While
+docked, a drag snaps to the *docked rectangle's* corners rather than the
+screen's, and the rectangle a drop snaps to follows the ride, so
+dragging the picture during a pan lands it in a corner of where the
+region is **now**.
+
+**The position restored on stop is the pre-recording one, and it is
+restored onto the screen that holds it.** `Undock` clamps `FUndocked`
+against the visible frame of the screen that actually contains it
+(`HomeFrame`, the same `IsCameraOriginUsable` test `RestoredOrigin`
+applies to a position read out of `NSUserDefaults`) — not against the
+screen the window happens to be on, which with the dock just cleared is
+still the *recorded* one. Without that, a camera the user keeps on
+display B and a region recorded on display A came back squeezed onto A —
+and because `Hide` writes the restored position out, the next launch
+kept it there. A recording had quietly rewritten the camera's home,
+which is the one thing the `FUndocked`/`SaveOrigin` split exists to
+prevent. Only when no attached screen holds it — the display was
+unplugged mid-recording — does the current screen win.
 
 `startRunning` blocks for the better part of a second while the camera
 warms up. This program has no `cthreads` and creates no queues of its
@@ -1447,7 +1783,7 @@ the recording rather than streaming minutes into a dead file.
 **Permissions.** The microphone is a second TCC grant, separate from
 Screen Recording. `Knips.app` carries `NSMicrophoneUsageDescription` —
 a bundled process that asks without it is killed rather than prompted;
-the key is groundwork, since the menu-bar app has no audio surface yet.
+the Audio ▸ Microphone checkbox is the surface that needs it.
 The bare CLI binary has no `Info.plist` and inherits the grant of the
 app responsible for it, which is the terminal it was launched from.
 

@@ -48,11 +48,13 @@ uses
   CocoaAll,
   Knips.App.Border,
   Knips.App.Camera,
+  Knips.App.Hotkey,
   Knips.App.Live,
   Knips.App.Overlay,
   Knips.App.Playback,
   Knips.App.State,
   Knips.Capture.ShareableContent,
+  Knips.Capture.Stream,
   Knips.ObjC.Runtime,
   Knips.Options,
   Knips.Recording,
@@ -115,6 +117,7 @@ const
   RecordWindowSelector = 'recordWindow:';
   RecordLastRegionSelector = 'recordLastRegion:';
   ToggleSystemAudioSelector = 'toggleSystemAudio:';
+  ToggleMicrophoneSelector = 'toggleMicrophone:';
   StopRecordingSelector = 'stopRecording:';
   CancelSelectionSelector = 'cancelSelection:';
   RevealRecordingsSelector = 'revealRecordings:';
@@ -131,6 +134,13 @@ const
   // or Follow Mouse is running. On the same target as everything else, so
   // the feature adds no runtime-built class of its own.
   LiveTickSelector = 'liveTick:';
+  // The camera ride's own tick, and only for a WINDOW recording. A region
+  // recording rides on the live animator's tick instead, because the
+  // thing that moves the region is the animator itself and the camera has
+  // to move in the same turn as the frame around it. Nothing moves a
+  // recorded *window* but the user, so that one is polled — see
+  // CameraRideTickSeconds.
+  CameraRideSelector = 'cameraRideTick:';
   // KnipsAppTarget doubles as the Record Window submenu's NSMenuDelegate;
   // the list is rebuilt when AppKit is about to show it, so it is never
   // stale and never costs a ScreenCaptureKit query the user did not ask
@@ -141,7 +151,6 @@ const
   RecordDisplayTitle = 'Record Display';
   RecordWindowTitle = 'Record Window';
   RecordLastRegionTitle = 'Record Last Region';
-  SystemAudioTitle = 'Record System Audio';
   StopRecordingTitle = 'Stop Recording';
   CancelSelectionTitle = 'Cancel selection';
   RevealRecordingsTitle = 'Recordings folder';
@@ -193,7 +202,9 @@ const
   // NSUserDefaults keys — everything the app remembers between launches
   // lives under one of these (plus the camera's and the status item's
   // own keys declared where they are used).
-  SystemAudioKey = 'KnipsRecordSystemAudio';
+  SystemAudioKey = SystemAudioDefaultsKey;
+  MicrophoneKey = MicrophoneDefaultsKey;
+  LegacySystemAudioKey = LegacySystemAudioDefaultsKey;
   ZoomOnClickKey = ZoomOnClickDefaultsKey;
   FollowMouseKey = FollowMouseDefaultsKey;
   LastRegionDisplayKey = 'KnipsLastRegionDisplay';
@@ -236,6 +247,16 @@ const
   // the previous snapshot was taken too early to contain the window.
   BorderVisibilityAttempts = 3;
 
+  // How often the camera ride polls a recorded *window*'s frame. Five
+  // times a second, not thirty: nothing moves a window but a hand on a
+  // trackpad, the poll is a CGWindowListCopyWindowInfo round trip rather
+  // than arithmetic on numbers the app already has, and a
+  // picture-in-picture that lands a fifth of a second behind a window
+  // drag reads as "it follows" while thirty hertz of window-server
+  // traffic buys nothing anybody can see. A region ride is free of this
+  // trade entirely — it rides the live animator's own tick.
+  CameraRideTickSeconds = 0.2;
+
 type
   // One line of the Record Window submenu, cached between hovers so the
   // framework query does not run on every one.
@@ -255,7 +276,11 @@ type
     FWindowItem: NSMenuItem;
     FWindowMenu: NSMenu;
     FLastRegionItem: NSMenuItem;
+    // The Audio submenu and its two checkboxes.
+    FAudioItem: NSMenuItem;
+    FAudioMenu: NSMenu;
     FSystemAudioItem: NSMenuItem;
+    FMicrophoneItem: NSMenuItem;
     FZoomOnClickItem: NSMenuItem;
     FFollowMouseItem: NSMenuItem;
     FStopItem: NSMenuItem;
@@ -274,12 +299,20 @@ type
     // rewrite the status item and would be a strange place to hang a
     // thirty-hertz animation.
     FLiveTimer: NSTimer;
+    // The camera ride's timer, alive only while a WINDOW recording has a
+    // docked camera. A region ride needs no timer of its own: it happens
+    // inside the live animator's tick, in the same turn as the frame.
+    FCameraRideTimer: NSTimer;
+    // The recorded window the ride is following, and the AppKit-space
+    // rectangle it was last seen at. 0 when nothing is being ridden.
+    FRideWindowID: Cardinal;
     FLive: TLiveAnimator;
     FOverlay: TSelectionOverlay;
     FCamera: TCameraPreview;
     FBorder: TRecordingBorder;
     FPlayback: TPlaybackWindow;
     FSession: TRecordingSession;
+    FHotKey: TStopHotKey;
     FStartedAt: TDateTime;
     FLastError: string;
     // Own process id, so the Record Window submenu does not offer the
@@ -292,8 +325,16 @@ type
     FWindowEntriesAt: TDateTime;
     FWindowEntriesValid: Boolean;
     FWindowListFailed: Boolean;
-    // Persisted preferences.
+    // Persisted preferences. The two audio checkboxes are independent
+    // Booleans and compose to the one TAudioMode the recorder takes;
+    // AudioModeFromToggles is the whole mapping.
     FSystemAudio: Boolean;
+    FMicrophone: Boolean;
+    // Whether this ScreenCaptureKit has captureMicrophone at all (macOS
+    // 15+; the project floor is 13). Asked once at Setup — it allocates
+    // an SCStreamConfiguration to ask — and it decides whether the
+    // Microphone checkbox can be ticked at all.
+    FSupportsMicrophone: Boolean;
     FZoomOnClick: Boolean;
     FFollowMouse: Boolean;
     FHasLastRegion: Boolean;
@@ -307,6 +348,7 @@ type
     function AddMenuItem(const ATitle, ASelector: string): NSMenuItem;
     procedure BuildMenu;
     procedure BuildWindowMenu;
+    procedure BuildAudioMenu;
     procedure AddInertItem(AMenu: NSMenu; const ATitle: string);
     function WindowEntriesFresh: Boolean;
     procedure RefreshWindowEntries;
@@ -314,6 +356,7 @@ type
     procedure RecordError(const AMessage: string);
     procedure LoadPreferences;
     procedure StoreSystemAudio;
+    procedure StoreMicrophone;
     procedure StoreZoomOnClick;
     procedure StoreFollowMouse;
     procedure StoreLastRegion;
@@ -330,13 +373,25 @@ type
     // the border could not be shown; the recording then runs without one.
     function ShowBorderForPending: Cardinal;
     procedure HideBorder;
-    // Moves a visible camera window into the corner of the region about
-    // to be recorded, so the picture-in-picture is composited into the
-    // file the way Kap does it. Nothing happens for a display or window
-    // recording, or when the camera is off. UndockCamera puts it back and
-    // is safe on every stop path, docked or not.
+    // Moves a visible camera window into the corner of the rectangle
+    // about to be recorded, so the picture-in-picture goes into the file
+    // the way Kap does it. A region recording docks into the region; a
+    // window recording docks into the window's own frame. A display
+    // recording already contains the camera wherever it stands, and a
+    // camera that is off has nothing to move. UndockCamera puts it back
+    // and is safe on every stop path, docked or not.
     procedure DockCameraForPending;
     procedure UndockCamera;
+    // The AppKit-space frame of one on-screen window, straight out of
+    // CGWindowListCopyWindowInfo. False when the window has gone — which
+    // for the ride below is how a recorded window being closed mid-take
+    // stops it, rather than by leaving the camera parked on nothing.
+    function WindowScreenRect(AWindowID: Cardinal;
+      out ARect: TCameraRect): Boolean;
+    // Starts and stops the window ride's timer. Region recordings never
+    // touch either: they ride the live animator's tick.
+    procedure StartCameraRide(AWindowID: Cardinal);
+    procedure StopCameraRide;
     procedure ShowPlayback(const APath: string; APixelWidth,
       APixelHeight, AScale: Integer);
     procedure HandlePlaybackError(const AMessage: string);
@@ -377,6 +432,7 @@ type
     procedure CommandRecordWindow(AWindowID: Cardinal);
     procedure CommandRecordLastRegion;
     procedure CommandToggleSystemAudio;
+    procedure CommandToggleMicrophone;
     procedure CommandToggleZoomOnClick;
     procedure CommandToggleFollowMouse;
     procedure CommandStop;
@@ -397,6 +453,8 @@ type
     procedure Tick;
     // One turn of the live animator; the 30 Hz timer's target.
     procedure LiveTick;
+    // One turn of the window ride; the 5 Hz timer's target.
+    procedure CameraRideTick;
     procedure StartPending;
     procedure StopPending;
     // Reports a failure the way every other failure is reported and puts
@@ -627,6 +685,22 @@ begin
   end;
 end;
 
+procedure TargetToggleMicrophone(ASelf: id; ACommand: SEL;
+  ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandToggleMicrophone;
+  except
+    on E: Exception do
+      HandleBodyException(Controller, ToggleMicrophoneSelector, E);
+  end;
+end;
+
 procedure TargetToggleZoomOnClick(ASelf: id; ACommand: SEL;
   ASender: id); cdecl;
 var
@@ -813,6 +887,25 @@ begin
   end;
 end;
 
+// Five times a second while a window recording has a docked camera.
+// Deliberately on the camera's error path rather than Fail's, exactly
+// like the two camera menu bodies: the ride is cosmetic, and a window
+// whose frame could not be read must not knock a live recording to idle.
+procedure TargetCameraRideTick(ASelf: id; ACommand: SEL; ATimer: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CameraRideTick;
+  except
+    on E: Exception do
+      HandleCameraBodyException(Controller, CameraRideSelector, E);
+  end;
+end;
+
 procedure TargetToggleCamera(ASelf: id; ACommand: SEL; ASender: id); cdecl;
 var
   Controller: TAppController;
@@ -955,11 +1048,13 @@ begin
       @TargetRecordLastRegion);
     AddTargetMethod(Builder, ToggleSystemAudioSelector,
       @TargetToggleSystemAudio);
+    AddTargetMethod(Builder, ToggleMicrophoneSelector, @TargetToggleMicrophone);
     AddTargetMethod(Builder, ToggleZoomOnClickSelector,
       @TargetToggleZoomOnClick);
     AddTargetMethod(Builder, ToggleFollowMouseSelector,
       @TargetToggleFollowMouse);
     AddTargetMethod(Builder, LiveTickSelector, @TargetLiveTick);
+    AddTargetMethod(Builder, CameraRideSelector, @TargetCameraRideTick);
     AddTargetMethod(Builder, MenuNeedsUpdateSelector, @TargetMenuNeedsUpdate);
     AddTargetMethod(Builder, ExportGifSelector, @TargetExportGif);
     AddTargetMethod(Builder, RevealRecordingSelector, @TargetRevealRecording);
@@ -1212,6 +1307,11 @@ destructor TAppController.Destroy;
 begin
   StopElapsedTimer;
   StopLive;
+  StopCameraRide;
+  // Before the target goes: the hotkey's handler talks to this object,
+  // and a chord left registered by a process on its way out is a chord
+  // the next Knips cannot have.
+  FreeAndNil(FHotKey);
   if FTarget <> nil then
     SetPointerIvar(FTarget, OwnerIvarName, nil);
   FreeAndNil(FLive);
@@ -1239,6 +1339,14 @@ begin
     FWindowMenu.setDelegate(nil);
     FWindowMenu.release;
     FWindowMenu := nil;
+  end;
+  if FAudioMenu <> nil then
+  begin
+    // The submenu retains its four items; this balances the alloc. The
+    // items' target is the KnipsAppTarget released below, so the menu has
+    // to go first — the same order the main menu is torn down in.
+    FAudioMenu.release;
+    FAudioMenu := nil;
   end;
   if FMenu <> nil then
   begin
@@ -1303,6 +1411,56 @@ begin
   AddInertItem(FWindowMenu, NoWindowsTitle);
 end;
 
+{ The Audio submenu: two independent checkboxes, System Audio and
+  Microphone, which between them offer all four TAudioModes — neither is
+  none, one is that one, both is both.
+
+  *Record System Audio* was not wrong so much as incomplete. The recorder
+  has captured the microphone since the CLI grew `--audio=mic`, and the
+  app offered exactly one of the four modes, so a user who *spoke* into a
+  take got a silent file and reasonably concluded that Knips does not
+  record audio. Two checkboxes say what is on offer; a submenu is where
+  they live because between them they are one setting — what the
+  recording listens to.
+
+  Built once, not rebuilt on every open: unlike the window list there is
+  nothing here that can go stale except the checkmarks and the enabled
+  flags, and RefreshStatusItem already rewrites those.
+
+  Microphone is disabled where ScreenCaptureKit has no captureMicrophone
+  — macOS 15, against a project floor of 13 — and carries the reason in
+  the title *and* in a tooltip. A greyed-out line that does not say why
+  is the thing users file bugs about. }
+
+procedure TAppController.BuildAudioMenu;
+
+  function AddAudioItem(const ATitle, ASelector: string): NSMenuItem;
+  begin
+    Result := NSMenuItem(NSMenuItem.alloc.initWithTitle_action_keyEquivalent(
+      PascalToNSString(ATitle), SelectorNamed(ASelector),
+      PascalToNSString('')));
+    Result.setTarget(FTarget);
+    FAudioMenu.addItem(Result);
+    Result.release;
+  end;
+
+begin
+  FAudioMenu := NSMenu(NSMenu.alloc.initWithTitle(
+    PascalToNSString(AudioMenuTitle)));
+  // Same as the root menu: the controller decides what is legal, not
+  // AppKit's own validation.
+  FAudioMenu.setAutoenablesItems(False);
+  FSystemAudioItem := AddAudioItem(SystemAudioMenuTitle,
+    ToggleSystemAudioSelector);
+  FMicrophoneItem := AddAudioItem(
+    MicrophoneMenuItemTitle(FSupportsMicrophone),
+    ToggleMicrophoneSelector);
+  if not FSupportsMicrophone then
+    FMicrophoneItem.setToolTip(PascalToNSString(
+      'ScreenCaptureKit on this Mac has no microphone capture; it needs '
+      + 'macOS 15 or newer'));
+end;
+
 procedure TAppController.BuildMenu;
 begin
   FMenu := NSMenu(NSMenu.alloc.initWithTitle(PascalToNSString(MenuTitle)));
@@ -1319,6 +1477,14 @@ begin
   FLastRegionItem := AddMenuItem(RecordLastRegionTitle,
     RecordLastRegionSelector);
   FStopItem := AddMenuItem(StopRecordingTitle, StopRecordingSelector);
+  // Display only. The real trigger is the Carbon hotkey in
+  // Knips.App.Hotkey, and it has to be, because while a recording runs
+  // this menu is *detached* from the status item (a single click stops —
+  // Kap's gesture) and a key equivalent on a menu nobody can open fires
+  // for nobody. What this buys is the one place the shortcut can be
+  // discovered: the item it belongs to.
+  FStopItem.setKeyEquivalent(PascalToNSString(StopHotKeyKeyEquivalent));
+  FStopItem.setKeyEquivalentModifierMask(NSCommandKeyMask or NSShiftKeyMask);
   // Only reachable when the overlay failed to come up — a live overlay
   // covers the menu bar, and inside it Esc or a stray click cancel.
   FCancelItem := AddMenuItem(CancelSelectionTitle, CancelSelectionSelector);
@@ -1340,7 +1506,11 @@ begin
     ToggleZoomOnClickSelector);
   FFollowMouseItem := AddMenuItem(FollowMouseMenuTitle,
     ToggleFollowMouseSelector);
-  FSystemAudioItem := AddMenuItem(SystemAudioTitle, ToggleSystemAudioSelector);
+  // A submenu item carries no action of its own, exactly like Record
+  // Window; the two checkboxes inside carry their own selectors.
+  FAudioItem := AddMenuItem(AudioMenuTitle, '');
+  BuildAudioMenu;
+  FAudioItem.setSubmenu(FAudioMenu);
   FMenu.addItem(NSMenuItem.separatorItem);
   FRevealItem := AddMenuItem(RevealRecordingsTitle, RevealRecordingsSelector);
   FErrorItem := AddMenuItem(ErrorMenuTitle(''), '');
@@ -1474,6 +1644,8 @@ begin
 end;
 
 function TAppController.Setup(out AError: string): Boolean;
+var
+  HotKeyError: string;
 begin
   Result := False;
   AError := '';
@@ -1496,6 +1668,9 @@ begin
   SetPointerIvar(FTarget, OwnerIvarName, Self);
 
   FProcessID := NSProcessInfo.processInfo.processIdentifier;
+  // Before LoadPreferences, which needs it to decide whether a stored
+  // microphone mode is still reachable on this Mac.
+  FSupportsMicrophone := StreamSupportsMicrophone;
   LoadPreferences;
 
   // Seed the item's position once, before AppKit reads it: without a
@@ -1530,6 +1705,16 @@ begin
   FBorder := TRecordingBorder.Create;
   FBorder.OnError := HandleOverlayError;
 
+  // The global stop hotkey. A failure here is a Last error and nothing
+  // more: the app is perfectly usable without it — one click on the
+  // status item stops a recording — and refusing to start over a
+  // keyboard shortcut would be absurd.
+  FHotKey := TStopHotKey.Create;
+  FHotKey.OnPressed := CommandStop;
+  FHotKey.OnError := HandleOverlayError;
+  if not FHotKey.Install(HotKeyError) then
+    RecordError(HotKeyError);
+
   RefreshStatusItem;
   // Deferred, not inline: starting an AVCaptureSession blocks for the
   // better part of a second, and the status item should be in the menu
@@ -1549,7 +1734,26 @@ var
   Stored: TCaptureRegion;
 begin
   Defaults := NSUserDefaults.standardUserDefaults;
-  FSystemAudio := Defaults.boolForKey(PascalToNSString(SystemAudioKey));
+  // objectForKey: separates "never written" from a legitimate False,
+  // which is the whole of the migration: only an absent KnipsAudioSystem
+  // consults the Boolean this setting replaced, and once
+  // StoreSystemAudio has written the new key the old one is never read
+  // again. The old key is deliberately left where it is rather than
+  // deleted; `defaults` is a public interface and a downgrade should
+  // still find what it wrote.
+  FSystemAudio := MigratedSystemAudio(
+    Defaults.objectForKey(PascalToNSString(SystemAudioKey)) <> nil,
+    Defaults.boolForKey(PascalToNSString(SystemAudioKey)),
+    Defaults.boolForKey(PascalToNSString(LegacySystemAudioKey)));
+  // No migration for the microphone: there was nothing to migrate from,
+  // and False is what boolForKey: answers for a key never written.
+  FMicrophone := Defaults.boolForKey(PascalToNSString(MicrophoneKey));
+  // A stored microphone tick on a Mac whose ScreenCaptureKit has no
+  // microphone capture would refuse every recording it started. Drop it
+  // rather than let a checkbox that cannot work stay ticked; system
+  // audio, which is macOS 13 like the project floor, is untouched.
+  if not FSupportsMicrophone then
+    FMicrophone := False;
   // Both default to False, which is what boolForKey: answers for a key
   // that has never been written — no registerDefaults: needed.
   FZoomOnClick := Defaults.boolForKey(PascalToNSString(ZoomOnClickKey));
@@ -1579,10 +1783,22 @@ begin
   end;
 end;
 
+// One key each, and deliberately not one procedure writing both — see
+// the note on StoreZoomOnClick below for the incident that rule comes
+// from. The Boolean these replaced is read exactly once, by the
+// migration in LoadPreferences and only when KnipsAudioSystem has never
+// been written, so writing it back here would be writing a value nothing
+// reads in a shape that cannot express the microphone at all.
 procedure TAppController.StoreSystemAudio;
 begin
   NSUserDefaults.standardUserDefaults.setBool_forKey(ObjCBOOL(FSystemAudio),
     PascalToNSString(SystemAudioKey));
+end;
+
+procedure TAppController.StoreMicrophone;
+begin
+  NSUserDefaults.standardUserDefaults.setBool_forKey(ObjCBOOL(FMicrophone),
+    PascalToNSString(MicrophoneKey));
 end;
 
 // One key each, and deliberately not one procedure writing both.
@@ -1651,26 +1867,53 @@ begin
     FBorder.Hide;
 end;
 
-{ Docking the camera into the region being recorded. Kap composes the
-  picture-in-picture into the file; Knips does no compositing at all (see
-  the header of Knips.App.Camera), so the equivalent is to *put the
-  window inside the rectangle* and let ScreenCaptureKit find it there.
+{ Docking the camera into the rectangle being recorded, and riding it.
+  Kap composes the picture-in-picture into the file; Knips does no
+  compositing at all (see the header of Knips.App.Camera), so the
+  equivalent is to *put the window inside the rectangle* and let
+  ScreenCaptureKit find it there.
 
-  Region recordings only. A display recording already contains the camera
-  wherever it stands, and a window recording captures one window and would
-  not contain it whatever we did — moving it there would be theatre.
+  A region recording docks into the region. A window recording docks into
+  the recorded window's own frame — which is where the user wants the
+  picture whether or not it lands in the file, and for a window recording
+  it does not: SCContentFilter.initWithDesktopIndependentWindow: composits
+  that one window and nothing on top of it, measured (docs/architecture.md,
+  "Docking"). A display recording does nothing at all, because it already
+  contains the camera wherever it stands.
 
-  Once, at the start. A Follow Mouse recording pans its region across the
-  display and the camera deliberately does not follow: a
-  picture-in-picture that slides around by itself mid-take is worse than
-  one that ends up outside a rectangle the user is steering. }
+  And the rectangle moves. Follow Mouse pans a region; a recorded window
+  goes wherever the user drags it, and ScreenCaptureKit's
+  desktop-independent capture follows it there. A camera left at the
+  rectangle's *initial* corner is out of shot the moment either happens,
+  which is the bug the ride fixes. Two clocks drive it, because two very
+  different things move the two rectangles:
+
+  - a region rides the live animator's own tick, in the same turn that
+    moves the capture and the frame around it, so the three cannot
+    disagree by a frame (Knips.App.Live.UpdateCamera);
+  - a window is polled, five times a second, because nothing in this
+    process knows when a user drags a window and asking the window server
+    is a round trip rather than arithmetic (CameraRideTick below). }
 
 procedure TAppController.DockCameraForPending;
 var
   ScreenFrame: NSRect;
+  WindowRect: TCameraRect;
 begin
   if (FCamera = nil) or not FCamera.Visible then
     Exit;
+  if FPendingWindowID <> 0 then
+  begin
+    // A window recording. The window's frame is the rectangle, and it is
+    // read from the window server rather than from ScreenCaptureKit:
+    // SCShareableContent carries no frame, and asking it would pump the
+    // run loop on the one path that must not.
+    if not WindowScreenRect(FPendingWindowID, WindowRect) then
+      Exit;
+    if FCamera.DockTo(WindowRect) then
+      StartCameraRide(FPendingWindowID);
+    Exit;
+  end;
   if not FPendingHasRegion or (FPendingDisplayID = 0) then
     Exit;
   // The same NSScreen lookup the border does, and the same flip: a
@@ -1678,6 +1921,8 @@ begin
   // global bottom-left ones.
   if not ScreenFrameForDisplayID(FPendingDisplayID, ScreenFrame) then
     Exit;
+  // No timer for a region: StartLive hands the camera to the animator,
+  // which rides it on the tick that pans the region.
   FCamera.DockTo(RegionScreenRect(FPendingRegion,
     CameraRect(ScreenFrame.origin.x, ScreenFrame.origin.y,
     ScreenFrame.size.width, ScreenFrame.size.height)));
@@ -1685,8 +1930,140 @@ end;
 
 procedure TAppController.UndockCamera;
 begin
+  StopCameraRide;
   if FCamera <> nil then
     FCamera.Undock;
+end;
+
+// One window's frame, straight out of the window server. Synchronous and
+// cheap — no run loop is pumped, which is what makes it callable from
+// StartPending and from a timer alike — where SCShareableContent is
+// neither and carries no frame anyway.
+//
+// CGWindowListCopyWindowInfo answers in Quartz's global space: points
+// with the origin at the TOP left of the primary display and y growing
+// downwards. WindowBoundsScreenRect flips it into AppKit's, against the
+// height of the screen whose origin is (0, 0) — which is
+// NSScreen.screens[0], the one both spaces are anchored to.
+function TAppController.WindowScreenRect(AWindowID: Cardinal;
+  out ARect: TCameraRect): Boolean;
+var
+  List: CFArrayRef;
+  Info, BoundsDictionary: CFDictionaryRef;
+  Bounds: CGRect;
+  Screens: NSArray;
+  PrimaryFrame: NSRect;
+begin
+  ARect := CameraRect(0, 0, 0, 0);
+  Result := False;
+  if AWindowID = 0 then
+    Exit;
+  Screens := NSScreen.screens;
+  if (Screens = nil) or (Screens.count = 0) then
+    Exit;
+  PrimaryFrame := NSScreen(Screens.objectAtIndex(0)).frame;
+  List := CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow,
+    AWindowID);
+  if List = nil then
+    Exit;
+  try
+    // Zero entries is the answer for a window that has gone — closed
+    // mid-recording — and is how the ride stops gracefully rather than
+    // leaving the camera parked on a rectangle that no longer exists.
+    if CFArrayGetCount(List) < 1 then
+      Exit;
+    Info := CFDictionaryRef(CFArrayGetValueAtIndex(List, 0));
+    if Info = nil then
+      Exit;
+    BoundsDictionary := CFDictionaryRef(CFDictionaryGetValue(Info,
+      kCGWindowBounds));
+    if BoundsDictionary = nil then
+      Exit;
+    if CGRectMakeWithDictionaryRepresentation(BoundsDictionary, Bounds) = 0 then
+      Exit;
+    ARect := WindowBoundsScreenRect(Bounds.origin.x, Bounds.origin.y,
+      Bounds.size.width, Bounds.size.height,
+      PrimaryFrame.origin.y + PrimaryFrame.size.height);
+    Result := (ARect.Width > 0) and (ARect.Height > 0);
+  finally
+    CFRelease(List);
+  end;
+end;
+
+procedure TAppController.StartCameraRide(AWindowID: Cardinal);
+begin
+  StopCameraRide;
+  if AWindowID = 0 then
+    Exit;
+  FRideWindowID := AWindowID;
+  // Created unscheduled and added to the common modes, exactly like the
+  // live animator's timer and the camera's own snap ease — and for the
+  // same measured reason: the camera window is draggable during a
+  // recording, and a drag puts the run loop in
+  // NSEventTrackingRunLoopMode, where a default-mode-only timer stops
+  // firing. Scheduling first and then adding would register the same
+  // timer twice and poll at ten hertz instead of five.
+  FCameraRideTimer :=
+    NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats(
+    CameraRideTickSeconds, FTarget, SelectorNamed(CameraRideSelector), nil,
+    True);
+  if FCameraRideTimer = nil then
+  begin
+    // No timer, no ride: the camera stays wherever the dock put it while
+    // the recorded window moves out from under it. Worth neither an error
+    // nor a failed recording — the picture-in-picture is cosmetic and the
+    // file is unaffected — but it is a real loss of the feature, not
+    // "the old behaviour" as this once claimed.
+    FRideWindowID := 0;
+    Exit;
+  end;
+  FCameraRideTimer.retain;
+  NSRunLoop.currentRunLoop.addTimer_forMode(FCameraRideTimer,
+    NSRunLoopCommonModes);
+end;
+
+procedure TAppController.StopCameraRide;
+begin
+  FRideWindowID := 0;
+  if FCameraRideTimer = nil then
+    Exit;
+  FCameraRideTimer.invalidate;
+  FCameraRideTimer.release;
+  FCameraRideTimer := nil;
+end;
+
+procedure TAppController.CameraRideTick;
+var
+  Rect: TCameraRect;
+begin
+  // An export owns the main thread and drains events to draw its
+  // progress, which is how a timer can fire in the middle of one — the
+  // same guard the live tick carries, for the same reason.
+  if Busy then
+    Exit;
+  if (FCamera = nil) or (FRideWindowID = 0) then
+  begin
+    StopCameraRide;
+    Exit;
+  end;
+  // The camera decides for itself whether a ride is still live; a stop
+  // that has already undocked answers False here and the timer goes.
+  if not FCamera.Riding then
+  begin
+    StopCameraRide;
+    Exit;
+  end;
+  if not WindowScreenRect(FRideWindowID, Rect) then
+  begin
+    // The recorded window has gone. The recording carries on — SCK is
+    // free to keep a stream on a window that closed — but there is
+    // nothing left to follow, so stop rather than chase a rectangle that
+    // no longer exists. Not an error: closing a window mid-recording is
+    // the user's business.
+    StopCameraRide;
+    Exit;
+  end;
+  FCamera.RideTo(Rect);
 end;
 
 procedure TAppController.ShowPlayback(const APath: string; APixelWidth,
@@ -1826,11 +2203,16 @@ begin
   // says whether there is anything to repeat.
   FLastRegionItem.setEnabled(FHasLastRegion
     and IsCommandEnabled(FState, acRecordLastRegion));
+  // The submenu's parent item, and then the two checkboxes inside it.
+  // The parent is enabled while either child could be; the microphone
+  // additionally needs this Mac to have microphone capture at all.
+  FAudioItem.setEnabled(IsCommandEnabled(FState, acToggleSystemAudio)
+    or IsCommandEnabled(FState, acToggleMicrophone));
   FSystemAudioItem.setEnabled(IsCommandEnabled(FState, acToggleSystemAudio));
-  if FSystemAudio then
-    FSystemAudioItem.setState(NSOnState)
-  else
-    FSystemAudioItem.setState(NSOffState);
+  FSystemAudioItem.setState(MenuCheckState(FSystemAudio));
+  FMicrophoneItem.setEnabled(IsCommandEnabled(FState, acToggleMicrophone)
+    and FSupportsMicrophone);
+  FMicrophoneItem.setState(MenuCheckState(FMicrophone));
   FZoomOnClickItem.setEnabled(IsCommandEnabled(FState, acToggleZoomOnClick));
   FZoomOnClickItem.setState(MenuCheckState(FZoomOnClick));
   FFollowMouseItem.setEnabled(IsCommandEnabled(FState, acToggleFollowMouse));
@@ -2169,7 +2551,44 @@ begin
   RefreshStatusItem;
 end;
 
-// Both toggles are idle-only for the same reason as the audio checkbox:
+procedure TAppController.CommandToggleMicrophone;
+var
+  Warning: string;
+begin
+  if not Transition(acToggleMicrophone) then
+    Exit;
+  // Switching the microphone *off* is always legal; switching it on needs
+  // this Mac to have microphone capture at all. The item is disabled
+  // without it, so the guard only ever catches an AppKit dispatch that
+  // beat a refresh — but a recording that started and then had no
+  // microphone would be a much worse way to find out.
+  if FMicrophone or FSupportsMicrophone then
+  begin
+    FMicrophone := not FMicrophone;
+    StoreMicrophone;
+  end;
+  // The privacy grant is worth a word, and *here* is the only place it
+  // can be read. This is the moment the user asks for the microphone,
+  // the app is idle, and the menu is attached — so the Last error line
+  // is on screen. The same warning at StartPending would be written
+  // while the menu is detached (a recording is running), which is to say
+  // written where nobody can see it, and it would fire again after every
+  // recording whose microphone had in fact worked.
+  //
+  // Advisory only: measured, ScreenCaptureKit captures the microphone
+  // with this status reading undecided, so it is not the gate SCK goes
+  // through. What actually proves a silent track is FinishRecording's
+  // sample count.
+  if FMicrophone then
+  begin
+    Warning := MicrophoneAccessMessage(MicrophoneAccess);
+    if Warning <> '' then
+      RecordError(Warning);
+  end;
+  RefreshStatusItem;
+end;
+
+// Both toggles are idle-only for the same reason as the audio submenu:
 // the effects move the stream's sourceRect, and whether the stream has
 // one at all is decided when the capture starts.
 procedure TAppController.CommandToggleZoomOnClick;
@@ -2335,7 +2754,11 @@ begin
   Base := FSession.BaseSourceRect;
   if FLive = nil then
     FLive := TLiveAnimator.Create;
-  FLive.Start(FSession, Border, ScreenFrame,
+  // The camera goes in unconditionally: it is only ridden if a dock armed
+  // one, and TCameraPreview answers that question itself. A camera that
+  // is off, undocked, or docked into a rectangle nothing is panning costs
+  // one call per tick and no window-server traffic at all.
+  FLive.Start(FSession, Border, FCamera, ScreenFrame,
     LiveRect(Base.origin.x, Base.origin.y, Base.size.width,
     Base.size.height), Zoom, Follow);
   if not FLive.Active then
@@ -2467,8 +2890,7 @@ begin
     Options.TargetKind := ctkWindow;
     Options.WindowID := FPendingWindowID;
   end;
-  if FSystemAudio then
-    Options.AudioMode := amSystem;
+  Options.AudioMode := AudioModeFromToggles(FSystemAudio, FMicrophone);
   // Zoom on Click and Follow Mouse move the stream's sourceRect, so the
   // capture has to be started with one even for a whole display, which
   // otherwise goes without. Asked for only when an effect is actually
@@ -2625,7 +3047,7 @@ end;
 procedure TAppController.FinishRecording(AShowPlayback: Boolean);
 var
   Error, Path: string;
-  Finished: Boolean;
+  Finished, MicrophoneAsked: Boolean;
   PixelWidth, PixelHeight, Scale: Integer;
 begin
   if FSession = nil then
@@ -2642,9 +3064,42 @@ begin
   // Pixels per point, and so the divisor the one-click GIF export sizes
   // itself by: at 2x it turns the export into an exact halving.
   Scale := FSession.Report.Scale;
+  MicrophoneAsked := AudioModeCapturesMicrophone(FSession.Report.AudioMode);
   Finished := FSession.FinishCapture(Error);
   if not Finished then
     RecordError(Error);
+  // The backstop for the microphone. The grant is checked before the
+  // capture opens, but a grant can be revoked mid-recording, a device can
+  // be unplugged, and a future ScreenCaptureKit is free to refuse the
+  // microphone in ways nothing here anticipates — and every one of those
+  // produces the same thing: a finished file whose second audio track is
+  // silence, with no error anywhere. Counting what actually arrived is
+  // the one check that does not depend on knowing how the failure
+  // happened. Never a Fail: the video is fine and on disk.
+  if Finished and MicrophoneAsked
+    and (FSession.Report.AppendedMicrophoneSamples = 0) then
+  begin
+    // Nothing was appended — but *why* decides what to tell the user, and
+    // pointing at the privacy grant when the buffers were simply thrown
+    // away would send them to System Settings for nothing. A take short
+    // enough that every microphone buffer arrived before the first video
+    // frame (they have no timeline to sit on and are counted as dropped
+    // early), or one where the writer was not ready, is a timing story
+    // and not a permission one.
+    if (FSession.Report.DroppedMicrophoneEarly = 0)
+      and (FSession.Report.DroppedMicrophoneStalled = 0)
+      and (FSession.Report.FailedMicrophoneAppends = 0) then
+      RecordError('the microphone delivered no audio for this recording — '
+        + 'check System Settings › Privacy & Security › Microphone and the '
+        + 'input device')
+    else
+      RecordError(Format('no microphone audio reached this recording: '
+        + '%d samples arrived before the first video frame, %d while the '
+        + 'writer was not ready, %d failed to append',
+        [FSession.Report.DroppedMicrophoneEarly,
+        FSession.Report.DroppedMicrophoneStalled,
+        FSession.Report.FailedMicrophoneAppends]));
+  end;
   // AFTER FinishCapture, never before. The undock eases the camera back
   // over a fifth of a second, and until FinishCapture returns the stream
   // is still running and the writer is still appending — the border can
@@ -2765,6 +3220,12 @@ begin
     RefreshStatusItem;
     Exit;
   end;
+  // The chord goes back to the system before anything else, so a stray
+  // ⌘⇧2 landing between here and terminate: cannot reach a controller
+  // that is half way out. terminate: does not return, so there is no
+  // later moment to do this in — the destructor never runs.
+  if FHotKey <> nil then
+    FHotKey.Remove;
   if FState = asRecording then
   begin
     StopElapsedTimer;

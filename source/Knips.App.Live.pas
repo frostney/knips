@@ -20,7 +20,14 @@ unit Knips.App.Live;
 //      target, and compose the two into one sourceRect
 //      (Knips.Recording.LiveMath — platform-neutral and tested);
 //   5. hand that rectangle to the recording session, and move the
-//      on-screen border to the *follow window* if there is one.
+//      on-screen border — and a docked camera — to the *follow window*
+//      if there is one.
+//
+// **Two followers, one clock.** The frame around the region and a camera
+// docked into it both have to move with the pan, and both move in the
+// tick that moves the capture, so the three never disagree by a frame.
+// The camera's own arithmetic is its unit's (TCameraPreview.RideTo);
+// this one only says when and to where.
 //
 // **The border tracks the window, not the crop.** Zoom is a crop of the
 // same on-screen area, so zooming changes nothing about which pixels of
@@ -61,6 +68,8 @@ uses
 
   CocoaAll,
   Knips.App.Border,
+  Knips.App.Camera,
+  Knips.App.State,
   Knips.Options,
   Knips.Recording,
   Knips.Recording.LiveMath,
@@ -69,10 +78,11 @@ uses
 type
   TLiveAnimator = class
   private
-    // Neither is owned: the controller outlives the animator and both go
-    // away with the recording.
+    // None of the three is owned: the controller outlives the animator
+    // and all of them go away with the recording.
     FSession: TRecordingSession;
     FBorder: TRecordingBorder;
+    FCamera: TCameraPreview;
     FActive: Boolean;
     FZoomOnClick: Boolean;
     FFollowMouse: Boolean;
@@ -105,6 +115,7 @@ type
     // setFrame: to the window server every tick.
     FBorderRegion: TCaptureRegion;
     FHasBorderRegion: Boolean;
+
     // The last rectangle handed to the session, kept so a caller can see
     // what the animator is actually asking for.
     FSourceRect: TLiveRect;
@@ -112,6 +123,7 @@ type
       out AX: Double; out AY: Double): Boolean;
     procedure HandleClick(AX, AY: Double);
     procedure UpdateBorder;
+    procedure UpdateCamera;
   public
     // ADisplayFrame is the NSScreen frame of the display being recorded,
     // and ABaseRect the rectangle the recording was sized from, in that
@@ -119,13 +131,18 @@ type
     // ABorder may be nil; pass it only when the frame is safe to move —
     // that is, when the capture really did exclude it.
     //
+    // ACamera may be nil too, and is simply ignored unless it is docked
+    // into the region this recording is panning: the camera decides for
+    // itself whether a ride is live (TCameraPreview.RideTo), so nothing
+    // here has to know what the dock did.
+    //
     // Does nothing at all when neither effect is asked for, or when the
     // session cannot move its source rectangle.
     procedure Start(ASession: TRecordingSession; ABorder: TRecordingBorder;
-      const ADisplayFrame: NSRect; const ABaseRect: TLiveRect;
-      AZoomOnClick, AFollowMouse: Boolean);
-    // Lets go of the session and the border without sending anything —
-    // see the body for why the obvious "put it back" is wrong.
+      ACamera: TCameraPreview; const ADisplayFrame: NSRect;
+      const ABaseRect: TLiveRect; AZoomOnClick, AFollowMouse: Boolean);
+    // Lets go of the session, the border and the camera without sending
+    // anything — see the body for why the obvious "put it back" is wrong.
     procedure Stop;
     procedure Tick;
     property Active: Boolean read FActive;
@@ -197,8 +214,9 @@ end;
 { TLiveAnimator }
 
 procedure TLiveAnimator.Start(ASession: TRecordingSession;
-  ABorder: TRecordingBorder; const ADisplayFrame: NSRect;
-  const ABaseRect: TLiveRect; AZoomOnClick, AFollowMouse: Boolean);
+  ABorder: TRecordingBorder; ACamera: TCameraPreview;
+  const ADisplayFrame: NSRect; const ABaseRect: TLiveRect;
+  AZoomOnClick, AFollowMouse: Boolean);
 begin
   Stop;
   if (ASession = nil) or not ASession.SupportsLiveUpdate then
@@ -211,6 +229,7 @@ begin
     Exit;
   FSession := ASession;
   FBorder := ABorder;
+  FCamera := ACamera;
   FZoomOnClick := AZoomOnClick;
   FFollowMouse := AFollowMouse;
   FScreenFrame := ADisplayFrame;
@@ -247,6 +266,10 @@ begin
   FActive := False;
   FSession := nil;
   FBorder := nil;
+  // Not Undock: putting the camera back is the stop path's business, and
+  // it has to happen after FinishCapture rather than here (see
+  // Knips.App.FinishRecording). Letting go of the pointer is all this owes.
+  FCamera := nil;
   FZoomOnClick := False;
   FFollowMouse := False;
   FHasBorderRegion := False;
@@ -316,6 +339,30 @@ begin
   FBorder.MoveTo(Region);
   FBorderRegion := Region;
   FHasBorderRegion := True;
+end;
+
+// The second follower. Same rule as the border — only a pan moves it,
+// because a zoom crops inside the same on-screen rectangle — and the same
+// space conversion the controller did when it docked the camera in the
+// first place: the follow window is in the recorded display's own
+// top-left points, an NSWindow frame is in AppKit's global bottom-left
+// ones.
+//
+// No epsilon here: RideTo has its own, and it is the one that knows
+// whether the *window* would actually move. Nothing else is filtered
+// either — the camera answers "am I riding?" for itself, so a camera
+// that is off, undocked, being dragged or mid-snap costs one call and
+// nothing else.
+procedure TLiveAnimator.UpdateCamera;
+var
+  Region: TCaptureRegion;
+begin
+  if (FCamera = nil) or not FFollowMouse then
+    Exit;
+  Region := RegionFromLiveRect(FWindow);
+  FCamera.RideTo(RegionScreenRect(Region,
+    CameraRect(FScreenFrame.origin.x, FScreenFrame.origin.y,
+    FScreenFrame.size.width, FScreenFrame.size.height)));
 end;
 
 procedure TLiveAnimator.Tick;
@@ -395,6 +442,7 @@ begin
   FSession.UpdateSourceRect(CGRectMake(FSourceRect.X, FSourceRect.Y,
     FSourceRect.Width, FSourceRect.Height));
   UpdateBorder;
+  UpdateCamera;
 end;
 
 {$ENDIF}

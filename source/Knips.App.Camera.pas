@@ -52,6 +52,25 @@ unit Knips.App.Camera;
 // eases to the nearest corner of whatever it was dropped on: the screen's
 // visibleFrame normally, the recorded region while it is docked.
 //
+// Docking and riding. While a recording is capturing a rectangle — a
+// region, or one window — the camera moves into a corner *inside* that
+// rectangle, so ScreenCaptureKit finds the picture-in-picture there. The
+// rectangle can then move: Follow Mouse pans a region, and a recorded
+// window goes wherever the user drags it (ScreenCaptureKit's
+// desktop-independent window capture follows it). So the camera rides —
+// one unanimated setFrame: per tick, keeping the corner the dock chose
+// and travelling by exactly the rectangle's displacement, which is the
+// same thing TRecordingBorder.MoveTo does for the frame. Positions are
+// computed from the dock's own rectangle and origin rather than
+// accumulated, so a long take drifts by nothing.
+//
+// Three owners, one frame, and they take turns rather than fight: a
+// drag, the corner snap that follows one, and the ride. RideTo refuses
+// outright while either of the other two has the window and marks itself
+// stale; the next tick then re-anchors on wherever they left it. So a
+// picture dragged to the other corner mid-recording carries on riding
+// from there instead of being yanked back.
+//
 // Animation. That ease is a repeating NSTimer on the content view, NOT
 // setFrame:display:animate:YES. AppKit's animated setFrame runs a nested
 // run loop until it finishes, and a nested run loop inside mouseUp: is
@@ -226,13 +245,29 @@ type
     FDragging: Boolean;
     FDragMouse: NSPoint;
     FDragOrigin: NSPoint;
-    // The dock, while a region recording has the camera inside its
-    // rectangle. FUndocked is where the user had it before, and is what
-    // Undock puts it back to and what SaveOrigin writes out — a docked
-    // position is the recording's, not the user's.
+    // The dock, while a recording has the camera inside the rectangle it
+    // is capturing. FUndocked is where the user had it before, and is
+    // what Undock puts it back to and what SaveOrigin writes out — a
+    // docked position is the recording's, not the user's.
     FDocked: Boolean;
     FDockRect: TCameraRect;
     FUndocked: TCameraOrigin;
+    // The ride: the docked window travelling with a rectangle that is
+    // itself moving (a region Follow Mouse is panning, a recorded window
+    // the user is dragging). Measured from the dock rather than
+    // accumulated per tick, so a thousand ticks cannot drift: FRideFrom
+    // and FRideOrigin are the rectangle and the origin the dock landed
+    // on, and every position is FRideOrigin plus the rectangle's total
+    // displacement. FRideAt is only the epsilon's memory.
+    FRiding: Boolean;
+    FRideFrom: TCameraRect;
+    FRideAt: TCameraRect;
+    FRideOrigin: TCameraOrigin;
+    // Set whenever something *else* moved the window — a drag, the snap
+    // that follows one, a shape change. The next ride tick re-anchors on
+    // wherever the window now is instead of yanking it back to where the
+    // ride left off.
+    FRideStale: Boolean;
     // The snap ease. A repeating NSTimer on the content view, not
     // setFrame:display:animate:YES — see "Animation" in the header.
     FSnapTimer: NSTimer;
@@ -241,6 +276,14 @@ type
     FSnapTo: TCameraOrigin;
     FSnapSize: TCameraSize;
     FSnapStep: Integer;
+    // What a cancelled ease was heading for. A drag cancels the ease and
+    // takes the window from where it stands; a release that turns out not
+    // to have been a drag at all has to put that back, or the window is
+    // stranded on step 7 of 12 for ever — and SaveOrigin would then
+    // persist an interpolated point as the camera's home.
+    FSnapPending: Boolean;
+    FSnapPendingTo: TCameraOrigin;
+    FSnapPendingSize: TCameraSize;
     function CheckAuthorization(out AError: string): Boolean;
     function BuildSession(out AError: string): Boolean;
     // The connection to mirror, or nil when there is nothing to talk to
@@ -266,6 +309,12 @@ type
     // The rectangle a drop snaps to: the dock while there is one, else
     // the visibleFrame of the screen the window is on.
     function SnapFrame: TCameraRect;
+    // The visibleFrame of the screen that would hold a window of ASize at
+    // AOrigin — the same question RestoredOrigin asks of a position read
+    // back out of NSUserDefaults, asked here of the position a dock is
+    // about to restore. False when no attached screen holds it.
+    function HomeFrame(const AOrigin: TCameraOrigin; const ASize: TCameraSize;
+      out AFrame: TCameraRect): Boolean;
     procedure ApplyFrame(const AOrigin: TCameraOrigin;
       const ASize: TCameraSize);
     procedure SnapToNearestCorner;
@@ -291,11 +340,26 @@ type
     // window, when one dock is already in force, or when the rectangle is
     // empty; the recording then runs with the camera where it was.
     //
-    // Docking happens ONCE, at the start. A Follow Mouse recording pans
-    // its region across the screen and the camera deliberately does not
-    // chase it: a picture-in-picture that slides around mid-take is worse
-    // than one that drifts out of a shot the user is steering themselves.
+    // Docking happens once, at the start; keeping the window inside a
+    // rectangle that then MOVES is RideTo's job, and DockTo arms it.
     function DockTo(const ARect: TCameraRect): Boolean;
+    // Follows the docked rectangle to ARect: the window keeps the corner
+    // the dock chose and travels by exactly the rectangle's displacement.
+    // One unanimated setFrame:, the same way the recording border's
+    // MoveTo works and for the same reason — this runs under a live
+    // capture, where an ease is an ease in the file.
+    //
+    // Does nothing unless a dock armed a ride, and nothing at all while
+    // the user is dragging the window or the corner snap is easing it:
+    // two owners for one frame is a window that jitters. Whatever those
+    // two do to the window is absorbed rather than fought — the next
+    // tick re-anchors the ride wherever they left it, so a picture
+    // dragged to a different corner mid-recording goes on following from
+    // there.
+    //
+    // ARect is in AppKit's global bottom-left points, like DockTo's.
+    // False when nothing moved, which is most ticks.
+    function RideTo(const ARect: TCameraRect): Boolean;
     // Puts the window back where the dock found it. Safe to call when
     // nothing is docked, which is what makes it a plain line on every
     // stop path.
@@ -319,6 +383,9 @@ type
     class function IsAuthorized: Boolean;
     property Visible: Boolean read FVisible;
     property Docked: Boolean read FDocked;
+    // Whether a dock armed a ride that is still live. False once the
+    // recording undocks.
+    property Riding: Boolean read FRiding;
     // Whether the preview layer's connection really did come back
     // mirrored. Cosmetic, so a False is not an error — but it is the one
     // thing about this window that cannot be seen from the outside
@@ -711,10 +778,8 @@ end;
 function TCameraPreview.RestoredOrigin: TCameraOrigin;
 var
   Screens: NSArray;
-  Frame: NSRect;
   Size: TCameraSize;
-  I: Integer;
-  Usable: Boolean;
+  Home: TCameraRect;
 begin
   Result.X := 0;
   Result.Y := 0;
@@ -728,20 +793,7 @@ begin
   begin
     Result.X := Defaults.doubleForKey(DefaultsKey(CameraOriginXDefaultsKey));
     Result.Y := Defaults.doubleForKey(DefaultsKey(CameraOriginYDefaultsKey));
-    Usable := False;
-    for I := 0 to Screens.count - 1 do
-    begin
-      // visibleFrame, not frame: the window floats at level 3 and the
-      // Dock sits at 20, so a saved position the Dock has since covered
-      // would come back invisible and undraggable.
-      Frame := NSScreen(Screens.objectAtIndex(I)).visibleFrame;
-      if IsCameraOriginUsable(Result, Size, AsCameraRect(Frame)) then
-      begin
-        Usable := True;
-        Break;
-      end;
-    end;
-    if Usable then
+    if HomeFrame(Result, Size, Home) then
       Exit;
   end;
 
@@ -766,8 +818,10 @@ end;
 
 procedure TCameraPreview.SaveOrigin;
 var
-  Origin: TCameraOrigin;
+  Origin, DragStart: TCameraOrigin;
 begin
+  DragStart.X := FDragOrigin.x;
+  DragStart.Y := FDragOrigin.y;
   if FWindow = nil then
     Exit;
   // A docked window is standing where a recording put it, not where the
@@ -775,6 +829,23 @@ begin
   // camera's home position.
   if FDocked then
     Origin := FUndocked
+  else if FSnapping then
+    // Mid-ease. The corner the window is travelling to is the position
+    // the user chose; the interpolated point it happens to be standing
+    // on is step 7 of 12 and nothing anybody meant. Reading the target
+    // is also what lets Hide skip the ease's visible teleport-to-corner
+    // in the instant before the window is ordered out.
+    Origin := FSnapTo
+  else if FSnapPending and not (FDragging
+    and IsCameraDragMovement(DragStart, WindowOrigin)) then
+    // The same interpolated point, parked rather than running: a
+    // mouseDown: cancelled an ease and the mouseUp: that would put it
+    // back has not arrived. Quitting in that window — the camera is held
+    // down while ⌘Q goes through the main menu — would otherwise persist
+    // step 7 of 12 as the camera's home. But only while the press has
+    // not MOVED the window: once it is a real drag, where the user
+    // dragged it to beats the corner the cancelled ease was heading for.
+    Origin := FSnapPendingTo
   else
     Origin := WindowOrigin;
   Defaults.setDouble_forKey(Origin.X, DefaultsKey(CameraOriginXDefaultsKey));
@@ -808,22 +879,115 @@ begin
   Result := AsCameraRect(Screen.visibleFrame);
 end;
 
+// The one screen scan, and both callers that ask the question use it:
+// RestoredOrigin, judging a position read back out of NSUserDefaults, and
+// Undock, judging the position a recording is about to give back. They
+// were the same loop written twice.
+//
+// visibleFrame rather than frame throughout: the window floats at level 3
+// and the Dock sits at 20, so space the Dock has taken is not somewhere a
+// window can be put.
+function TCameraPreview.HomeFrame(const AOrigin: TCameraOrigin;
+  const ASize: TCameraSize; out AFrame: TCameraRect): Boolean;
+var
+  Screens: NSArray;
+  I: Integer;
+begin
+  AFrame := CameraRect(0, 0, 0, 0);
+  Result := False;
+  Screens := NSScreen.screens;
+  if (Screens = nil) or (Screens.count = 0) then
+    Exit;
+  for I := 0 to Screens.count - 1 do
+  begin
+    AFrame := AsCameraRect(NSScreen(Screens.objectAtIndex(I)).visibleFrame);
+    if IsCameraOriginUsable(AOrigin, ASize, AFrame) then
+      Exit(True);
+  end;
+  AFrame := CameraRect(0, 0, 0, 0);
+end;
+
+{ Core Animation's implicit actions, off for the length of one change.
+
+  The content view is layer-*hosting*, which is what keeps AppKit from
+  drawing over the video — and also what leaves Core Animation's own
+  default actions in force on the layer. Every setFrame: and
+  setCornerRadius: below is therefore a quarter-second implicit animation
+  unless it is wrapped, which is precisely the artefact the "in one move"
+  comments in SetShape and DockTo exist to prevent: an instantly resized
+  window with a layer easing into it. During a docked recording that
+  quarter second is *in the file*. }
+
+procedure BeginLayerChange;
+begin
+  CATransaction.begin_;
+  CATransaction.setDisableActions(True);
+end;
+
+procedure EndLayerChange;
+begin
+  CATransaction.commit;
+end;
+
 // The one place that moves the window. Never animated by AppKit — see
 // "Animation" in the header; the ease is StartSnap's timer calling this
 // once per step.
+//
+// **A move and a resize are different operations here, and telling them
+// apart is not tidiness.** This is called up to thirty times a second by
+// the ride and by the snap ease, and the two things the resize path does
+// — force the window to redraw synchronously, and hand the video layer a
+// new frame — are both wasted work on a move, and both are visible:
+//
+//   - `setFrame:display:YES` makes AppKit redraw the window *now*. On a
+//     move nothing about the window's contents has changed, and forcing
+//     a redraw thirty times a second on a window whose layer is being
+//     filled asynchronously by a capture session is exactly the race
+//     that shows up as tearing. `setFrameOrigin:` moves the window and
+//     lets the window server composite it, which is what a moving window
+//     wants.
+//   - Re-setting the layer's frame to the value it already has is not a
+//     no-op inside Core Animation: it is a geometry change on an
+//     AVCaptureVideoPreviewLayer, which recomputes how the video sits in
+//     its bounds. Thirty of those a second, interleaved with frames
+//     arriving from the capture session, is the other half of the same
+//     flicker.
+//
+// So: origin only when only the origin moved, and the full path — with
+// the layer, in one CATransaction — only when the size really changed,
+// which is a shape switch and nothing else.
 procedure TCameraPreview.ApplyFrame(const AOrigin: TCameraOrigin;
   const ASize: TCameraSize);
+var
+  Frame: NSRect;
 begin
   if FWindow = nil then
     Exit;
+  Frame := FWindow.frame;
+  if (Frame.size.width = ASize.Width)
+    and (Frame.size.height = ASize.Height) then
+  begin
+    // A pure move. setFrameOrigin: lets the window server composite the
+    // window at its new place on its own schedule; setFrame:display:YES
+    // would force a synchronous redraw thirty times a second on a window
+    // whose layer a capture session is filling asynchronously — the
+    // tearing path the comment above names.
+    if (Frame.origin.x <> AOrigin.X) or (Frame.origin.y <> AOrigin.Y) then
+      FWindow.setFrameOrigin(NSMakePoint(AOrigin.X, AOrigin.Y));
+    Exit;
+  end;
   FWindow.setFrame_display(NSMakeRect(AOrigin.X, AOrigin.Y, ASize.Width,
     ASize.Height), True);
   // The view is layer-*hosting*, so AppKit resizes the content view with
-  // the window but leaves the layer where it was; only a shape change
-  // ever gets here with a different size, but setting it every time costs
-  // nothing and cannot go stale.
-  if FLayer <> nil then
+  // the window but leaves the layer where it was.
+  if FLayer = nil then
+    Exit;
+  BeginLayerChange;
+  try
     FLayer.setFrame(NSMakeRect(0, 0, ASize.Width, ASize.Height));
+  finally
+    EndLayerChange;
+  end;
 end;
 
 { The snap ease. Twelve steps of smoothstep on a repeating timer, in
@@ -847,6 +1011,8 @@ procedure TCameraPreview.StartSnap(const AOrigin: TCameraOrigin;
   const ASize: TCameraSize);
 begin
   StopSnapTimer;
+  // A fresh ease supersedes whatever a cancelled one was heading for.
+  FSnapPending := False;
   if (FWindow = nil) or not FVisible then
     Exit;
   FSnapFrom := WindowOrigin;
@@ -899,6 +1065,7 @@ end;
 
 procedure TCameraPreview.FinishSnap;
 begin
+  FSnapPending := False;
   if not FSnapping then
   begin
     StopSnapTimer;
@@ -914,6 +1081,19 @@ begin
   // Deliberately no ApplyFrame: the window keeps whatever frame the last
   // tick gave it, which is where the user can see it and, for the one
   // caller, where they have just grabbed it.
+  //
+  // But where it was *going* is remembered, because the one caller is
+  // mouseDown: and a mouseDown: is not yet a drag. A press-and-release
+  // that never travels fails EndDrag's threshold, starts no new ease, and
+  // used to leave the window stranded on whichever step of twelve the
+  // cancel caught — permanently, and persisted as the camera's home by
+  // the next Hide. EndDrag puts this back.
+  if FSnapping then
+  begin
+    FSnapPending := True;
+    FSnapPendingTo := FSnapTo;
+    FSnapPendingSize := FSnapSize;
+  end;
   StopSnapTimer;
 end;
 
@@ -942,8 +1122,14 @@ begin
   // Grabbing a window that is still easing takes it from where it *is*,
   // not from where it was going. Cancel rather than finish: finishing
   // would jump it to the corner under the pointer first, which is the
-  // fight the blocking animation used to lose.
+  // fight the blocking animation used to lose. CancelSnap remembers the
+  // target so a press that turns out not to be a drag can resume it.
   CancelSnap;
+  // The user now owns the window; a ride that kept moving it under the
+  // pointer would be two owners for one frame. RideTo refuses while
+  // FDragging, and this says that whatever the drag does to the window
+  // is the ride's new anchor rather than something to undo.
+  FRideStale := True;
   FDragMouse := NSEvent.mouseLocation;
   FDragOrigin := FWindow.frame.origin;
   FDragging := True;
@@ -963,7 +1149,9 @@ end;
 
 procedure TCameraPreview.EndDrag;
 var
-  Started: TCameraOrigin;
+  Started, PendingTo: TCameraOrigin;
+  PendingSize: TCameraSize;
+  Pending: Boolean;
 begin
   if not FDragging then
     Exit;
@@ -973,21 +1161,34 @@ begin
   FDragging := False;
   Started.X := FDragOrigin.x;
   Started.Y := FDragOrigin.y;
+  // Read before either branch below can clear it.
+  Pending := FSnapPending;
+  PendingTo := FSnapPendingTo;
+  PendingSize := FSnapPendingSize;
+  FSnapPending := False;
   // A *click* is not a drag, and must not move the window. Without this
   // every click on the picture would fling it into a corner — including
   // the corner it was deliberately moved away from a moment earlier by a
   // shape change, and including a position restored from a version of
   // this app that had no snapping at all.
   if not IsCameraDragMovement(Started, WindowOrigin) then
+  begin
+    // …but a click that landed on a window still gliding to a corner
+    // cancelled that glide on the way in. Put it back rather than leave
+    // the picture parked between two corners for good.
+    if Pending then
+      StartSnap(PendingTo, PendingSize);
     Exit;
+  end;
   SnapToNearestCorner;
 end;
 
-{ Docking, for a region recording. }
+{ Docking into the rectangle a recording is capturing, and riding it. }
 
 function TCameraPreview.DockTo(const ARect: TCameraRect): Boolean;
 var
   Size: TCameraSize;
+  Origin: TCameraOrigin;
 begin
   Result := False;
   if (FWindow = nil) or not FVisible or FDocked then
@@ -1002,32 +1203,107 @@ begin
   FDockRect := ARect;
   FDocked := True;
   Size := CameraWindowSize(FShape);
+  Origin := NearestCameraCorner(FUndocked, Size, ARect, CameraWindowMargin);
   // In one move, not eased. The capture is about to open on this frame,
   // and a camera sliding into position across the first fifth of a second
   // is something the file would keep for ever.
-  ApplyFrame(NearestCameraCorner(FUndocked, Size, ARect,
-    CameraWindowMargin), Size);
+  ApplyFrame(Origin, Size);
+  // Arm the ride from exactly this rectangle and this origin. Every later
+  // position is computed from the pair rather than from the last one, so
+  // thirty ticks a second for ten minutes accumulate no drift at all.
+  FRiding := True;
+  FRideFrom := ARect;
+  FRideAt := ARect;
+  FRideOrigin := Origin;
+  FRideStale := False;
+  Result := True;
+end;
+
+function TCameraPreview.RideTo(const ARect: TCameraRect): Boolean;
+var
+  Size: TCameraSize;
+begin
+  Result := False;
+  if not FRiding or not FDocked then
+    Exit;
+  if (FWindow = nil) or not FVisible then
+    Exit;
+  if (ARect.Width <= 0) or (ARect.Height <= 0) then
+    Exit;
+  // Where a drop snaps to follows the rectangle FIRST, and unconditionally
+  // — before the stand-aside below, not after it. A drag is exactly when
+  // the region is most likely to be moving, and a dock rectangle frozen
+  // for the length of the drag is a drop that snaps to where the region
+  // *was*, followed by a re-anchor onto that wrong origin for the rest of
+  // the take.
+  FDockRect := ARect;
+  // Mutual exclusion with the two other things that own this window's
+  // frame, and the whole of it. A drag is the user moving the picture; a
+  // snap is the ease that follows one. Either way the ride stands aside
+  // and marks itself stale, so it re-anchors instead of yanking the
+  // window back the moment it gets the frame again.
+  if FDragging or FSnapping then
+  begin
+    FRideStale := True;
+    Exit;
+  end;
+  if FRideStale then
+  begin
+    // Somebody else moved the window while the ride was standing aside.
+    // Take the rectangle and the window as they are now for the new
+    // anchor pair; the picture goes on following from wherever the user
+    // dropped it, rather than teleporting back to the corner the dock
+    // chose a minute ago.
+    FRideFrom := ARect;
+    FRideAt := ARect;
+    FRideOrigin := WindowOrigin;
+    FRideStale := False;
+    Exit;
+  end;
+  if not IsCameraRideMovement(FRideAt, ARect) then
+    Exit;
+  FRideAt := ARect;
+  Size := CameraWindowSize(FShape);
+  // One unanimated setFrame:, exactly like TRecordingBorder.MoveTo. This
+  // runs under a live capture: an ease here is an ease in the file.
+  ApplyFrame(CameraRideOrigin(FRideOrigin, FRideFrom, ARect), Size);
   Result := True;
 end;
 
 procedure TCameraPreview.Undock;
 var
   Size: TCameraSize;
+  Home: TCameraRect;
 begin
   if not FDocked then
     Exit;
   // Cleared first, so SnapFrame below reads the screen and not the
-  // region the recording has just finished with.
+  // rectangle the recording has just finished with.
   FDocked := False;
+  FRiding := False;
+  FRideStale := False;
   FDockRect := CameraRect(0, 0, 0, 0);
   if (FWindow = nil) or not FVisible then
     Exit;
   Size := CameraWindowSize(FShape);
+  // Clamped against the screen that actually HOLDS the remembered
+  // position, not against SnapFrame. SnapFrame answers the visibleFrame
+  // of the screen the *window* is on, which with the dock just cleared is
+  // still the recorded one — so a camera the user keeps on display B,
+  // docked into a region on display A, used to come back squeezed onto A.
+  // And because Hide writes the restored position out, the next launch
+  // then kept it there: a recording had quietly rewritten the camera's
+  // home, which is the one thing the FUndocked/SaveOrigin split exists to
+  // prevent. Only when no attached screen holds it — the display it lived
+  // on has been unplugged mid-recording — is the current screen the right
+  // answer.
+  if not HomeFrame(FUndocked, Size, Home) then
+    Home := SnapFrame;
   // Eased, unlike the dock: the caller only reaches this once the writer
   // has been finalised (Knips.App.FinishRecording), so there is no file
   // left for the movement to land in, and watching the camera travel back
   // is what says the move was temporary.
-  StartSnap(ClampCameraOrigin(FUndocked, Size, SnapFrame), Size);
+  StartSnap(ClampCameraOrigin(FUndocked, Size, Home), Size);
 end;
 
 { Shape. }
@@ -1036,8 +1312,16 @@ procedure TCameraPreview.ApplyShapeToLayer;
 begin
   if FLayer = nil then
     Exit;
-  FLayer.setCornerRadius(CameraCornerRadiusForShape(FShape));
-  FLayer.setMasksToBounds(True);
+  // cornerRadius is an animatable property like frame, so without the
+  // transaction the rectangle rounds itself into a disc over a quarter of
+  // a second while the window has already been square for a whole frame.
+  BeginLayerChange;
+  try
+    FLayer.setCornerRadius(CameraCornerRadiusForShape(FShape));
+    FLayer.setMasksToBounds(True);
+  finally
+    EndLayerChange;
+  end;
 end;
 
 procedure TCameraPreview.SetShape(AShape: TCameraShape);
@@ -1078,6 +1362,10 @@ begin
   // re-centring it here is what makes the round trip land where the user
   // is looking.
   FUndocked := RecenteredCameraOrigin(FUndocked, Old, Fresh);
+  // The shape change is the third thing that moves this window behind the
+  // ride's back; the next tick re-anchors on the re-centred position
+  // rather than dragging the window back to where the old size sat.
+  FRideStale := True;
   // In one move: an eased resize would leave the layer at its final size
   // inside a window still growing into it.
   ApplyFrame(Origin, Fresh);
@@ -1272,13 +1560,17 @@ begin
   end;
   if FSession <> nil then
     FSession.stopRunning;
-  // Land a running ease before reading the frame, or the position that
-  // survives the relaunch is one the window was only passing through on
-  // its way to a corner.
-  FinishSnap;
+  // Deliberately NOT FinishSnap. Landing the ease here means one visible
+  // teleport to the corner in the instant before the window is ordered
+  // out — the user's last sight of the camera is it jumping. Nothing else
+  // needed the window settled: the only reader is SaveOrigin, and it
+  // takes the ease's *target* when one is running, which is the position
+  // the drop chose and the one the teleport was going to produce anyway.
+  // TearDown below stops the timer.
+  //
   // Where the user left it is the position the next launch restores —
   // and while a recording has the camera docked, that is where the user
-  // left it *before* the recording. SaveOrigin knows the difference.
+  // left it *before* the recording. SaveOrigin knows both differences.
   SaveOrigin;
   TearDown;
   FVisible := False;
@@ -1288,13 +1580,16 @@ procedure TCameraPreview.TearDown;
 begin
   // The timer holds the view, and the view holds a back-pointer to this
   // object; it has to go before either does. StopSnapTimer rather than
-  // FinishSnap: Hide has already landed the ease, and every other route
-  // here is a failed Show with nothing to land.
+  // FinishSnap: Hide has already read the ease's target, and every other
+  // route here is a failed Show with nothing to land.
   StopSnapTimer;
-  // A window that is going away is not docked and is not being dragged;
-  // a stale dock would otherwise send the next Show's snap at a region
-  // nobody is recording any more.
+  FSnapPending := False;
+  // A window that is going away is not docked, is not riding and is not
+  // being dragged; a stale dock would otherwise send the next Show's snap
+  // at a rectangle nobody is recording any more.
   FDocked := False;
+  FRiding := False;
+  FRideStale := False;
   FDockRect := CameraRect(0, 0, 0, 0);
   FDragging := False;
   FMirrored := False;
