@@ -24,7 +24,8 @@ unit Knips.Recording.CursorOverlay;
 // touches is a managed type at all.
 //
 // DrawInto runs on ScreenCaptureKit's capture queue, where this program
-// has no cthreads and the rules are the ones in docs/architecture.md: no
+// has no cthreads on Darwin (ADR-0005: elsewhere it does) and the rules
+// are the ones in docs/architecture.md: no
 // exceptions, no try..finally, no WriteLn, no managed writes. It makes no
 // Objective-C call. The cursor position comes from CGEventCreate(nil) +
 // CGEventGetLocation, which is plain C, thread-safe, and — measured on
