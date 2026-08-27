@@ -137,6 +137,18 @@ const
   ZoomOnClickDefaultsKey = 'KnipsZoomOnClick';
   FollowMouseDefaultsKey = 'KnipsFollowMouse';
 
+  // Big Cursor: the pointer is drawn into the frames instead of being
+  // captured, so it can be made bigger than life. Same shape as the two
+  // above — off by default, remembered, a checkmark rather than a verb —
+  // and it sits beside them because all three are things done to a
+  // recording rather than choices about what is recorded.
+  //
+  // Its own key, like every other toggle: one reader and one writer per
+  // key, for the reason recorded under "Each toggle writes its own key"
+  // in docs/architecture.md.
+  BigCursorMenuTitle = 'Big Cursor';
+  BigCursorDefaultsKey = 'KnipsBigCursor';
+
   // The Audio submenu: two independent checkboxes, System Audio and
   // Microphone, in the same shape Record System Audio always had and the
   // same shape as Zoom on Click and Follow Mouse. They live behind one
@@ -251,6 +263,12 @@ type
     // greyed out.
     acToggleZoomOnClick,
     acToggleFollowMouse,
+    // idle -> idle: the Big Cursor checkbox. Idle-only for the plainest
+    // version of the same reason: the drawn pointer replaces
+    // ScreenCaptureKit's own, which is part of the stream configuration
+    // the capture started with, and the sprite is rendered before the
+    // first frame arrives. Neither can be introduced halfway through.
+    acToggleBigCursor,
     acSelectionCommitted, // selecting -> recording: mouse released
     acSelectionCancelled, // selecting -> idle: Esc or an empty drag
     // selecting -> idle, asked for from the menu rather than from inside
@@ -537,7 +555,7 @@ begin
         acRecordDisplay, acRecordWindow, acRecordLastRegion:
           ANext := asRecording;
         acToggleSystemAudio, acToggleMicrophone, acToggleZoomOnClick,
-          acToggleFollowMouse:
+          acToggleFollowMouse, acToggleBigCursor:
           ANext := asIdle;
       else
         Result := False;

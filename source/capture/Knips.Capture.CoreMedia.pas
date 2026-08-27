@@ -378,6 +378,19 @@ function CMTimeCompare(
   time2: CMTime
 ): cint32; external name '_CMTimeCompare';
 
+{ What a pixel buffer actually holds. Big Cursor composites into the
+  frame's own bytes on the capture queue (Knips.Recording.CursorOverlay),
+  where a wrong assumption about the layout is a write into someone
+  else's memory rather than a wrong colour: the stream is configured for
+  32BGRA, and these two are what let that be checked instead of trusted. }
+function CVPixelBufferGetPixelFormatType(
+  pixelBuffer: CVPixelBufferRef
+): OSType; external name '_CVPixelBufferGetPixelFormatType';
+
+function CVPixelBufferIsPlanar(
+  pixelBuffer: CVPixelBufferRef
+): Boolean; external name '_CVPixelBufferIsPlanar';
+
 { ======== Helper to create CMTime inline ======== }
 function MakeCMTime(value: cint64; timescale: cint32): CMTime;
 

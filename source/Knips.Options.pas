@@ -111,6 +111,14 @@ type
     // Pixels per point: 1, 2, or ScaleAuto.
     Scale: Integer;
     ShowsCursor: Boolean;
+    // Draw an enlarged pointer into the recorded frames instead of
+    // capturing the system one. ScreenCaptureKit's own cursor is
+    // switched off for the recording and a scaled sprite is composited
+    // into each frame (Knips.Recording.CursorOverlay), so the exports
+    // inherit it. Display targets only — a window's frames have no fixed
+    // relationship to the screen the pointer is measured against, which
+    // is the same reason the live effects refuse one.
+    BigCursor: Boolean;
     // 0 = derive from the capture size and frame rate.
     BitRate: Integer;
     OutputPath: string;
@@ -388,6 +396,23 @@ begin
   if (AOptions.TargetKind = ctkWindow) and (AOptions.WindowID = 0) then
   begin
     AError := '--window needs a non-zero window id (see `knips windows`)';
+    Exit;
+  end;
+  if AOptions.BigCursor and not AOptions.ShowsCursor then
+  begin
+    // One asks for no pointer and the other for a bigger one. Guessing
+    // which was meant would silently give the caller the opposite of one
+    // of the two flags it passed.
+    AError := '--no-cursor and --big-cursor are mutually exclusive';
+    Exit;
+  end;
+  if (AOptions.TargetKind = ctkWindow) and AOptions.BigCursor then
+  begin
+    // The drawn pointer is placed by mapping a screen position into the
+    // frame, and a window's frames are a picture of something that moves
+    // under us with no way to find out from the capture queue. Refusing
+    // beats recording with a pointer somewhere plausible but wrong.
+    AError := 'a big cursor applies to display recordings only';
     Exit;
   end;
   if (AOptions.TargetKind = ctkWindow)

@@ -3,8 +3,10 @@
 ## Executive Summary
 
 - One binary: ScreenCaptureKit stream → complete-frame filter →
-  AVAssetWriter input (hardware H.264) → `.mp4`/`.mov`. Knips never
-  touches pixels or NAL units; it moves sample buffers.
+  AVAssetWriter input (hardware H.264) → `.mp4`/`.mov`. Knips moves
+  sample buffers and never touches a NAL unit; the one thing that writes
+  pixels is [Big Cursor](#big-cursor), which draws into the frame before
+  the encoder ever sees it.
 - `--audio=system|mic|both` adds SCK's audio and/or microphone output,
   one AVAssetWriter input (AAC) per source, to the same file; see
   [Audio](#audio).
@@ -32,6 +34,13 @@
   `SCStream.updateConfiguration:completionHandler:`, so a smaller
   rectangle is a zoom and a sliding one is a pan. See
   [Live effects](#live-effects-zoom-on-click-and-follow-mouse).
+- *Big Cursor* is the one place this program does touch pixels:
+  ScreenCaptureKit's own pointer is switched off and a sprite rendered
+  once on the main thread is blitted into each frame's `CVPixelBuffer`
+  before the writer sees it, so the GIF and APNG exports inherit it. The
+  arithmetic is neutral and tested; the blit runs on the capture queue
+  and is written to that thread's rules. See
+  [Big Cursor](#big-cursor).
 - Timing is taken from each sample buffer's presentation stamp; the
   writer's session starts at the first appended frame. This is what makes
   SCK's change-driven frame delivery record at real speed.
@@ -45,8 +54,8 @@
   two share the reader, the decimator, the scaler and the frame-delay
   planner; see [The export pipeline](#the-export-pipeline).
 - Everything platform-neutral (option model, type encodings, both image
-  encoders, the delay planner) is a unit with a co-located test that runs
-  on Linux too.
+  encoders, the delay planner, the live-effect and big-cursor maths) is a
+  unit with a co-located test that runs on Linux too.
 
 ## Process shape
 
@@ -81,7 +90,7 @@
 | Recording | `Knips.Recording` | Target → filter + geometry → writer → stream; progress; report |
 | CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `export`, `displays`, `windows`, `probe`; SIGINT/SIGTERM → `StopRequested` |
 | App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Live`, `Knips.App.Hotkey`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window, the live-effect animator, the global stop hotkey, and the neutral state machine (tested) |
-| Recording | `Knips.Recording`, `Knips.Recording.LiveMath` | Target → filter + geometry → writer → stream; progress; report. The live-effect arithmetic is neutral and tested |
+| Recording | `Knips.Recording`, `Knips.Recording.LiveMath`, `Knips.Recording.CursorMath`, `Knips.Recording.CursorOverlay` | Target → filter + geometry → writer → stream; progress; report. The live-effect and big-cursor arithmetic are neutral and tested; the overlay is the Darwin half that makes the sprite and blits it |
 | Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
 | Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.MovieTrim`, `Knips.Export.Pipeline` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; AVAssetExportSession passthrough trim; the shared GIF/APNG pipeline |
 | Export (neutral) | `Knips.Export.Gif`, `Knips.Export.Apng`, `Knips.Export.Bitmap`, `Knips.Export.Timing` | Median cut, dithering, LZW, GIF89a writer; APNG chunks, PNG filters, paszlib; BGRA buffer + resampling; frame-delay planning (all tested) |
@@ -1875,6 +1884,89 @@ a bundled process that asks without it is killed rather than prompted;
 the Audio ▸ Microphone checkbox is the surface that needs it.
 The bare CLI binary has no `Info.plist` and inherits the grant of the
 app responsible for it, which is the terminal it was launched from.
+
+## Big Cursor
+
+An enlarged pointer, drawn *into* the frames rather than captured with
+them: `SCStreamConfiguration.showsCursor` goes off for the recording and
+a sprite is composited into each frame's own pixels before
+`AVAssetWriterInput.appendSampleBuffer:` sees it. Baking it into the
+movie is the point — the GIF, APNG and passthrough-trim exports all read
+the finished file, so they inherit it for nothing.
+
+`Knips.Recording.CursorMath` is the whole of the arithmetic and has no
+framework in it (tested, like `Knips.Recording.LiveMath`).
+`Knips.Recording.CursorOverlay` is the Darwin half: `Prepare` on the main
+thread before the capture starts, `DrawInto` on the capture queue.
+
+**The mapping.** A frame is `PixelWidth × PixelHeight` showing the
+rectangle ScreenCaptureKit is currently reading, in the recorded
+display's own top-left points. A pointer at display point *(x, y)* is at
+frame pixel *((x − SourceX) / SourceWidth × PixelWidth)*, and likewise
+for y. One expression covers the region's offset, the Retina scale, and
+a live zoom, because all three are only ever ratios of the source
+rectangle to the output. The rectangle is fed from
+`TScreenStream.LastSentRect` — what SCK was *told* to read — and not from
+what the animator asked for, because an update inside the epsilon or one
+dropped behind another in flight never reached the framework.
+
+**Two threads.** `Prepare` asks AppKit for `NSCursor.arrowCursor`, picks
+the largest bitmap representation (macOS ships the arrow at 28×40 points
+with representations up to 280×400 pixels, so any sprite this program
+asks for is a *downsample* of real pixels), and draws it into a
+`CGBitmapContext` over a `GetMem` block — raw memory rather than a
+dynamic array, so nothing the capture queue touches is a managed type.
+`DrawInto` makes no Objective-C call at all: the pointer position comes
+from `CGEventCreate(nil)` + `CGEventGetLocation`, which is plain C,
+thread-safe, and needs no privacy grant (it reads the pointer; it taps
+nothing and injects nothing). The only shared mutable state is the source
+rectangle, and it sits under a `TPThreadMutex` like every other
+cross-thread value in this program.
+
+**Decisions, with what they rest on.**
+
+| Decision | Why |
+| --- | --- |
+| `arrowCursor`, not `currentSystemCursor` | Both bind in FPC 3.2.2 and both answer on device (checked). The sprite is rendered *once*, so whatever shape is under the pointer when the recording starts is frozen for the whole file — and `knips record --big-cursor` from a terminal would freeze an I-beam over a five-minute screencast. Following the live shape needs a main-thread re-render on shape change, which is separate work |
+| Fixed size in output pixels | The sprite does not grow with a live zoom. Scaling it per frame means resampling on the capture queue, and a Big Cursor is an artificial pointer to begin with, so one that keeps its size while the content zooms reads as deliberate |
+| In place, not copied | Measured. The alternative is a full-frame memcpy plus a pool allocation per frame — about 20 MB at 2880×1800, 600 MB/s at 30 fps. The specific risk is stale sprites, since SCK recycles surfaces and recomposites only what changed; see the table below |
+| Display targets only | A window's frames have no fixed relationship to the screen the pointer is measured against, and the window moves under us with no way to find out from the capture queue. `ResolveBigCursor` refuses it, `ValidateRecordingOptions` rejects the flag combination, and the app resolves before it asks so a ticked checkbox never fails a recording |
+
+**What was measured**, on an M-series Mac, macOS 26, 1512×982 points at
+two pixels per point. The pointer was never moved by tooling — this
+project does not inject input — so it was read where it sat and the
+*sprite* was made to move by panning the live `sourceRect` instead.
+
+| | measured |
+| --- | --- |
+| sprite | 140×200 px, hot spot 25,25; the arrow's opaque box inside it 53×92 at (19, 17) — 2.52× and 2.49× the system pointer's own 21×37, which is the 2.5 magnification |
+| whole-display recording, pointer at global (946.59, 201.28) | predicted arrow box (1887, 395)–(1939, 486); found white body (1889, 396)–(1939, 485) — the two-pixel inset is the black outline, which is not white |
+| the same recording with Big Cursor off | 90 white pixels in the *system* pointer's own predicted 21×37 box at (1891, 400), found (1891, 400)–(1909, 432) |
+| live pan, four plateaus 130 points apart | the sprite at each plateau's predicted pixel, within 2 px, and **nothing at the previous plateau's** |
+| the pathological ghost case: the sourceRect flipped between two positions 780 px apart every tick, 54 frames | every frame carried the arrow at exactly one of the two positions (≈700–850 white px there, ≈35–110 at the other, which is background and H.264 ringing). No ghosting |
+| cost per frame | 2.05 µs for the pointer read, 300 µs for a 140×200 blit — 0.9 % of a 30 fps frame's budget, dev build, unoptimised |
+| frame counts under an identical drive, 8 s | 107 frames with the sprite, 108 and 107 without; 0 dropped, 0 failed appends, 0 refused blits in every run |
+
+The ghost row is the one that settles the in-place decision. If SCK ever
+does start handing back a surface it has not recomposited, the symptom is
+a trail of pointers standing still in the video, and the fix is to
+composite into a copy.
+
+**The toggle** is one menu item next to Zoom on Click and Follow Mouse,
+with its own defaults key (`KnipsBigCursor`), its own reader and its own
+writer — the rule from "Each toggle writes its own key" below. It is
+idle-only, like the other two, for the plainest version of the same
+reason: the drawn pointer replaces ScreenCaptureKit's own, which is part
+of the configuration the capture started with, and the sprite is rendered
+before the first frame arrives.
+
+A sprite that cannot be made is never a reason to fail a recording. The
+geometry's `ShowsCursor` is put back before the stream configuration is
+built, so the file gets the ordinary system pointer, and the report
+carries `BigCursorError` for the CLI to print and the app to show in the
+menu. `knips probe` renders the sprite once and prints its size, so a
+future macOS that stops answering `+arrowCursor` is a line before a
+recording rather than a recording with no pointer in it.
 
 ## Geometry
 

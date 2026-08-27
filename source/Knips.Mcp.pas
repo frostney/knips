@@ -326,7 +326,11 @@ begin
     'width', FSession.Geometry.PixelWidth,
     'height', FSession.Geometry.PixelHeight,
     'fps', FSession.Geometry.FramesPerSecond,
-    'audio', AudioModeName(Recording.AudioMode)]));
+    'audio', AudioModeName(Recording.AudioMode),
+    // The resolved value, like audio: a sprite failure downgrades the
+    // recording to the system pointer, and a client that asked for the
+    // big cursor is told what it actually got.
+    'big_cursor', FSession.Report.BigCursor]));
   {$ELSE}
   Result := UnsupportedResult;
   {$ENDIF}
@@ -587,8 +591,9 @@ const
     '{"type":"object","properties":{"recording":{"type":"boolean"},'
     + '"path":{"type":"string"},"width":{"type":"integer"},'
     + '"height":{"type":"integer"},"fps":{"type":"integer"},'
-    + '"audio":{"type":"string"}},"required":["recording","path",'
-    + '"width","height","fps","audio"]}';
+    + '"audio":{"type":"string"},"big_cursor":{"type":"boolean"}},'
+    + '"required":["recording","path",'
+    + '"width","height","fps","audio","big_cursor"]}';
   RecordStopOutputSchema =
     '{"type":"object","properties":{"path":{"type":"string"},'
     + '"width":{"type":"integer"},"height":{"type":"integer"},'
@@ -675,6 +680,9 @@ begin
       + '(default none).', False)
       .AddBoolean('cursor', 'Show the pointer in the recording '
       + '(default true).', False)
+      .AddBoolean('big_cursor', 'Draw an enlarged pointer into the '
+      + 'frames instead of capturing the system one (default false). '
+      + 'Display recordings only, and not with cursor=false.', False)
       .AddInteger('bitrate', 'Average video bit rate in bits per '
       + 'second; omit to derive one from the capture size.', False),
     RecordStartOutputSchema), RecordStart)

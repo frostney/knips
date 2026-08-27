@@ -18,6 +18,8 @@ type
     procedure TestIdleStartsWindowOrLastRegion;
     procedure TestAudioTogglesOnlyWhileIdle;
     procedure TestLiveEffectsToggleOnlyWhileIdle;
+    procedure TestBigCursorTogglesOnlyWhileIdle;
+    procedure TestToggleDefaultsKeysAreDistinct;
     procedure TestIdleRejectsStop;
     procedure TestSelectingCommitsOrCancels;
     procedure TestCancelSelectionOnlyAppliesWhileSelecting;
@@ -175,6 +177,10 @@ begin
     TestAudioTogglesOnlyWhileIdle);
   Test('the two live-effect checkboxes only toggle while idle',
     TestLiveEffectsToggleOnlyWhileIdle);
+  Test('the big-cursor checkbox only toggles while idle',
+    TestBigCursorTogglesOnlyWhileIdle);
+  Test('no two remembered toggles share a defaults key',
+    TestToggleDefaultsKeysAreDistinct);
   Test('idle rejects stop', TestIdleRejectsStop);
   Test('selecting commits or cancels', TestSelectingCommitsOrCancels);
   Test('the menu''s cancel only applies while selecting',
@@ -266,6 +272,44 @@ begin
   Expect<Boolean>(IsCommandEnabled(asIdle, acToggleFollowMouse)).ToBe(True);
   Expect<Boolean>(IsCommandEnabled(asRecording, acToggleFollowMouse))
     .ToBe(False);
+end;
+
+// Big Cursor is settled at the same moment and for a plainer reason: the
+// drawn pointer replaces ScreenCaptureKit's own, which is part of the
+// configuration the capture started with, and its sprite is rendered
+// before the first frame arrives.
+procedure TTransitionTests.TestBigCursorTogglesOnlyWhileIdle;
+var
+  Next: TAppState;
+begin
+  Next := asRecording;
+  Expect<Boolean>(NextAppState(asIdle, acToggleBigCursor, Next)).ToBe(True);
+  Expect<Integer>(Ord(Next)).ToBe(Ord(asIdle));
+  Expect<Boolean>(NextAppState(asRecording, acToggleBigCursor, Next))
+    .ToBe(False);
+  Expect<Boolean>(NextAppState(asSelecting, acToggleBigCursor, Next))
+    .ToBe(False);
+  Expect<Boolean>(IsCommandEnabled(asIdle, acToggleBigCursor)).ToBe(True);
+  Expect<Boolean>(IsCommandEnabled(asRecording, acToggleBigCursor))
+    .ToBe(False);
+  Expect<Boolean>(IsCommandEnabled(asSelecting, acToggleBigCursor))
+    .ToBe(False);
+end;
+
+// Pins the big-cursor key's value and that it collides with none of the
+// established toggle keys. (This cannot catch a writer touching a
+// neighbour's key — that guarantee lives in the per-key store shape in
+// Knips.App.pas, one reader and one writer per key.)
+procedure TTransitionTests.TestToggleDefaultsKeysAreDistinct;
+begin
+  Expect<string>(BigCursorDefaultsKey).ToBe('KnipsBigCursor');
+  Expect<Boolean>(BigCursorDefaultsKey = ZoomOnClickDefaultsKey).ToBe(False);
+  Expect<Boolean>(BigCursorDefaultsKey = FollowMouseDefaultsKey).ToBe(False);
+  Expect<Boolean>(BigCursorDefaultsKey = SystemAudioDefaultsKey).ToBe(False);
+  Expect<Boolean>(BigCursorDefaultsKey = MicrophoneDefaultsKey).ToBe(False);
+  Expect<Boolean>(BigCursorDefaultsKey = CameraVisibleDefaultsKey)
+    .ToBe(False);
+  Expect<Boolean>(BigCursorDefaultsKey = CameraShapeDefaultsKey).ToBe(False);
 end;
 
 procedure TTransitionTests.TestIdleRejectsStop;

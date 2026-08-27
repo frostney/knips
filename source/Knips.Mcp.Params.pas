@@ -288,7 +288,7 @@ end;
 // actually use. Inside a path or a quoted extension, a flag-looking run
 // is preceded by '.', '/', or '"' and passes through untouched.
 const
-  RewriteCount = 20;
+  RewriteCount = 21;
   McpMessageRewrites: array[0..RewriteCount - 1, 0..1] of string = (
     ('--scale must be 1, 2, or 0 for auto',
       'scale must be "auto", "1", or "2"'),
@@ -302,6 +302,7 @@ const
     ('--rect', 'a region of left/top/width/height'),
     ('--trim', 'trim_start/trim_end'),
     ('--no-dither', 'dither'),
+    ('--big-cursor', 'big_cursor'),
     ('--no-cursor', 'cursor'),
     ('--bitrate', 'bitrate'),
     ('--display', 'display'),
@@ -411,7 +412,7 @@ function BuildMcpRecordingOptions(AArguments: TJSONObject;
 var
   Audio, Scale: string;
   WindowID: Integer;
-  ShowsCursor: Boolean;
+  ShowsCursor, BigCursor: Boolean;
 begin
   Result := False;
   AError := '';
@@ -470,6 +471,11 @@ begin
   if not McpOptionalBoolean(AArguments, 'cursor', ShowsCursor, AError) then
     Exit;
   ARecording.ShowsCursor := ShowsCursor;
+
+  BigCursor := False;
+  if not McpOptionalBoolean(AArguments, 'big_cursor', BigCursor, AError) then
+    Exit;
+  ARecording.BigCursor := BigCursor;
 
   Scale := 'auto';
   if not McpOptionalString(AArguments, 'scale', Scale, AError) then

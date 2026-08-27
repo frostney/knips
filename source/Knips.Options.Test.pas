@@ -55,6 +55,10 @@ type
     procedure TestAcceptsExcludedWindows;
     procedure TestRejectsZeroExcludedWindowId;
     procedure TestRejectsExcludedWindowsOnAWindowTarget;
+    procedure TestBigCursorIsOffByDefault;
+    procedure TestAcceptsBigCursorOnADisplay;
+    procedure TestRejectsBigCursorOnAWindowTarget;
+    procedure TestRejectsBigCursorWithNoCursor;
     procedure TestRejectsRectSmallerThanAlignment;
     procedure TestFillsContainer;
     procedure TestDefaultsHaveNoAudio;
@@ -333,6 +337,13 @@ begin
     TestRejectsZeroExcludedWindowId);
   Test('excluded windows are rejected on a window target',
     TestRejectsExcludedWindowsOnAWindowTarget);
+  Test('a big cursor is off by default', TestBigCursorIsOffByDefault);
+  Test('a display recording may have a big cursor',
+    TestAcceptsBigCursorOnADisplay);
+  Test('a big cursor is rejected on a window target',
+    TestRejectsBigCursorOnAWindowTarget);
+  Test('--no-cursor and --big-cursor are rejected together',
+    TestRejectsBigCursorWithNoCursor);
   Test('rect smaller than the alignment is rejected',
     TestRejectsRectSmallerThanAlignment);
   Test('validation fills the container from the path', TestFillsContainer);
@@ -473,6 +484,58 @@ begin
   Options.ExcludedWindowIDs[0] := 17;
   Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
   Expect<Boolean>(Pos('display recordings only', Error) > 0).ToBe(True);
+end;
+
+procedure TValidationTests.TestBigCursorIsOffByDefault;
+var
+  Options: TRecordingOptions;
+begin
+  Options := DefaultRecordingOptions;
+  Expect<Boolean>(Options.BigCursor).ToBe(False);
+  // The ordinary pointer is still on: nothing about this feature changes
+  // what a recording does until it is asked for.
+  Expect<Boolean>(Options.ShowsCursor).ToBe(True);
+end;
+
+procedure TValidationTests.TestAcceptsBigCursorOnADisplay;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.BigCursor := True;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(True);
+  Options.HasRegion := True;
+  Options.Region.Left := 10;
+  Options.Region.Top := 20;
+  Options.Region.Width := 400;
+  Options.Region.Height := 300;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(True);
+end;
+
+procedure TValidationTests.TestRejectsBigCursorOnAWindowTarget;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.TargetKind := ctkWindow;
+  Options.WindowID := 42;
+  Options.BigCursor := True;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+  Expect<Boolean>(Pos('display recordings only', Error) > 0).ToBe(True);
+end;
+
+procedure TValidationTests.TestRejectsBigCursorWithNoCursor;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.BigCursor := True;
+  Options.ShowsCursor := False;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+  Expect<Boolean>(Pos('mutually exclusive', Error) > 0).ToBe(True);
 end;
 
 procedure TValidationTests.TestRejectsRectSmallerThanAlignment;
