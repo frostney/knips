@@ -4,6 +4,14 @@ program Knips.Mcp.Params.Test;
 // scalar readers, the default paths, and the two builders that turn a
 // tools/call arguments object into the same validated options the CLI
 // builds from --flags.
+//
+// "On every host" is meant literally, and two things follow for the
+// fixtures here. The builders return every path through ExpandFileName,
+// so an expectation is the *expansion* of the literal a test passed in,
+// never a POSIX rendering of it — under Wine that same call yields
+// `Z:\tmp\…`. And the default recording folder is named by
+// Knips.App.State's MoviesFolderName, which is 'Movies' on macOS and
+// 'Videos' elsewhere, so it is referenced rather than spelled out.
 
 {$I Knips.inc}
 
@@ -12,6 +20,7 @@ uses
 
   fpjson,
   jsonparser,
+  Knips.App.State,
   Knips.Mcp.Params,
   Knips.Options,
   TestingPascalLibrary;
@@ -47,6 +56,7 @@ type
     procedure TestApngSitsBesideItsInput;
     procedure TestTrimNeverOverwritesItsInput;
     procedure TestExtensionlessInputStillGetsOne;
+    procedure TestRootedPathKnowsBothFamilies;
   end;
 
   TRecordingArgumentTests = class(TTestSuite)
@@ -122,6 +132,34 @@ type
 function ParseArguments(const AJson: string): TJSONObject;
 begin
   Result := GetJSON(AJson) as TJSONObject;
+end;
+
+// Whether a path is rooted, in either family's spelling. FPC 3.2.2's
+// SysUtils has no portable predicate for this, and the old test asked
+// `Path[1] = PathDelim`, which is false by construction for `C:\x` — it
+// is what the Wine smoke caught. No production code asks the question at
+// all: Knips.Mcp.Params calls ExpandFileName and trusts the RTL, so this
+// stays here, beside the two tests that need it.
+//
+// Accepted: a leading `/` (POSIX, and the separator ExpandFileName keeps
+// there); a `\\server\share` UNC prefix; and a `X:\` or `X:/` drive
+// root. Both families' shapes are accepted on every host rather than
+// under a conditional, so the suite makes one claim, not two — the cost is
+// that `C:\x`, a legal *relative* file name on POSIX, would read as
+// absolute here. Nothing feeds this anything but ExpandFileName output.
+function IsRootedPath(const APath: string): Boolean;
+begin
+  Result := True;
+  if (Length(APath) >= 1) and (APath[1] = '/') then
+    Exit;
+  if (Length(APath) >= 2) and (APath[1] = '\') and (APath[2] = '\') then
+    Exit;
+  if (Length(APath) >= 3) and (APath[2] = ':')
+    and (((APath[1] >= 'A') and (APath[1] <= 'Z'))
+    or ((APath[1] >= 'a') and (APath[1] <= 'z')))
+    and ((APath[3] = '\') or (APath[3] = '/')) then
+    Exit;
+  Result := False;
 end;
 
 { TToolTableTests }
@@ -364,15 +402,23 @@ begin
     TestTrimNeverOverwritesItsInput);
   Test('an extension-less input still gets one',
     TestExtensionlessInputStillGetsOne);
+  Test('the rooted-path check knows both families',
+    TestRootedPathKnowsBothFamilies);
 end;
 
 procedure TDefaultPathTests.TestRecordingPathUsesAppFolder;
 var
   Path: string;
 begin
+  // Spelled out except for the two things the host decides: the
+  // separator, and MoviesFolderName ('Movies' on macOS, 'Videos'
+  // elsewhere — Knips.App.State). Naming them is what makes this one
+  // expectation true everywhere; the folder nesting, the prefix and the
+  // timestamp format are still asserted literally.
   Path := DefaultMcpRecordingPath('/Users/tester',
     EncodeDate(2026, 8, 27) + EncodeTime(14, 5, 9, 0));
-  Expect<string>(Path).ToBe('/Users/tester/Movies/knips/'
+  Expect<string>(Path).ToBe('/Users/tester' + PathDelim
+    + MoviesFolderName + PathDelim + 'knips' + PathDelim
     + 'knips-20260827-140509.mp4');
 end;
 
@@ -404,6 +450,26 @@ begin
   Path := DefaultMcpExportPath('/tmp/clip', efGif);
   Expect<Boolean>(SameText(Path, '/tmp/clip')).ToBe(False);
   Expect<Boolean>(Pos('.gif', Path) > 0).ToBe(True);
+end;
+
+procedure TDefaultPathTests.TestRootedPathKnowsBothFamilies;
+begin
+  // IsRootedPath is what the two "comes back absolute" tests assert
+  // through, so it gets its own coverage rather than being trusted: a
+  // helper that answered True to everything would make both of them
+  // vacuous, which is precisely the failure mode the old
+  // `Path[1] = PathDelim` had in the other direction.
+  Expect<Boolean>(IsRootedPath('/tmp/clip.mp4')).ToBe(True);
+  Expect<Boolean>(IsRootedPath('C:\clip.mp4')).ToBe(True);
+  Expect<Boolean>(IsRootedPath('c:/clip.mp4')).ToBe(True);
+  Expect<Boolean>(IsRootedPath('\\server\share\clip.mp4')).ToBe(True);
+  Expect<Boolean>(IsRootedPath('clip.mp4')).ToBe(False);
+  Expect<Boolean>(IsRootedPath('sub/clip.mp4')).ToBe(False);
+  Expect<Boolean>(IsRootedPath('sub\clip.mp4')).ToBe(False);
+  Expect<Boolean>(IsRootedPath('C:clip.mp4')).ToBe(False);
+  Expect<Boolean>(IsRootedPath('')).ToBe(False);
+  // Whatever the host's own ExpandFileName produces is rooted by it.
+  Expect<Boolean>(IsRootedPath(ExpandFileName('clip.mp4'))).ToBe(True);
 end;
 
 { TRecordingArgumentTests }
@@ -454,8 +520,14 @@ var
   Recording: TRecordingOptions;
   Error: string;
 begin
+  // BuildMcpRecordingOptions expands every path it returns, so what the
+  // fixture gets back is the expansion of the default it was handed —
+  // '/tmp/default.mp4' on POSIX, 'Z:\tmp\default.mp4' under Wine. The
+  // claim under test is *which* path was chosen, so it is expressed the
+  // same way: the expansion of that literal, not a POSIX rendering of it.
   Expect<Boolean>(Build('{}', Recording, Error)).ToBe(True);
-  Expect<string>(Recording.OutputPath).ToBe('/tmp/default.mp4');
+  Expect<string>(Recording.OutputPath)
+    .ToBe(ExpandFileName('/tmp/default.mp4'));
   Expect<Integer>(Recording.DisplayIndex).ToBe(-1);
   Expect<Boolean>(Recording.TargetKind = ctkDisplay).ToBe(True);
   Expect<Boolean>(Recording.HasRegion).ToBe(False);
@@ -471,7 +543,11 @@ var
 begin
   Expect<Boolean>(Build('{"out": "/tmp/mine.mov"}', Recording,
     Error)).ToBe(True);
-  Expect<string>(Recording.OutputPath).ToBe('/tmp/mine.mov');
+  Expect<string>(Recording.OutputPath)
+    .ToBe(ExpandFileName('/tmp/mine.mov'));
+  // And it is *not* the default the builder was handed.
+  Expect<Boolean>(SameText(Recording.OutputPath,
+    ExpandFileName('/tmp/default.mp4'))).ToBe(False);
   Expect<Boolean>(Recording.Container = ocQuickTime).ToBe(True);
 end;
 
@@ -621,12 +697,17 @@ begin
   // it never saw, so what comes back has to be absolute.
   Expect<Boolean>(Build('{"out": "clip.mp4"}', Recording, Error))
     .ToBe(True);
-  Expect<Boolean>(Recording.OutputPath[1] = PathDelim).ToBe(True);
+  Expect<Boolean>(IsRootedPath(Recording.OutputPath)).ToBe(True);
   Expect<string>(Recording.OutputPath).ToBe(ExpandFileName('clip.mp4'));
-  // An already-absolute path is unchanged.
+  // An already-rooted path is taken as given rather than resolved
+  // against the working directory: same name, same rooted shape, and
+  // the same directory the caller asked for.
   Expect<Boolean>(Build('{"out": "/tmp/clip.mp4"}', Recording, Error))
     .ToBe(True);
-  Expect<string>(Recording.OutputPath).ToBe('/tmp/clip.mp4');
+  Expect<Boolean>(IsRootedPath(Recording.OutputPath)).ToBe(True);
+  Expect<string>(ExtractFileName(Recording.OutputPath)).ToBe('clip.mp4');
+  Expect<string>(Recording.OutputPath)
+    .ToBe(ExpandFileName('/tmp/clip.mp4'));
 end;
 
 { TOverwriteTests }
@@ -751,9 +832,17 @@ var
   Options: TExportOptions;
   Error: string;
 begin
+  // BuildMcpExportOptions expands the input first and derives the
+  // output from the expanded path, so the expectation is the expansion
+  // of the sibling name — the literal it used to spell out is only the
+  // POSIX rendering of that.
   Expect<Boolean>(Build('{"in": "/tmp/clip.mp4"}', efGif, Options,
     Error)).ToBe(True);
-  Expect<string>(Options.OutputPath).ToBe('/tmp/clip.gif');
+  Expect<string>(Options.OutputPath).ToBe(ExpandFileName('/tmp/clip.gif'));
+  // "Beside its input" is the actual claim: same directory, same stem.
+  Expect<string>(ExtractFilePath(Options.OutputPath))
+    .ToBe(ExtractFilePath(Options.InputPath));
+  Expect<string>(ExtractFileName(Options.OutputPath)).ToBe('clip.gif');
   Expect<Boolean>(Options.Format = efGif).ToBe(True);
   Expect<Integer>(Options.FramesPerSecond).ToBe(
     DefaultGifFramesPerSecond);
@@ -786,7 +875,7 @@ var
 begin
   Expect<Boolean>(Build('{"in": "/tmp/clip.mp4", "out": "/tmp/x.apng"}',
     efApng, Options, Error)).ToBe(True);
-  Expect<string>(Options.OutputPath).ToBe('/tmp/x.apng');
+  Expect<string>(Options.OutputPath).ToBe(ExpandFileName('/tmp/x.apng'));
 end;
 
 procedure TExportArgumentTests.TestTrimEndAloneIsARange;
@@ -834,7 +923,13 @@ begin
   // With a range it is the passthrough trim, written beside the input.
   Expect<Boolean>(Build('{"in": "/tmp/clip.mp4", "trim_start": 1.5, '
     + '"trim_end": 3.5}', efMovie, Options, Error)).ToBe(True);
-  Expect<string>(Options.OutputPath).ToBe('/tmp/clip-trim.mp4');
+  Expect<string>(Options.OutputPath)
+    .ToBe(ExpandFileName('/tmp/clip-trim.mp4'));
+  // And beside the input rather than over it — the point of the suffix.
+  Expect<string>(ExtractFilePath(Options.OutputPath))
+    .ToBe(ExtractFilePath(Options.InputPath));
+  Expect<Boolean>(SameText(Options.OutputPath, Options.InputPath))
+    .ToBe(False);
   Expect<Boolean>(Options.Format = efMovie).ToBe(True);
 end;
 
@@ -895,7 +990,8 @@ begin
   // The default output is derived from the expanded input, so it is
   // absolute too — and still sits beside it.
   Expect<string>(Options.OutputPath).ToBe(ExpandFileName('clip.gif'));
-  Expect<Boolean>(Options.OutputPath[1] = PathDelim).ToBe(True);
+  Expect<Boolean>(IsRootedPath(Options.InputPath)).ToBe(True);
+  Expect<Boolean>(IsRootedPath(Options.OutputPath)).ToBe(True);
   // An explicit relative out is expanded as well.
   Expect<Boolean>(Build('{"in": "/tmp/clip.mp4", "out": "o.gif"}', efGif,
     Options, Error)).ToBe(True);
