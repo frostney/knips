@@ -106,7 +106,8 @@ or two.
 ## Camera (added with the picture-in-picture window)
 
 The camera window reuses the same primitive — `KnipsCameraView` is a
-runtime-built `NSView` whose only method is `acceptsFirstMouse:` — so it
+runtime-built `NSView` carrying `acceptsFirstMouse:` and, since the
+corner snap, its own `mouseDown:`/`mouseDragged:`/`mouseUp:` — so it
 does not reopen gate 1. What it *did* add were platform facts about TCC
 that the design leans on, and those were measured rather than assumed.
 
@@ -143,21 +144,87 @@ cannot show the camera at all in this environment, and why the camera is
 in practice a `Knips.app` feature: `tools/make-app.sh` writes the
 `NSCameraUsageDescription` that lets TCC prompt properly.
 
+## Camera mirroring and drag (added with the shape, snap and dock work)
+
+### Proven on device (Darwin 25.5.0, Apple silicon, 2026-08-27)
+
+Measured with a scratch program built through `fpc @lwpt.cfg`, driving
+the units directly. Neither part needs a camera *grant* — the first needs
+only a camera *device*, which the fact above ("a denied grant is
+invisible to the session") is what makes possible.
+
+- **Mirroring, end to end.** `AVCaptureVideoPreviewLayer` answers
+  `-connection`, and the connection is **already non-nil straight after
+  `initWithSession:`** — which is where `TCameraPreview.Show` applies
+  mirroring. The connection answers `-isVideoMirroringSupported`
+  (`YES` on the built-in FaceTime HD Camera) and
+  `-setAutomaticallyAdjustsVideoMirroring:`.
+- **The default really is unmirrored**, which is the bug report:
+  before anything is set, `automaticallyAdjustsVideoMirroring` reads
+  `YES` and `videoMirrored` reads `NO`. After
+  `setAutomaticallyAdjustsVideoMirroring:NO` followed by
+  `setVideoMirrored:YES` — Apple's required order — the readbacks are
+  `NO` and `YES`. No exception was thrown, which is the point of doing
+  the two `isVideoMirroringSupported` / ordering guards first: an
+  `NSInvalidArgumentException` is an Objective-C exception and no Pascal
+  `try..except` could catch it.
+- **The drag reaches the view.** A window configured exactly like the
+  camera's — borderless, level 3, `movableByWindowBackground` **off**,
+  a runtime-built `NSView` content view — was sent left mouse down,
+  dragged and up through its own `-sendEvent:`. All three arrived at the
+  content view, once each. That is the whole mechanism behind the corner
+  snap: `mouseUp:` is a drag end that fires.
+
+- **The capture is live right up to the finalisation.** The reason
+  `Knips.App.FinishRecording` undocks the camera *after*
+  `FSession.FinishCapture` and not before it with `HideBorder`. Measured
+  by instrumenting the old undock point in a real region recording, twice:
+  `Capturing` was still true there, and the file's last frame landed
+  **30 ms later** with frames arriving every 33 ms right up to it (no gap
+  above 72 ms anywhere in the file). `FinishCapture` itself took 27 ms,
+  and stops the stream before finalising the writer. So a 200 ms glide
+  starting at the old point would have put roughly six frames of the
+  camera sliding away into the tail of every docked take; started after
+  `FinishCapture` returns, it has nothing to land in.
+
+**Not measured, and deliberately not relied on:** what the content view
+sees during a *real* `movableByWindowBackground` drag. That drag is a
+mouse-tracking loop inside `NSWindow` which pulls its own events from the
+queue, so `-sendEvent:` never enters it and a synthetic-event harness
+cannot answer the question either way (with the property on, the same
+three synthetic events still arrive — which proves nothing). The design
+does not depend on the answer: moving the window from the view's own
+`mouseDragged:` makes `mouseUp:` the drag end by construction.
+
 ### Still pending a human on device
 
 Nothing here is load-bearing for correctness — all of it is "does it look
-and feel right":
+and feel right", and the first item is what gates the rest:
 
-1. A granted camera actually renders in the window (rounded corners,
-   shadow, `resize-aspect-fill` crop).
-2. One click drags it (`acceptsFirstMouse:` plus
-   `movableByWindowBackground`), and level 3 puts it above ordinary
-   windows but below the menu bar and the selection overlay.
-3. A region recording that contains the window has the camera in the
-   played-back file — the whole premise, and unprovable without a grant.
-4. Position and visibility survive a relaunch; a bundled launch shows the
+1. **A camera grant for Knips.** On this machine
+   `authorizationStatusForMediaType:` answers `NotDetermined` for every
+   identity reachable from a shell, including an ad-hoc bundle signed
+   with `org.knips.app`'s own designated requirement — so the grant has
+   never been given here. Until it is, `TCameraPreview.Show` refuses by
+   design and nothing below can be exercised automatically.
+2. A granted camera actually renders in the window (rounded corners,
+   shadow, `resize-aspect-fill` crop) — **and comes up mirrored**, which
+   is the visible half of the measurement above.
+3. One click drags it (`acceptsFirstMouse:` plus the view's own
+   `mouseDown:`/`mouseDragged:`), the picture tracks the pointer, and
+   level 3 puts it above ordinary windows but below the menu bar and the
+   selection overlay.
+4. Releasing the drag animates it into the nearest corner of the
+   screen's visible frame.
+5. *Circular Camera* switches the live window to a disc about its own
+   centre and back, and the choice survives a relaunch.
+6. A region recording that contains the window has the camera in the
+   played-back file — the whole premise, and unprovable without a grant
+   — and a region recording started while the camera is up **docks** it
+   into the region's nearest corner and puts it back on stop.
+7. Position and visibility survive a relaunch; a bundled launch shows the
    usage string in the prompt.
-5. Whether a *Terminal*-launched bundle-less binary prompts (attributed
+8. Whether a *Terminal*-launched bundle-less binary prompts (attributed
    to Terminal's own camera grant) rather than being silently refused.
    The measured run was launched from a parent without a camera grant, so
    only the no-kill and silent-refusal halves generalise.

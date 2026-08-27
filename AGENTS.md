@@ -61,10 +61,10 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | `source/knips.pas` | Program: CLI surface (`app`, `record`, `export`, `displays`, `windows`, `mcp`, `probe`), signals |
 | `source/Knips.ThreadManager.pas` | Pthread-backed RTL locks/events for the no-cthreads build; no thread creation |
 | `source/Knips.Options.pas` | Platform-neutral recording + export option models, validation, large-export advice (tested) |
-| `source/Knips.App.State.pas` | Platform-neutral app state machine, titles, paths, selection maths, window-menu filter, export arithmetic (tested) |
+| `source/Knips.App.State.pas` | Platform-neutral app state machine, titles, paths, selection maths, window-menu filter, export arithmetic, camera placement — nearest corner, shape sizes, region flip (tested) |
 | `source/Knips.App.pas` | Menu-bar app: status item, menu, preferences, runtime-built `KnipsAppTarget` |
 | `source/Knips.App.Overlay.pas` | Region selection overlay; runtime-built `KnipsOverlayView`/`KnipsOverlayWindow` |
-| `source/Knips.App.Camera.pas` | Camera picture-in-picture window: AVCaptureSession + preview layer in a floating, draggable NSWindow |
+| `source/Knips.App.Camera.pas` | Camera picture-in-picture window: mirrored AVCaptureSession + preview layer in a floating NSWindow that drags itself, snaps to the nearest corner, switches between rectangle and circle, and docks into a recorded region |
 | `source/Knips.App.Live.pas` | Zoom on Click / Follow Mouse: a main-thread animator on the app's 30 Hz timer that moves the stream's `sourceRect` |
 | `source/Knips.Recording.LiveMath.pas` | Platform-neutral live-effect arithmetic: rect clamping, dead zone, smoothstep easing, which effects a target can have (tested) |
 | `source/Knips.App.Border.pas` | The frame around a recorded region; runtime-built `KnipsBorderView` |

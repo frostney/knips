@@ -106,6 +106,31 @@ conventional commits by git-cliff (`cliff.toml`).
   position and its on/off state survive a relaunch, and it stays up
   across recordings. Needs the Camera grant; `tools/make-app.sh` now
   writes `NSCameraUsageDescription` into the bundle.
+- `app`: the camera preview is **mirrored**, the way every camera
+  preview is — raise your left hand and the picture's left hand goes up.
+  Since Knips records the window as it appears, the file is mirrored
+  too, which is what Kap does and what a viewer expects.
+- `app`: releasing a drag **snaps the camera window to the nearest
+  corner** of the screen it was dropped on, inset by the same margin as
+  its first placement, over a short eased glide. A plain click is not a
+  drag and never moves the window. The window carries the drag itself now
+  (`mouseDown:`/`mouseDragged:`/`mouseUp:` on `KnipsCameraView`) instead
+  of `movableByWindowBackground`, because the snap needs a drag end that
+  is unambiguously the user letting go, and the glide is a timer this
+  unit owns rather than `setFrame:display:animate:` — an AppKit animated
+  setFrame runs a nested run loop, and a re-grab, a shape change or a
+  Hide landing inside one all misbehave.
+- `app`: a **Circular Camera** checkbox turns the camera window into a
+  disc — a square window with a half-side corner radius, cropping the
+  middle of the feed. It applies to the live window about its own
+  centre, and is remembered under `KnipsCameraShape`.
+- `app`: starting a **region** recording with the camera up **docks** it
+  into the nearest corner inside the region, so the picture-in-picture
+  ends up composited into the file the way Kap does it — still with no
+  compositing code, just a window moved to the right place. Stopping
+  puts it back where it was. Display and window recordings are
+  unaffected, and with *Follow Mouse* on it docks once at the start
+  rather than chasing the panning region.
 - `export` from `.mp4`/`.mov` to an animated GIF: median-cut palette,
   Floyd–Steinberg dithering and LZW in pure Pascal, with `--fps`,
   `--width`, and `--trim=start,end`.

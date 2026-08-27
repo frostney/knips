@@ -442,13 +442,25 @@ const
   // Every action AppKit will dispatch on the target: the menu items, the
   // status-item button, the deferred one-shots, the playback window's
   // buttons, and the Record Window submenu's delegate callback.
-  TargetSelectors: array[0..20] of string = (
+  TargetSelectors: array[0..21] of string = (
     'recordRegion:', 'recordDisplay:', 'recordWindow:', 'recordLastRegion:',
     'toggleSystemAudio:', 'stopRecording:', 'cancelSelection:',
     'revealRecordings:', 'quitKnips:', 'timerFired:', 'startPending:',
     'stopPending:', 'menuNeedsUpdate:', 'exportGif:', 'revealRecording:',
-    'closePlayback:', 'toggleCamera:', 'restoreCamera:',
-    'toggleZoomOnClick:', 'toggleFollowMouse:', 'liveTick:');
+    'closePlayback:', 'toggleCamera:', 'toggleCameraShape:',
+    'restoreCamera:', 'toggleZoomOnClick:', 'toggleFollowMouse:',
+    'liveTick:');
+  // The camera window's own drag, and the snap ease's timer callback.
+  // Without the three mouse methods the window still appears and still
+  // shows a picture — it simply cannot be moved at all, because
+  // movableByWindowBackground is off precisely so that mouseUp: reaches
+  // the view and the corner snap has a drag end to fire on. Without
+  // snapTick: the drop never travels: the timer fires into an
+  // unrecognised selector, which is an ObjC exception no Pascal handler
+  // could catch.
+  CameraViewSelectors: array[0..4] of string = (
+    'acceptsFirstMouse:', 'mouseDown:', 'mouseDragged:', 'mouseUp:',
+    'snapTick:');
 var
   Instance: id;
   I: Integer;
@@ -462,9 +474,11 @@ begin
     Exit;
   // Without acceptsFirstMouse: the camera window still appears — it just
   // takes two clicks to drag, which is the kind of failure nobody
-  // reports and everybody blames on themselves.
-  if not HasMethod(CameraViewClassName, 'acceptsFirstMouse:') then
-    Exit;
+  // reports and everybody blames on themselves. The three mouse methods
+  // are worse still: the window would not move at all.
+  for I := Low(CameraViewSelectors) to High(CameraViewSelectors) do
+    if not HasMethod(CameraViewClassName, CameraViewSelectors[I]) then
+      Exit;
   if not HasMethod(BorderViewClassName, 'drawRect:') then
     Exit;
   if not HasMethod(PlaybackDelegateClassName, 'windowWillClose:') then
