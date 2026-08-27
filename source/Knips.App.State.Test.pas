@@ -17,6 +17,7 @@ type
     procedure TestIdleStartsSelectionOrDisplay;
     procedure TestIdleStartsWindowOrLastRegion;
     procedure TestSystemAudioTogglesOnlyWhileIdle;
+    procedure TestLiveEffectsToggleOnlyWhileIdle;
     procedure TestIdleRejectsStop;
     procedure TestSelectingCommitsOrCancels;
     procedure TestCancelSelectionOnlyAppliesWhileSelecting;
@@ -114,6 +115,8 @@ begin
     TestIdleStartsWindowOrLastRegion);
   Test('the system-audio checkbox only toggles while idle',
     TestSystemAudioTogglesOnlyWhileIdle);
+  Test('the two live-effect checkboxes only toggle while idle',
+    TestLiveEffectsToggleOnlyWhileIdle);
   Test('idle rejects stop', TestIdleRejectsStop);
   Test('selecting commits or cancels', TestSelectingCommitsOrCancels);
   Test('the menu''s cancel only applies while selecting',
@@ -165,6 +168,33 @@ begin
     .ToBe(False);
   Expect<Boolean>(IsCommandEnabled(asIdle, acToggleSystemAudio)).ToBe(True);
   Expect<Boolean>(IsCommandEnabled(asRecording, acToggleSystemAudio))
+    .ToBe(False);
+end;
+
+// Zoom on Click and Follow Mouse move the stream's sourceRect, which only
+// exists because the capture was *started* with one. That is settled when
+// the recording begins, so like the audio checkbox they are legal in
+// exactly one state and leave it where they found it.
+procedure TTransitionTests.TestLiveEffectsToggleOnlyWhileIdle;
+var
+  Next: TAppState;
+begin
+  Next := asRecording;
+  Expect<Boolean>(NextAppState(asIdle, acToggleZoomOnClick, Next)).ToBe(True);
+  Expect<Integer>(Ord(Next)).ToBe(Ord(asIdle));
+  Expect<Boolean>(NextAppState(asIdle, acToggleFollowMouse, Next)).ToBe(True);
+  Expect<Integer>(Ord(Next)).ToBe(Ord(asIdle));
+  Expect<Boolean>(NextAppState(asRecording, acToggleZoomOnClick, Next))
+    .ToBe(False);
+  Expect<Boolean>(NextAppState(asRecording, acToggleFollowMouse, Next))
+    .ToBe(False);
+  Expect<Boolean>(NextAppState(asSelecting, acToggleZoomOnClick, Next))
+    .ToBe(False);
+  Expect<Boolean>(NextAppState(asSelecting, acToggleFollowMouse, Next))
+    .ToBe(False);
+  Expect<Boolean>(IsCommandEnabled(asIdle, acToggleZoomOnClick)).ToBe(True);
+  Expect<Boolean>(IsCommandEnabled(asIdle, acToggleFollowMouse)).ToBe(True);
+  Expect<Boolean>(IsCommandEnabled(asRecording, acToggleFollowMouse))
     .ToBe(False);
 end;
 

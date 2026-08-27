@@ -99,6 +99,14 @@ type
     // window target's filter is built from the window itself and has
     // nowhere to hang an exclusion list.
     ExcludedWindowIDs: array of Cardinal;
+    // Ask ScreenCaptureKit for an explicit sourceRect even when the whole
+    // target is being recorded, so the menu-bar app's live effects (Zoom
+    // on Click, Follow Mouse) have a rectangle to move. A stream started
+    // without one captures its whole content and cannot be given one
+    // later without changing what the output means halfway through the
+    // file. Off for the CLI: the effects are app-only, and an unnecessary
+    // sourceRect is one more thing between the display and the encoder.
+    LiveSourceRect: Boolean;
     FramesPerSecond: Integer;
     // Pixels per point: 1, 2, or ScaleAuto.
     Scale: Integer;

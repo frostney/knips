@@ -15,6 +15,15 @@ unit Knips.Capture.Stream;
 // rather than declared as an objcclass — see ADR-0002. Its one method is
 // the plain cdecl routine StreamOutputSampleBuffer below.
 //
+// UpdateSourceRect moves the captured rectangle while the stream runs,
+// through SCStream.updateConfiguration:completionHandler:. The output
+// width and height never change — they are the writer's dimensions and
+// AVAssetWriter will not have them move — so a smaller sourceRect scaled
+// into the same output is a zoom and a sliding one is a pan. Unlike start
+// and stop, this one is fire-and-forget: the caller ticks thirty times a
+// second and the newest rectangle wins, so nothing here waits, and at most
+// one update is ever in flight.
+//
 // Threading: OnSample runs on the capture queue, not the main thread.
 // There is no cthreads in this program, so nothing on that path may raise,
 // use try..finally, or WriteLn (the prototype's rules, carried over).
@@ -73,9 +82,39 @@ type
     FActive: Boolean;
     FOnSample: TSampleHandler;
     FLastError: string;
+    // The configuration handed to the most recent updateConfiguration:.
+    // Held rather than released on the spot: the call is asynchronous and
+    // ScreenCaptureKit does not document whether it copies. Released when
+    // the next one replaces it, which is only ever after the previous
+    // update's handler has run.
+    FUpdateConfiguration: SCStreamConfiguration;
+    FSupportsLiveUpdate: Boolean;
+    FLastSentRect: CGRect;
+    FHasSentRect: Boolean;
+    FLiveUpdatesSent: Int64;
+    // What GUpdatesCompleted/GUpdatesFailed read when this stream
+    // started. The counters are process-global and are deliberately never
+    // zeroed — an abandoned handler from a previous stream may still be
+    // out there — so this stream's own totals are differences.
+    FBaseUpdatesCompleted: Int64;
+    FBaseUpdatesFailed: Int64;
+    // GUpdatesFailed as it stood when the last update was issued. When it
+    // has moved on by the next call, that update was refused and
+    // FLastSentRect records a rectangle the stream never adopted.
+    FFailuresAtLastSend: Int64;
+    FConsecutiveFailures: Integer;
     // Called on the capture queue by StreamOutputSampleBuffer.
     procedure DeliverSample(ASampleBuffer: CMSampleBufferRef;
       AOutputType: NSInteger);
+    // One place builds the stream configuration, so a live update cannot
+    // drift from the configuration the capture started with: everything
+    // but the source rectangle comes from FGeometry either way.
+    function BuildConfiguration(AHasSourceRect: Boolean;
+      const ASourceRect: CGRect; out AConfiguration: SCStreamConfiguration;
+      out AError: string): Boolean;
+    procedure ReleaseUpdateConfiguration;
+    procedure DrainPendingUpdate;
+    function LastSendWasRefused: Boolean;
   public
     // Retains the filter for the stream's lifetime.
     constructor Create(const AFilter: SCContentFilter;
@@ -83,9 +122,38 @@ type
     destructor Destroy; override;
     function Start: Boolean;
     procedure Stop;
+    // Moves the captured rectangle without touching the output size.
+    // False when the stream cannot do it at all (not running, no source
+    // rectangle configured, an empty rectangle, or a build failure that
+    // leaves a message in LastError); True when the rectangle is either
+    // on its way or already where it was asked to be.
+    //
+    // Fire-and-forget by design. A call made while an update is still in
+    // flight is dropped and reported True: the caller is a thirty-hertz
+    // animator, LastSentRect is deliberately left alone, and the next
+    // tick therefore carries a *newer* rectangle than this one would
+    // have. Latest wins, and nothing queues up behind the framework.
+    function UpdateSourceRect(const ARect: CGRect): Boolean;
     property Active: Boolean read FActive;
     property LastError: string read FLastError;
     property OnSample: TSampleHandler read FOnSample write FOnSample;
+    // False when this stream has no rectangle to move, when the running
+    // framework has no updateConfiguration:, and from the moment
+    // MaxConsecutiveUpdateFailures refusals in a row have made the live
+    // effects give up for the rest of the recording. A caller that
+    // animates should watch this and stop when it goes False, or it will
+    // go on moving things that no longer follow the capture.
+    property SupportsLiveUpdate: Boolean read FSupportsLiveUpdate;
+    // Diagnostics for the recording report: how many updates this stream
+    // handed to ScreenCaptureKit, how many it completed and how many it
+    // refused (both differences against a baseline taken at Start, since
+    // the underlying counters are process-global and never reset), and
+    // the last NSError code seen — which is process-wide and therefore
+    // only meaningful when LiveUpdatesFailed is above zero.
+    property LiveUpdatesSent: Int64 read FLiveUpdatesSent;
+    function LiveUpdatesCompleted: Int64;
+    function LiveUpdatesFailed: Int64;
+    function LiveUpdateErrorCode: NSInteger;
   end;
 
 // The runtime-built output class, registered on first use. Exposed so
@@ -98,6 +166,15 @@ function StreamOutputClassName: string;
 // (setCaptureMicrophone:, macOS 15+). Probe prints it; Start refuses
 // cleanly without it.
 function StreamSupportsMicrophone: Boolean;
+
+// True when SCStream carries updateConfiguration:completionHandler:, which
+// Zoom on Click and Follow Mouse are built on. The header puts it at
+// macOS 12.3, the same version as SCStream itself, so this should never be
+// False — it is checked rather than assumed because an unrecognised
+// selector is an Objective-C exception no Pascal handler can catch, and
+// this one would be sent thirty times a second into a live recording.
+// `knips probe` prints it.
+function StreamSupportsLiveUpdate: Boolean;
 
 {$ENDIF}
 
@@ -114,6 +191,8 @@ const
   OutputProtocolName = 'SCStreamOutput';
   OwnerIvarName = 'knipsOwner';
   SampleSelector = 'stream:didOutputSampleBuffer:ofType:';
+  StreamClassName = 'SCStream';
+  UpdateSelector = 'updateConfiguration:completionHandler:';
   VideoQueueLabel = 'knips.capture.video';
   // SCK delivers audio on its own output; giving it its own queue keeps
   // audio delivery from waiting behind a video append. The two appends
@@ -131,6 +210,20 @@ const
   // before refusing. Short: this only ever runs after a timeout, and the
   // caller (the menu-bar app) must not freeze on a retry.
   StalePendingSlices = 1000;
+  // How long Stop waits for an outstanding live reconfiguration. Short on
+  // purpose: this is a property change on a running stream, not a capture
+  // start, so it either lands in milliseconds or it is not going to.
+  PendingUpdateSlices = 300;
+  // Points. A source rectangle within this of the one already sent is not
+  // worth an updateConfiguration: round trip — the animator lands a
+  // fraction of a point from its target for many ticks after it settles.
+  SourceRectEpsilonPoints = 0.5;
+  // How many refusals in a row before the live effects give up for the
+  // rest of the recording. The caller retries about twenty times a
+  // second, so a framework that has decided to say no would otherwise be
+  // asked forever, silently. Five is enough to ride out a one-off and
+  // short enough that a real refusal is noticed in a quarter of a second.
+  MaxConsecutiveUpdateFailures = 5;
 
 var
   GOutputClass: pobjc_class = nil;
@@ -142,6 +235,28 @@ var
   // DrainPendingStart.
   GStartPending: Boolean = False;
   GStopReady: Boolean = False;
+  // True from the moment updateConfiguration:completionHandler: is issued
+  // until its handler runs. One at a time, process-wide — the same shape
+  // as the start flag, and for the same reason: the handler is a global
+  // cdecl procedure with nowhere to carry a back-pointer. Only one
+  // TScreenStream exists at a time (the app makes a fresh session per
+  // recording), and Stop drains this before the next one can start.
+  GUpdatePending: Boolean = False;
+  // Written on a ScreenCaptureKit queue and read on the main thread;
+  // unsynchronised on purpose, because only one update is ever
+  // outstanding, so only one thread is ever incrementing.
+  //
+  // Monotonic for the life of the process and never reset. A stream that
+  // gave up waiting for an update (DrainPendingUpdate) leaves a handler
+  // the framework may still run minutes later, and zeroing these would
+  // let that handler push a *later* stream's totals negative. Each stream
+  // snapshots them at Start and reports differences instead.
+  //
+  // GUpdatesFailed is not only a diagnostic: UpdateSourceRect watches it
+  // to notice that the rectangle it last issued was refused.
+  GUpdatesCompleted: Int64 = 0;
+  GUpdatesFailed: Int64 = 0;
+  GUpdateErrorCode: NSInteger = 0;
 
 // The SCStreamOutput method. Runs on the capture queue.
 procedure StreamOutputSampleBuffer(ASelf: id; ACommand: SEL; AStream: id;
@@ -173,6 +288,24 @@ end;
 procedure StopCompletionHandler(AError: id); cdecl;
 begin
   GStopReady := True;
+end;
+
+// The live-reconfiguration handler. Same queue rules as the two above,
+// and a little stricter: it does not retain the NSError, because nobody
+// waits for this one. Only its `code` is kept — a plain integer read
+// through one message send — so the report can say *why* an update was
+// refused without this handler ever touching a managed type or the heap.
+// The pending flag is cleared last, exactly as in StartCompletionHandler.
+procedure UpdateCompletionHandler(AError: id); cdecl;
+begin
+  if AError <> nil then
+  begin
+    Inc(GUpdatesFailed);
+    GUpdateErrorCode := NSError(AError).code;
+  end
+  else
+    Inc(GUpdatesCompleted);
+  GUpdatePending := False;
 end;
 
 // Drops whatever a previous start left behind, including a retained
@@ -229,6 +362,15 @@ begin
     Exit(False);
   Result := RespondsToSelector(id(Configuration), 'setCaptureMicrophone:');
   Configuration.release;
+end;
+
+// Asked of the class rather than of an instance: SCStream's -init is
+// NS_UNAVAILABLE, so there is no instance to be had without a filter and a
+// configuration, and `knips probe` has neither.
+function StreamSupportsLiveUpdate: Boolean;
+begin
+  Result := ClassImplementsSelector(LookUpClass(StreamClassName),
+    UpdateSelector);
 end;
 
 function EnsureStreamOutputClass: pobjc_class;
@@ -323,6 +465,7 @@ begin
     dispatch_release(FAudioQueue);
   if FMicrophoneQueue <> nil then
     dispatch_release(FMicrophoneQueue);
+  ReleaseUpdateConfiguration;
   if FFilter <> nil then
     FFilter.release;
   inherited Destroy;
@@ -347,6 +490,234 @@ begin
     FOnSample(ASampleBuffer, skMicrophone);
 end;
 
+// Everything but the source rectangle comes from FGeometry, so the
+// configuration a live update sends is the one the capture started with
+// in every other respect — dimensions, rate, cursor, audio. The output
+// size in particular is never derived from the source rectangle: it is
+// the writer's, and AVAssetWriter will not have it change mid-file.
+//
+// scalesToFit goes on for *any* source rectangle, not only a region's:
+// with it off the header says the output "only scales down", so a zoomed
+// (smaller) rectangle would be letterboxed into the fixed output instead
+// of filling it, which is the whole effect.
+function TScreenStream.BuildConfiguration(AHasSourceRect: Boolean;
+  const ASourceRect: CGRect; out AConfiguration: SCStreamConfiguration;
+  out AError: string): Boolean;
+var
+  Configuration: SCStreamConfiguration;
+begin
+  Result := False;
+  AConfiguration := nil;
+  AError := '';
+  Configuration := SCStreamConfiguration(SCStreamConfiguration.alloc.init);
+  if Configuration = nil then
+  begin
+    AError := 'SCStreamConfiguration init failed';
+    Exit;
+  end;
+  Configuration.setWidth(FGeometry.PixelWidth);
+  Configuration.setHeight(FGeometry.PixelHeight);
+  Configuration.setMinimumFrameInterval(CMTimeMake(1,
+    FGeometry.FramesPerSecond));
+  Configuration.setPixelFormat(kCVPixelFormatType_32BGRA);
+  Configuration.setShowsCursor(ObjCBOOL(FGeometry.ShowsCursor));
+  Configuration.setQueueDepth(QueueDepth);
+  if FGeometry.CapturesAudio then
+  begin
+    Configuration.setCapturesAudio(ObjCBOOL(True));
+    Configuration.setSampleRate(FGeometry.AudioSampleRate);
+    Configuration.setChannelCount(FGeometry.AudioChannelCount);
+  end;
+  if FGeometry.CapturesMicrophone then
+  begin
+    // captureMicrophone is macOS 15+; the project floor is 13. On an
+    // older OS the send would raise an ObjC unrecognized-selector
+    // exception no Pascal handler can catch — abort with a message
+    // instead of a SIGABRT and a zero-byte file.
+    if not RespondsToSelector(id(Configuration), 'setCaptureMicrophone:') then
+    begin
+      AError := 'microphone capture needs macOS 15 or newer';
+      Configuration.release;
+      Exit;
+    end;
+    Configuration.setCaptureMicrophone(ObjCBOOL(True));
+    // nil is the documented "system default microphone"; setting it
+    // explicitly keeps the v1 choice visible rather than implied.
+    Configuration.setMicrophoneCaptureDeviceID(nil);
+  end;
+  if AHasSourceRect then
+  begin
+    Configuration.setSourceRect(ASourceRect);
+    Configuration.setScalesToFit(ObjCBOOL(True));
+  end;
+  AConfiguration := Configuration;
+  Result := True;
+end;
+
+procedure TScreenStream.ReleaseUpdateConfiguration;
+begin
+  if FUpdateConfiguration <> nil then
+  begin
+    FUpdateConfiguration.release;
+    FUpdateConfiguration := nil;
+  end;
+end;
+
+// An update still in flight has a handler that will fire on a framework
+// queue. Letting it outlive the stream leaves the pending flag set for the
+// *next* recording, whose first updates would then all be dropped. Pumping
+// is what lets the handler run at all, since the main thread is where the
+// caller is.
+procedure TScreenStream.DrainPendingUpdate;
+var
+  WaitCount: Integer;
+begin
+  WaitCount := 0;
+  while GUpdatePending and (WaitCount < PendingUpdateSlices) do
+  begin
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, RunLoopSliceSeconds, False);
+    Inc(WaitCount);
+  end;
+  if not GUpdatePending then
+    Exit;
+
+  // Abandoned rather than waited out forever: leaving the flag set would
+  // silently disable the feature for the rest of the process's life. Two
+  // things are given up here, both deliberately.
+  //
+  // The configuration is **leaked** — the reference is dropped without a
+  // release. ScreenCaptureKit is, as far as this code can tell, still
+  // applying it; whether it retained a copy is undocumented, and a
+  // release that turns out to have been the last one is a use-after-free
+  // inside the framework. One SCStreamConfiguration is a few hundred
+  // bytes, this path needs a stream that has stopped answering for three
+  // hundred milliseconds, and the process is a screen recorder, not a
+  // server. Unowned beats freed here.
+  FUpdateConfiguration := nil;
+  // And a handler that arrives after this can clear a later update's flag
+  // early — at most one extra update in flight for one tick, corrected by
+  // the next one — or add one to the global counters after a later stream
+  // has taken its baseline, which overstates that recording's totals by
+  // one. Both are diagnostics-grade at a frequency of approximately
+  // never; the counters are never zeroed, so neither can go negative.
+  GUpdatePending := False;
+end;
+
+function TScreenStream.LiveUpdatesCompleted: Int64;
+begin
+  Result := GUpdatesCompleted - FBaseUpdatesCompleted;
+  if Result < 0 then
+    Result := 0;
+end;
+
+function TScreenStream.LiveUpdatesFailed: Int64;
+begin
+  Result := GUpdatesFailed - FBaseUpdatesFailed;
+  if Result < 0 then
+    Result := 0;
+end;
+
+function TScreenStream.LiveUpdateErrorCode: NSInteger;
+begin
+  Result := GUpdateErrorCode;
+end;
+
+// Whether the update this stream last issued was refused. FLastSentRect
+// records what was *asked for*, not what the stream adopted, so a refusal
+// strands it on a rectangle that never took: every later rectangle within
+// the epsilon of that stranded value would then be deduped away, and a
+// clip would stay zoomed for its remainder while the animator believed it
+// had eased out. The completion handler runs on a framework queue and can
+// only touch globals, so the healing is done here, from the sending side:
+// the failure counter is remembered at each send and compared at the next.
+function TScreenStream.LastSendWasRefused: Boolean;
+begin
+  Result := FHasSentRect and (GUpdatesFailed <> FFailuresAtLastSend);
+end;
+
+function TScreenStream.UpdateSourceRect(const ARect: CGRect): Boolean;
+var
+  Configuration: SCStreamConfiguration;
+  Error: string;
+  Refused: Boolean;
+begin
+  Result := False;
+  if not FActive or (FStream = nil) or not FSupportsLiveUpdate then
+    Exit;
+  // A stream that started without a source rectangle captures its whole
+  // content and has nothing to move; giving it one now would change what
+  // the output means halfway through the file. The caller asks for the
+  // rectangle up front (TRecordingOptions.LiveSourceRect).
+  if not FGeometry.HasSourceRect then
+    Exit;
+  if (ARect.size.width <= 0) or (ARect.size.height <= 0) then
+    Exit;
+
+  Refused := LastSendWasRefused;
+  if Refused then
+  begin
+    FFailuresAtLastSend := GUpdatesFailed;
+    Inc(FConsecutiveFailures);
+    if FConsecutiveFailures >= MaxConsecutiveUpdateFailures then
+    begin
+      // Twenty retries a second into a framework that keeps saying no is
+      // a silent storm. Stop for the rest of the recording and say so
+      // once; the capture carries on at whatever rectangle last took.
+      FSupportsLiveUpdate := False;
+      FLastError := Format('live zoom/pan disabled: ScreenCaptureKit '
+        + 'refused %d source-rect updates in a row (last error %d)',
+        [FConsecutiveFailures, Integer(GUpdateErrorCode)]);
+      Exit;
+    end;
+    if FLastError = '' then
+      FLastError := Format('ScreenCaptureKit refused a live source-rect '
+        + 'update (error %d); retrying', [Integer(GUpdateErrorCode)]);
+  end
+  else if FHasSentRect and not GUpdatePending then
+    // The last send resolved and nothing failed: the streak is over.
+    FConsecutiveFailures := 0;
+
+  // Already there. Not an error, and the common case once the animation
+  // has settled: the animator keeps ticking for the whole recording.
+  // Skipped entirely after a refusal — the rectangle it would compare
+  // against is one the stream never adopted.
+  if not Refused and FHasSentRect
+    and (Abs(ARect.origin.x - FLastSentRect.origin.x)
+    <= SourceRectEpsilonPoints)
+    and (Abs(ARect.origin.y - FLastSentRect.origin.y)
+    <= SourceRectEpsilonPoints)
+    and (Abs(ARect.size.width - FLastSentRect.size.width)
+    <= SourceRectEpsilonPoints)
+    and (Abs(ARect.size.height - FLastSentRect.size.height)
+    <= SourceRectEpsilonPoints) then
+    Exit(True);
+  // Coalescing, such as it is: drop this one and leave FLastSentRect
+  // alone, so the next tick — a thirtieth of a second away — sends a
+  // newer rectangle than this one. Latest wins; nothing queues.
+  if GUpdatePending then
+    Exit(True);
+
+  if not BuildConfiguration(True, ARect, Configuration, Error) then
+  begin
+    FLastError := Error;
+    Exit;
+  end;
+  // The previous configuration has done its work — its update completed,
+  // or this call would have been dropped above.
+  ReleaseUpdateConfiguration;
+  FUpdateConfiguration := Configuration;
+  GUpdatePending := True;
+  // Snapshot before the send, so the handler cannot move the counter
+  // between the send and the record of where it stood.
+  FFailuresAtLastSend := GUpdatesFailed;
+  FStream.updateConfiguration_completionHandler(Configuration,
+    UpdateCompletionHandler);
+  FLastSentRect := ARect;
+  FHasSentRect := True;
+  Inc(FLiveUpdatesSent);
+  Result := True;
+end;
+
 function TScreenStream.Start: Boolean;
 var
   Configuration: SCStreamConfiguration;
@@ -362,46 +733,21 @@ begin
   if not DrainPendingStart(FLastError) then
     Exit;
   ClearStartResult;
+  // Baselines, not a reset: an abandoned handler from a previous stream
+  // may still increment the globals, and zeroing them would let it push
+  // this stream's totals negative. See the declarations above.
+  FBaseUpdatesCompleted := GUpdatesCompleted;
+  FBaseUpdatesFailed := GUpdatesFailed;
+  FFailuresAtLastSend := GUpdatesFailed;
+  FConsecutiveFailures := 0;
+  FLiveUpdatesSent := 0;
 
   EnsureStreamOutputClass;
 
-  Configuration := SCStreamConfiguration.alloc.init;
+  if not BuildConfiguration(FGeometry.HasSourceRect, FGeometry.SourceRect,
+    Configuration, FLastError) then
+    Exit;
   try
-    Configuration.setWidth(FGeometry.PixelWidth);
-    Configuration.setHeight(FGeometry.PixelHeight);
-    Configuration.setMinimumFrameInterval(CMTimeMake(1,
-      FGeometry.FramesPerSecond));
-    Configuration.setPixelFormat(kCVPixelFormatType_32BGRA);
-    Configuration.setShowsCursor(ObjCBOOL(FGeometry.ShowsCursor));
-    Configuration.setQueueDepth(QueueDepth);
-    if FGeometry.CapturesAudio then
-    begin
-      Configuration.setCapturesAudio(ObjCBOOL(True));
-      Configuration.setSampleRate(FGeometry.AudioSampleRate);
-      Configuration.setChannelCount(FGeometry.AudioChannelCount);
-    end;
-    if FGeometry.CapturesMicrophone then
-    begin
-      // captureMicrophone is macOS 15+; the project floor is 13. On an
-      // older OS the send would raise an ObjC unrecognized-selector
-      // exception no Pascal handler can catch — abort with a message
-      // instead of a SIGABRT and a zero-byte file.
-      if not RespondsToSelector(id(Configuration), 'setCaptureMicrophone:') then
-      begin
-        FLastError := 'microphone capture needs macOS 15 or newer';
-        Exit;
-      end;
-      Configuration.setCaptureMicrophone(ObjCBOOL(True));
-      // nil is the documented "system default microphone"; setting it
-      // explicitly keeps the v1 choice visible rather than implied.
-      Configuration.setMicrophoneCaptureDeviceID(nil);
-    end;
-    if FGeometry.HasSourceRect then
-    begin
-      Configuration.setSourceRect(FGeometry.SourceRect);
-      Configuration.setScalesToFit(ObjCBOOL(True));
-    end;
-
     FStream := SCStream(SCStream.alloc.initWithFilter_configuration_delegate(
       FFilter, Configuration, nil));
     if FStream = nil then
@@ -412,6 +758,10 @@ begin
   finally
     Configuration.release;
   end;
+  FSupportsLiveUpdate := FGeometry.HasSourceRect
+    and RespondsToSelector(id(FStream), UpdateSelector);
+  FLastSentRect := FGeometry.SourceRect;
+  FHasSentRect := FGeometry.HasSourceRect;
 
   FOutput := InstantiateClass(GOutputClass);
   if FOutput = nil then
@@ -499,6 +849,10 @@ var
 begin
   if not FActive or (FStream = nil) then
     Exit;
+  // Before the stop, not after: while the stream is still running the
+  // update either completes in a millisecond or never will, and this is
+  // the only place that can clear the flag for the next recording.
+  DrainPendingUpdate;
   GStopReady := False;
   FStream.stopCaptureWithCompletionHandler(StopCompletionHandler);
   WaitCount := 0;
@@ -513,6 +867,8 @@ begin
   FStream.release;
   FStream := nil;
   FActive := False;
+  FSupportsLiveUpdate := False;
+  ReleaseUpdateConfiguration;
 end;
 
 {$ENDIF}

@@ -10,6 +10,10 @@
   records, the finished clip opens in a playback window with a one-click
   GIF export, and **Camera** adds a draggable floating camera window
   that gets recorded along with everything else.
+- Two menu checkboxes change what a recording shows while it runs —
+  **Zoom on Click** (a click zooms the recording around it) and **Follow
+  Mouse** (a region recording pans with the pointer). Neither changes the
+  file's dimensions.
 - `./build/knips export --in=demo.mp4 --out=demo.gif` turns the
   recording into an animated GIF, optionally trimmed and scaled;
   `--out=demo.apng` writes truecolour APNG instead, and `--out=cut.mp4
@@ -72,6 +76,8 @@ A `◉` appears in the menu bar. Clicking it opens:
 | Stop Recording | Enabled only while recording. |
 | Cancel selection | Enabled only while selecting. The overlay covers the menu bar, so this only matters if the overlay failed to open. |
 | Camera | Floating camera window; checked while it is up. Available in every state, recording included. |
+| Zoom on Click | A checkbox. On, a click inside the recorded area zooms the *recording* to 2× around the click, holds for 0.8 s after the last click, and eases back. Nothing on screen moves — only what the file shows. Remembered between launches; not changeable mid-recording. |
+| Follow Mouse (region) | A checkbox. On, a **region** recording pans to keep the pointer inside the middle third of the frame; the red frame moves with it. Whole-display and window recordings ignore it — a display has nowhere to pan. Remembered between launches; not changeable mid-recording. |
 | Record System Audio | A checkbox. On, recordings get an AAC track of the system mix. Remembered between launches; not changeable mid-recording. |
 | Recordings folder | Opens `~/Movies/knips/` in Finder. |
 | Last error: … | Only visible after a failure; the full text is in Console.app. |
@@ -93,6 +99,36 @@ the two points *outside* the recorded rectangle, and its window id is
 passed to ScreenCaptureKit's `excludingWindows:` so the compositor never
 draws it into the stream at all. Display and window recordings get no
 frame.
+
+**Zoom on Click and Follow Mouse.** Both change what the *file* shows
+while it records, and neither changes anything on screen or the size of
+the finished movie — they move the rectangle ScreenCaptureKit reads
+from the display, not the video's dimensions. Turn either on before you
+start; they are greyed out while a recording runs, because what the
+stream captures is fixed when the capture starts.
+
+Zoom works for a region and for a whole display. Follow only works for a
+region: a full-display capture already contains everywhere the pointer
+can go. Window recordings get neither. With both on they compose — the
+frame follows the pointer, and a click zooms inside wherever the frame
+has got to.
+
+Clicks on the menu bar never zoom — including the one on the Knips icon
+that stops the recording, which would otherwise end every full-screen
+capture by zooming into the top corner.
+
+Two things switch the effects off for a single recording rather than
+failing it, both reported on the `Last error: …` line and in Console.app.
+If the red frame around a region could not be excluded from the capture,
+Follow Mouse is refused rather than record its own frame sliding into
+shot. And if ScreenCaptureKit refuses five source-rectangle changes in a
+row, the zoom and the pan stop for the rest of that recording — the file
+keeps being written either way.
+
+```sh
+defaults write knips KnipsZoomOnClick -bool true   # or use the menu
+defaults write knips KnipsFollowMouse -bool true
+```
 
 **The playback window.** When a recording finishes, it opens in a normal
 window with AVKit's transport controls and three buttons. It is the one
@@ -125,8 +161,10 @@ button's
 defaults do not cover — a different rate, a width, a trim — use
 `knips export` (below).
 
-**Remembered settings.** Record System Audio and the last region live in
-`NSUserDefaults` under `KnipsRecordSystemAudio` and `KnipsLastRegion*`.
+**Remembered settings.** Record System Audio, Zoom on Click, Follow
+Mouse and the last region live in `NSUserDefaults` under
+`KnipsRecordSystemAudio`, `KnipsZoomOnClick`, `KnipsFollowMouse` and
+`KnipsLastRegion*`.
 The bare binary and `Knips.app` keep separate domains (`knips` versus the
 bundle identifier), so a setting made in one is not seen by the other:
 

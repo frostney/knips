@@ -442,12 +442,13 @@ const
   // Every action AppKit will dispatch on the target: the menu items, the
   // status-item button, the deferred one-shots, the playback window's
   // buttons, and the Record Window submenu's delegate callback.
-  TargetSelectors: array[0..17] of string = (
+  TargetSelectors: array[0..20] of string = (
     'recordRegion:', 'recordDisplay:', 'recordWindow:', 'recordLastRegion:',
     'toggleSystemAudio:', 'stopRecording:', 'cancelSelection:',
     'revealRecordings:', 'quitKnips:', 'timerFired:', 'startPending:',
     'stopPending:', 'menuNeedsUpdate:', 'exportGif:', 'revealRecording:',
-    'closePlayback:', 'toggleCamera:', 'restoreCamera:');
+    'closePlayback:', 'toggleCamera:', 'restoreCamera:',
+    'toggleZoomOnClick:', 'toggleFollowMouse:', 'liveTick:');
 var
   Instance: id;
   I: Integer;
@@ -595,6 +596,16 @@ begin
     WriteLn('microphone capture: supported')
   else
     WriteLn('microphone capture: unavailable (needs macOS 15+)');
+
+  // Likewise informational. The header puts updateConfiguration: at
+  // macOS 12.3, below the project floor, so this should always say
+  // supported; the app turns Zoom on Click and Follow Mouse off for a
+  // recording rather than failing it where it does not.
+  if StreamSupportsLiveUpdate then
+    WriteLn('live source-rect updates: supported')
+  else
+    WriteLn('live source-rect updates: unavailable (Zoom on Click and '
+      + 'Follow Mouse will be off)');
 
   try
     Content := TShareableContent.Create;

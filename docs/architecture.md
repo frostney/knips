@@ -24,6 +24,14 @@
   for as long as it is open the process switches to the `Regular` policy
   — a Dock tile, a place in ⌘-Tab, and a menu bar with ⌘W and ⌘Q. See
   [Menu bar app](#menu-bar-app).
+  GIF export. See [Menu bar app](#menu-bar-app).
+- Two menu checkboxes change what a recording shows while it runs —
+  *Zoom on Click* and *Follow Mouse*. Neither touches the file's
+  dimensions, which `AVAssetWriter` fixes at the first frame: both animate
+  the stream's `sourceRect` through
+  `SCStream.updateConfiguration:completionHandler:`, so a smaller
+  rectangle is a zoom and a sliding one is a pan. See
+  [Live effects](#live-effects-zoom-on-click-and-follow-mouse).
 - Timing is taken from each sample buffer's presentation stamp; the
   writer's session starts at the first appended frame. This is what makes
   SCK's change-driven frame delivery record at real speed.
@@ -71,6 +79,9 @@
 | MCP | `Knips.Mcp`, `Knips.Mcp.Params` | The tool surface over pascal-mcp-sdk's stdio transport; the neutral half is the tool table, argument mapping, and default paths (tested) |
 | App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window, and the neutral state machine (tested) |
 | Recording | `Knips.Recording` | Target → filter + geometry → writer → stream; progress; report |
+| CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `export`, `displays`, `windows`, `probe`; SIGINT/SIGTERM → `StopRequested` |
+| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Live`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window, the live-effect animator, and the neutral state machine (tested) |
+| Recording | `Knips.Recording`, `Knips.Recording.LiveMath` | Target → filter + geometry → writer → stream; progress; report. The live-effect arithmetic is neutral and tested |
 | Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
 | Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.MovieTrim`, `Knips.Export.Pipeline` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; AVAssetExportSession passthrough trim; the shared GIF/APNG pipeline |
 | Export (neutral) | `Knips.Export.Gif`, `Knips.Export.Apng`, `Knips.Export.Bitmap`, `Knips.Export.Timing` | Median cut, dithering, LZW, GIF89a writer; APNG chunks, PNG filters, paszlib; BGRA buffer + resampling; frame-delay planning (all tested) |
@@ -535,8 +546,8 @@ machine:
      │◀─────────────────────────────────────────────────────────────┘
 
   asIdle ──Record System Audio──▶ asIdle   (a self-transition: the command
-                                            is legal only where the stream
-                                            configuration is not yet fixed)
+         ──Zoom on Click───────▶            is legal only where the stream
+         ──Follow Mouse────────▶            configuration is not yet fixed)
 ```
 
 `Knips.App.State` owns the transition table, the status-item title, the
@@ -551,7 +562,7 @@ an `objcclass`:
 
 | Runtime class | Superclass | Methods |
 | --- | --- | --- |
-| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `recordWindow:`, `recordLastRegion:`, `toggleSystemAudio:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `toggleCamera:`, `restoreCamera:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:`, `exportGif:`, `revealRecording:`, `closePlayback:`, `menuNeedsUpdate:` |
+| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `recordWindow:`, `recordLastRegion:`, `toggleSystemAudio:`, `toggleZoomOnClick:`, `toggleFollowMouse:`, `liveTick:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `toggleCamera:`, `restoreCamera:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:`, `exportGif:`, `revealRecording:`, `closePlayback:`, `menuNeedsUpdate:` |
 | `KnipsOverlayView` | `NSView` | `drawRect:`, `mouseDown:`, `mouseDragged:`, `mouseUp:`, `keyDown:`, `acceptsFirstResponder` |
 | `KnipsOverlayWindow` | `NSWindow` | `canBecomeKeyWindow` (a borderless window answers NO, and then Esc never reaches the view) |
 | `KnipsCameraView` | `NSView` | `acceptsFirstMouse:` (Knips is an Accessory app, so without it the first click on the camera window is eaten as the activating click and dragging takes two) |
@@ -640,6 +651,13 @@ business.
 **Remembered settings.** Two, both in `NSUserDefaults`:
 `KnipsRecordSystemAudio` (the checkbox) and `KnipsLastRegion*` (the
 display id and rectangle behind *Record Last Region*). The region is
+**Remembered settings.** Four, all in `NSUserDefaults`:
+`KnipsRecordSystemAudio` (the checkbox), `KnipsZoomOnClick` and
+`KnipsFollowMouse` (both off by default, which is what `boolForKey:`
+answers for a key that was never written, so nothing registers defaults;
+see [Live effects](#live-effects-zoom-on-click-and-follow-mouse)), and
+`KnipsLastRegion*` (the display id and rectangle behind *Record Last
+Region*). The region is
 written only once a capture has actually started, so a region whose
 display has gone never becomes the region to repeat. It is read back
 through `SanitizeStoredRegion`, because `defaults write` is a public
@@ -947,6 +965,231 @@ therefore prints `Dock promotion: skipped (no window server)` and carries
 on with the rest, and `knips app` refuses with a message and exit 2
 instead of aborting. `CGSessionCopyCurrentDictionary` returning NULL is
 the question being asked.
+### Live effects: Zoom on Click and Follow Mouse
+
+Two menu checkboxes change what a recording *shows* while it runs, and
+both are the same one idea. The file's dimensions are fixed the moment
+`AVAssetWriter` opens and nothing may move them; what can move is the
+rectangle ScreenCaptureKit reads from the screen —
+`SCStreamConfiguration.sourceRect`, in the display's own points — through
+`SCStream.updateConfiguration:completionHandler:`. A *smaller* source
+rectangle scaled into the same output is a zoom. A *sliding* one is a pan.
+The writer never learns that anything happened.
+
+```text
+  base      the region the user selected (or the whole display). Fixed:
+            it is what sized the writer.
+    │
+    ├── Follow Mouse pans a base-SIZED window inside the display
+    ▼
+  window    ── the recording frame on screen tracks THIS ──▶ TRecordingBorder.MoveTo
+    │
+    ├── Zoom on Click crops inside the window, centred on the click
+    ▼
+  source    ──▶ TRecordingSession.UpdateSourceRect ──▶ SCStream
+```
+
+Zoom composes *inside* follow, never beside it, and that is what makes
+the on-screen frame honest: `ZoomedSourceRect` clamps the crop into the
+window, so what is captured is always a subset of what is framed. It
+also means the aspect ratio never changes — both axes are divided by the
+same zoom and the pan never resizes — so `preservesAspectRatio` (YES by
+default since macOS 14) has nothing to do and no letterbox appears
+mid-zoom.
+
+- **`Knips.Recording.LiveMath`** holds every decision: rectangle
+  clamping, the dead zone, the smoothstep easing, the frame-rate
+  independent exponential approach, and `ResolveLiveEffects`, which says
+  which effects a given target can have at all. It is platform-neutral,
+  has no `{$IFDEF DARWIN}`, and has a co-located suite — the only part of
+  this feature that can be checked off-device, so all of it lives there.
+- **`Knips.App.Live`** is the animator: a plain Pascal object with no
+  Objective-C class and no timer of its own. `Knips.App` owns a 30 Hz
+  `NSTimer` on the same `KnipsAppTarget` every other action goes through
+  (`liveTick:`), so the feature adds no seventh runtime class. The timer
+  is added to `NSRunLoopCommonModes` as well, or dragging the camera
+  window would freeze a zoom half way.
+- **`TScreenStream.UpdateSourceRect`** rebuilds the configuration through
+  the same private `BuildConfiguration` the capture started with — one
+  place sets dimensions, rate, cursor and audio, so a live update cannot
+  drift from the original — and changes only the rectangle.
+  `scalesToFit` goes on for *any* source rectangle, not just a region's:
+  with it off the header says the output "only scales down", and a zoomed
+  rectangle would be letterboxed instead of filling the frame.
+
+**The update is fire-and-forget, and that is the whole concurrency
+design.** Start and stop pump `CFRunLoopRunInMode` until their handler
+fires; this one must not, because it happens thirty times a second inside
+a run loop that has a recording to keep serving. So a global pending flag
+allows exactly one update in flight, a call made while one is pending is
+*dropped* without touching the last-sent rectangle — the next tick then
+carries a newer rectangle than the dropped one would have, which is
+latest-wins coalescing for free — and the handler follows the same rules
+as the other two: no exceptions, no `WriteLn`, no managed types, and no
+allocation at all. It does not even retain the `NSError`; it keeps the
+integer `code`, so the report can say why an update was refused. `Stop`
+drains an outstanding update before stopping the capture, because a flag
+left set would silently disable the feature for the next recording.
+
+**Fire-and-forget has a sharp edge, and it needed three answers.**
+
+- *A refused update strands the dedupe.* `FLastSentRect` records what was
+  **asked for**, not what the stream adopted, so one `NSError` anywhere on
+  a ramp would leave it holding a rectangle that never took — and every
+  later rectangle within half a point of that value would be deduped away.
+  The clip would stay zoomed for its remainder while the animator believed
+  it had eased out. The handler runs on a framework queue and may only
+  touch globals, so the healing is done from the *sending* side:
+  `GUpdatesFailed` is snapshotted at each send and compared at the next,
+  and a send that turns out to have been refused forces the following
+  rectangle through regardless of the epsilon.
+- *A framework that keeps saying no is a retry storm.* Twenty refusals a
+  second for the rest of a recording, silently. After
+  `MaxConsecutiveUpdateFailures` (five) in a row the stream sets
+  `SupportsLiveUpdate` to False for good, records one message, and the
+  recording carries on plain at whatever rectangle last took. The animator
+  watches that flag and stops — otherwise it would go on moving the border
+  and the easings against a capture that no longer follows them. The
+  message reaches the user on the same `Last error: …` line as everything
+  else; it is explicitly **not** a `Fail`, because the file is unharmed.
+- *The abandoned configuration is deliberately leaked.* When
+  `DrainPendingUpdate` gives up after 300 ms, ScreenCaptureKit is still
+  applying that `SCStreamConfiguration` as far as this code can tell, and
+  whether it retained a copy is undocumented. The reference is dropped
+  **without** a release: a release that turns out to have been the last one
+  is a use-after-free inside the framework, and the alternative costs a
+  few hundred bytes on a path that needs a stream to have stopped
+  answering for a third of a second. Unowned beats freed here. For the
+  same reason the global counters are **never reset** — an abandoned
+  handler may still increment them minutes later — so each stream
+  snapshots them at `Start` and reports differences.
+
+Measured on an M-series Mac: ScreenCaptureKit completes an
+`updateConfiguration:` in **no less than 50 ms**, so a live animation gets
+about twenty steps a second however fast the animator ticks. The zoom
+durations (`LiveZoomInSeconds` 0.30, `LiveZoomOutSeconds` 0.45) are
+chosen against that number rather than by feel: 0.18 s would be four
+steps across a doubling, and four steps is a visible staircase.
+
+**Which recordings get which effect** is `ResolveLiveEffects`, and it is
+not the same answer for both. A **window** capture gets neither: its
+source rectangle is in the window's own space, which the user is free to
+move and resize with no way for us to find out, so a click in screen
+points has no fixed meaning there. A **whole display** can zoom but has
+nowhere to pan to. Only a **region** gets both. A display capture that is
+going to zoom needs a source rectangle it would not otherwise have, so
+`TRecordingOptions.LiveSourceRect` makes `ResolveFilter` seed one
+covering the display; the CLI never sets it.
+
+**The border, and the one place rule 1 gives way.** The frame around a
+region is kept out of the file two ways ([above](#menu-bar-app)): rule 1,
+it is stroked *outside* the recorded rectangle; rule 2, its window id is
+excluded from the content filter. Zooming needs neither — the capture
+area on screen has not moved, so the frame stays where it is. Panning
+does: the frame moves with the region (`TRecordingBorder.MoveTo`, one
+`setFrame:display:`, so the window id and therefore the exclusion are
+unchanged). But the window server and ScreenCaptureKit apply their
+changes on their own schedules, so for a frame or two around a pan the
+two disagree and part of the border really is inside the rectangle being
+captured. **Rule 1 does not hold during a pan; rule 2 does, and is not
+timing-dependent.** Proven on device by recording a 200-point pan twice,
+with 138 border moves in lockstep with 41 source-rectangle updates:
+with the exclusion, **0** border-red pixels in all 141 frames; with the
+exclusion deliberately switched off, **665 792** red pixels across the
+run and 2 560 in the worst single frame. That is why Follow Mouse is
+*refused* for a recording whose border did not reach the content filter
+— the app logs why and records with a fixed region rather than a frame
+that keeps sliding into shot.
+
+"The border was excluded" is read conservatively, and not as a
+count-above-zero: the report says how many of the requested ids resolved,
+not *which*, so the test is "the border was among the requests **and**
+every request resolved". The moment a second exclusion joins the list —
+the camera window is the obvious candidate — a count test would call the
+border excluded because something else was. This one refuses Follow Mouse
+instead, which is the right way round when the cost of being wrong is a
+recording with its own frame sliding through it.
+
+**Clicks are polled, not monitored.**
+`NSEvent.addGlobalMonitorForEventsMatchingMask:handler:` binds in FPC
+3.2.2 and needs no Input Monitoring grant for mouse events (keys would),
+and it would catch clicks shorter than a tick. It is still not used. The
+animator has to sample the mouse *position* every tick for Follow Mouse
+anyway, so reading `NSEvent.pressedMouseButtons` in the same breath is
+free and avoids a second, block-based source of truth for one gesture,
+plus a retained monitor object with a lifetime to get wrong across a
+recording that can fail at any point. The cost is stated rather than
+hidden: a press-and-release shorter than one tick — about 33 ms — is not
+seen. A deliberate click is 50 to 150 ms, and the miss costs a zoom, not
+a recording. The detection is edge-triggered on the transition, so
+holding the button through a drag zooms once.
+
+**The menu bar is carved out of the clickable area**, even though for a
+whole-display recording it is squarely inside it. The click that *stops* a
+recording is a click on Knips's own status item, so without this rule
+every full-screen capture would end by zooming into the top corner of the
+screen. Nothing up there is content anyway — a menu title is a click on a
+menu, not on the thing being demonstrated. The band is the larger of
+`NSStatusBar.thickness` and the screen's own top inset
+(`frame` minus `visibleFrame`, measured from the top, which is the menu
+bar because the Dock can sit at the left, right or bottom but never the
+top). They disagree and the inset is the honest one: this machine reports
+a thickness of 22 points against an inset of 39.
+
+**Every duration in the animator is driven from one clamped tick delta**,
+including the post-click hold, which is a countdown rather than a
+wall-clock deadline. A backwards clock step — an NTP correction, a DST
+change, the user setting the clock — would otherwise leave a `TDateTime`
+deadline in the future for as long as the step lasted and freeze a zoom
+mid-recording. A negative delta reads as no time passing and a large one
+is capped, so the same clamp covers both directions.
+
+A throwing live tick is the one callback that does **not** go down the
+`Fail` path: it stops the animator and leaves the recording running with
+a fixed frame. A zoom is not worth a lost file. Stopping the animator
+sends **nothing** — putting the capture back on its base rectangle was
+the obvious thing to do and is the wrong one, because it lands as an
+instantaneous jump in the last frames of the clip. The animation is a
+valid framing at every instant, so the file ends where it was.
+
+**What was measured, and what was not.** The mechanism is proven on
+device against a lattice of known pitch — black bars 8 points wide at a
+pitch of 32, so at capture scale 2 the output pitch is 64 px at zoom 1
+and 64·Z px at zoom Z:
+
+| | measured |
+| --- | --- |
+| base rectangle | pitch 64.00 px on both axes |
+| zoom 2 | pitch **128.00** px on both axes, output still 1024×768 |
+| the ramp between | 64 → 73 → 82 → 104 → 113 → 127 → 128, the smoothstep shape |
+| back to base | pitch 64.00, phase back to its starting value |
+| a 200-point pan | phase moved 48 px; 200 pt × scale 2 = 400 px, and 400 mod 64 = 400 − 384, so −400 ≡ 48 (mod 64) |
+| through `TLiveAnimator` itself | the window panned 341.00 → 0.00 points, matching the tested maths' own fixpoint to the hundredth; content phase moved 42 px, and 341 × 2 = 682 ≡ 42 (mod 64) |
+| the writer | 1024×768 for every frame of every run; 0 dropped, 0 failed appends; 28/28, 41/41, 40/40, 25/25, 13/13 and 14/14 updates completed, none refused |
+
+The three answers above were checked against a framework that really does
+refuse. A source rectangle at an origin of 10⁹ points comes back as
+`-3812`, `SCStreamErrorInvalidParameter`, which makes the whole failure
+path reachable on demand:
+
+| | measured |
+| --- | --- |
+| accepted rectangle, then the same **+ 0.1 pt** | second one **deduped** — the epsilon still works when nothing went wrong |
+| refused rectangle, then the same **+ 0.1 pt** | second one **sent** — the heal, twice over, at the same 0.1 pt delta the control deduped |
+| five refusals in a row | live updates switched **off** at the sixth call, `live zoom/pan disabled: ScreenCaptureKit refused 5 source-rect updates in a row (last error -3812)`; every later call refused without sending |
+| the recording, through all of it | 12 sent, 3 completed, 9 refused, and still 174 frames, 0 dropped, 0 failed appends, 1024×768 |
+
+The two rows at the top are the same experiment with one variable
+changed: identical delta, identical epsilon, opposite outcome, and the
+only difference is whether the previous rectangle was refused.
+
+The pointer cannot be moved by test tooling — this project does not
+inject input — so Follow Mouse was proven by moving the *region* instead
+and letting the real animator chase the real, stationary pointer into its
+dead zone. **The click that triggers a zoom is the one thing not proven
+here**; its arithmetic is unit-tested and its two inputs
+(`pressedMouseButtons`, `mouseLocation`) were read on device, but nobody
+has clicked a mouse into this code.
 
 ## Timing and the writer session
 

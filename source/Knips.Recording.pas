@@ -51,6 +51,14 @@ type
     DroppedMicrophoneEarly: Int64;
     DroppedMicrophoneStalled: Int64;
     FailedMicrophoneAppends: Int64;
+    // Live source-rectangle updates (Zoom on Click / Follow Mouse): how
+    // many were handed to ScreenCaptureKit, how many it completed, how
+    // many it refused, and the last NSError code it refused with. All
+    // zero for a recording with no live effects.
+    LiveUpdatesSent: Int64;
+    LiveUpdatesCompleted: Int64;
+    LiveUpdatesFailed: Int64;
+    LiveUpdateErrorCode: NSInteger;
     DurationSeconds: Double;
   end;
 
@@ -97,6 +105,36 @@ type
     // from the main thread mid-recording is safe; all-zero before
     // StartCapture and after the writer is gone.
     function LiveStatistics: TMovieWriterStatistics;
+    // Moves the rectangle ScreenCaptureKit reads from the screen without
+    // touching the file's dimensions — the one primitive Zoom on Click
+    // and Follow Mouse are built out of. Points, in the display's own
+    // top-left space, the same space TRecordingOptions.Region is in.
+    //
+    // Only meaningful when the session was started with
+    // TRecordingOptions.LiveSourceRect (or with a region, which implies
+    // one); False otherwise, and False rather than an exception when the
+    // stream is not running. Fire-and-forget — see
+    // TScreenStream.UpdateSourceRect.
+    function UpdateSourceRect(const ARect: CGRect): Boolean;
+    // Whether this recording can move its source rectangle at all: the
+    // stream is running, the framework has updateConfiguration:, and it
+    // has not refused enough updates in a row for the stream to give up.
+    // A caller that animates must watch this: when it goes False the
+    // capture has stopped following, and LiveUpdateError says why.
+    function SupportsLiveUpdate: Boolean;
+    // Why the live effects stopped, when they did. Empty otherwise. This
+    // is never a reason to fail the recording — the file is unaffected
+    // and keeps being written at whatever rectangle last took.
+    function LiveUpdateError: string;
+    // The rectangle the recording was sized from, which is what the live
+    // effects pan and crop inside. Empty when the session is not running.
+    function BaseSourceRect: CGRect;
+    // How many source-rectangle updates have reached ScreenCaptureKit so
+    // far. The report carries the same number once the recording is over;
+    // this is the mid-recording view, which is what tells a caller whether
+    // its rectangles are getting through at all.
+    function LiveUpdatesSent: Int64;
+
     // True between a successful StartCapture and FinishCapture.
     property Capturing: Boolean read FCapturing;
     property Geometry: TStreamGeometry read FGeometry;
@@ -257,6 +295,19 @@ begin
         begin
           PointWidth := Integer(Display.width);
           PointHeight := Integer(Display.height);
+          // A whole-display capture normally goes without a sourceRect,
+          // which is what "capture everything" means to SCK. The
+          // menu-bar app's live effects need a rectangle to move, so it
+          // asks for one covering the display: the same pixels, and the
+          // same output size, but now something updateConfiguration: can
+          // shrink around a click. Nothing changes for the CLI, which
+          // never sets the flag.
+          if FOptions.LiveSourceRect then
+          begin
+            AGeometry.HasSourceRect := True;
+            AGeometry.SourceRect := CGRectMake(0, 0, PointWidth,
+              PointHeight);
+          end;
         end;
         AFilter := SCContentFilter(
           SCContentFilter.alloc.initWithDisplay_excludingWindows(Display,
@@ -401,6 +452,41 @@ begin
   Result := True;
 end;
 
+function TRecordingSession.UpdateSourceRect(const ARect: CGRect): Boolean;
+begin
+  Result := FCapturing and (FStream <> nil)
+    and FStream.UpdateSourceRect(ARect);
+end;
+
+function TRecordingSession.SupportsLiveUpdate: Boolean;
+begin
+  Result := FCapturing and (FStream <> nil) and FStream.SupportsLiveUpdate;
+end;
+
+function TRecordingSession.LiveUpdateError: string;
+begin
+  if FStream = nil then
+    Result := ''
+  else
+    Result := FStream.LastError;
+end;
+
+function TRecordingSession.BaseSourceRect: CGRect;
+begin
+  if FGeometry.HasSourceRect then
+    Result := FGeometry.SourceRect
+  else
+    Result := CGRectMake(0, 0, 0, 0);
+end;
+
+function TRecordingSession.LiveUpdatesSent: Int64;
+begin
+  if FStream = nil then
+    Result := FReport.LiveUpdatesSent
+  else
+    Result := FStream.LiveUpdatesSent;
+end;
+
 function TRecordingSession.FinishCapture(out AError: string): Boolean;
 var
   Statistics: TMovieWriterStatistics;
@@ -417,6 +503,16 @@ begin
   // Stream first, then writer: an append must never race the finish.
   if FStream <> nil then
     FStream.Stop;
+
+  // After the stop, not before: Stop waits out the last live update, so
+  // reading here counts it rather than reporting one fewer than was sent.
+  if FStream <> nil then
+  begin
+    FReport.LiveUpdatesSent := FStream.LiveUpdatesSent;
+    FReport.LiveUpdatesCompleted := FStream.LiveUpdatesCompleted;
+    FReport.LiveUpdatesFailed := FStream.LiveUpdatesFailed;
+    FReport.LiveUpdateErrorCode := FStream.LiveUpdateErrorCode;
+  end;
 
   Statistics := FWriter.Statistics;
   FReport.AppendedFrames := Statistics.AppendedFrames;

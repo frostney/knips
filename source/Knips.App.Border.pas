@@ -58,6 +58,13 @@ type
     FView: NSView;
     FVisible: Boolean;
     FOnError: TBorderErrorEvent;
+    // The screen the frame was put on, cached at Show so MoveTo can flip
+    // a region into window coordinates without walking NSScreen.screens
+    // thirty times a second.
+    FScreenFrame: NSRect;
+    // Top-left display points -> the borderless window's global,
+    // bottom-left frame, outset by the border width.
+    function FrameForRegion(const ARegion: TCaptureRegion): NSRect;
   public
     destructor Destroy; override;
     // Puts the frame around ARegion on the display ADisplayID names.
@@ -65,6 +72,22 @@ type
     // made — the caller records without a border rather than failing.
     // Raises EObjCRuntime when the border class cannot be registered.
     function Show(ADisplayID: UInt32; const ARegion: TCaptureRegion): Boolean;
+    // Follows the region a Follow Mouse recording has panned to. One
+    // setFrame:display: on the window that is already up, so the
+    // CGWindowID — which is what the capture excludes — does not change,
+    // and neither does rule 2 in the header above.
+    //
+    // Rule 1 (the geometry) does weaken here, and deliberately: the
+    // window server lands the new frame on its own schedule and
+    // ScreenCaptureKit applies the new sourceRect on its own, so for a
+    // frame or two around a pan the two can disagree and part of the
+    // border can fall inside the rectangle being captured. That is
+    // exactly what rule 2 is the backstop for, and it is not
+    // timing-dependent: an excluded window is never composited into the
+    // stream at all. A recording whose border could *not* be excluded
+    // therefore does not get Follow Mouse — Knips.App refuses it rather
+    // than record a frame that keeps sliding into shot.
+    procedure MoveTo(const ARegion: TCaptureRegion);
     procedure Hide;
     // The CGWindowID to exclude from the capture; 0 while hidden.
     function WindowID: Cardinal;
@@ -78,6 +101,14 @@ type
 // Registers KnipsBorderView once per process. Exposed so `knips probe`
 // can gate on registration alone.
 procedure EnsureBorderClasses;
+
+// The frame, in AppKit's global bottom-left points, of the NSScreen
+// carrying a CGDirectDisplayID. False when that display is not attached.
+// Lives here because this is where the top-left/bottom-left flip already
+// is; Knips.App.Live needs the same frame to turn a mouse position into
+// the recorded display's own points.
+function ScreenFrameForDisplayID(ADisplayID: UInt32;
+  out AFrame: NSRect): Boolean;
 
 function BorderViewClassName: string;
 
@@ -188,6 +219,18 @@ begin
   end;
 end;
 
+function ScreenFrameForDisplayID(ADisplayID: UInt32;
+  out AFrame: NSRect): Boolean;
+var
+  Screen: NSScreen;
+begin
+  AFrame := NSMakeRect(0, 0, 0, 0);
+  Screen := ScreenForDisplayID(ADisplayID);
+  Result := Screen <> nil;
+  if Result then
+    AFrame := Screen.frame;
+end;
+
 { TRecordingBorder }
 
 destructor TRecordingBorder.Destroy;
@@ -196,11 +239,24 @@ begin
   inherited Destroy;
 end;
 
+// Top-left display points -> global bottom-left points, then outset by the
+// full border width so the stroke never overlaps the region.
+function TRecordingBorder.FrameForRegion(
+  const ARegion: TCaptureRegion): NSRect;
+begin
+  Result := NSMakeRect(
+    FScreenFrame.origin.x + ARegion.Left - BorderWidth,
+    FScreenFrame.origin.y + FScreenFrame.size.height
+      - (ARegion.Top + ARegion.Height) - BorderWidth,
+    ARegion.Width + 2 * BorderWidth,
+    ARegion.Height + 2 * BorderWidth);
+end;
+
 function TRecordingBorder.Show(ADisplayID: UInt32;
   const ARegion: TCaptureRegion): Boolean;
 var
   Screen: NSScreen;
-  Frame, WindowRect, ContentBounds: NSRect;
+  WindowRect, ContentBounds: NSRect;
   Allocated: id;
 begin
   Hide;
@@ -212,15 +268,8 @@ begin
     Exit;
   EnsureBorderClasses;
 
-  Frame := Screen.frame;
-  // Top-left display points -> global bottom-left points, then outset by
-  // the full border width so the stroke never overlaps the region.
-  WindowRect := NSMakeRect(
-    Frame.origin.x + ARegion.Left - BorderWidth,
-    Frame.origin.y + Frame.size.height - (ARegion.Top + ARegion.Height)
-      - BorderWidth,
-    ARegion.Width + 2 * BorderWidth,
-    ARegion.Height + 2 * BorderWidth);
+  FScreenFrame := Screen.frame;
+  WindowRect := FrameForRegion(ARegion);
   ContentBounds := NSMakeRect(0, 0, WindowRect.size.width,
     WindowRect.size.height);
 
@@ -266,6 +315,18 @@ begin
 
   FVisible := True;
   Result := True;
+end;
+
+procedure TRecordingBorder.MoveTo(const ARegion: TCaptureRegion);
+begin
+  if (FWindow = nil) or not FVisible then
+    Exit;
+  if (ARegion.Width <= 0) or (ARegion.Height <= 0) then
+    Exit;
+  // The view keeps its own bounds because the region never changes size
+  // — Follow Mouse pans a base-sized window — so this is a move, and
+  // drawRect: has nothing new to do.
+  FWindow.setFrame_display(FrameForRegion(ARegion), True);
 end;
 
 procedure TRecordingBorder.Hide;

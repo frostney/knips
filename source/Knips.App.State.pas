@@ -91,6 +91,21 @@ const
   CameraOriginXDefaultsKey = 'KnipsCameraOriginX';
   CameraOriginYDefaultsKey = 'KnipsCameraOriginY';
 
+  // The two live recording effects. Both off by default, both
+  // remembered, both checkmarks rather than verbs — the same shape as
+  // Record System Audio and Camera.
+  //
+  // "Follow Mouse (region)" carries its qualifier in the title because
+  // the state machine cannot express it: whether a recording is a region
+  // or a whole display is not known until the command that starts it
+  // runs, so the item cannot be greyed out ahead of time. What actually
+  // applies to a given recording is decided by
+  // Knips.Recording.LiveMath.ResolveLiveEffects.
+  ZoomOnClickMenuTitle = 'Zoom on Click';
+  FollowMouseMenuTitle = 'Follow Mouse (region)';
+  ZoomOnClickDefaultsKey = 'KnipsZoomOnClick';
+  FollowMouseDefaultsKey = 'KnipsFollowMouse';
+
 type
   // A window origin in AppKit's screen coordinates: bottom-left origin,
   // y growing upwards, the same space NSWindow.frame lives in. Nothing
@@ -117,6 +132,17 @@ type
     // state, but it must not be reachable mid-recording — the stream
     // configuration is fixed once the capture has started.
     acToggleSystemAudio,
+    // idle -> idle: the two live-effect checkboxes (Zoom on Click and
+    // Follow Mouse). Idle-only for the same reason as the audio
+    // checkbox, though not quite the same mechanism: the effects move
+    // the stream's sourceRect, which needs the capture to have been
+    // started *with* one (TRecordingOptions.LiveSourceRect), and that is
+    // decided when the recording begins. Switching them mid-recording
+    // would work for a region and silently do nothing for a display, and
+    // a toggle that sometimes does nothing is worse than one that is
+    // greyed out.
+    acToggleZoomOnClick,
+    acToggleFollowMouse,
     acSelectionCommitted, // selecting -> recording: mouse released
     acSelectionCancelled, // selecting -> idle: Esc or an empty drag
     // selecting -> idle, asked for from the menu rather than from inside
@@ -161,6 +187,9 @@ function ClampSelection(const ASelection: TCaptureRegion;
 function IsSelectionUsable(const ASelection: TCaptureRegion): Boolean;
 
 function ErrorMenuTitle(const AMessage: string): string;
+
+// NSControlStateValueOn / Off for a checkbox-shaped menu item.
+function MenuCheckState(AChecked: Boolean): Integer;
 
 // The camera item's checkmark: on when the window is up.
 function CameraMenuState(AVisible: Boolean): Integer;
@@ -265,7 +294,8 @@ begin
         acRecordRegion: ANext := asSelecting;
         acRecordDisplay, acRecordWindow, acRecordLastRegion:
           ANext := asRecording;
-        acToggleSystemAudio: ANext := asIdle;
+        acToggleSystemAudio, acToggleZoomOnClick, acToggleFollowMouse:
+          ANext := asIdle;
       else
         Result := False;
       end;
@@ -572,12 +602,17 @@ begin
   Result := Format('%s%d%%', [ExportingTitlePrefix, Percent]);
 end;
 
-function CameraMenuState(AVisible: Boolean): Integer;
+function MenuCheckState(AChecked: Boolean): Integer;
 begin
-  if AVisible then
+  if AChecked then
     Result := MenuItemStateOn
   else
     Result := MenuItemStateOff;
+end;
+
+function CameraMenuState(AVisible: Boolean): Integer;
+begin
+  Result := MenuCheckState(AVisible);
 end;
 
 function DefaultCameraOrigin(AVisibleX, AVisibleY, AVisibleWidth,

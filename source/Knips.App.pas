@@ -45,6 +45,7 @@ uses
   CocoaAll,
   Knips.App.Border,
   Knips.App.Camera,
+  Knips.App.Live,
   Knips.App.Overlay,
   Knips.App.Playback,
   Knips.App.State,
@@ -52,6 +53,7 @@ uses
   Knips.ObjC.Runtime,
   Knips.Options,
   Knips.Recording,
+  Knips.Recording.LiveMath,
   MacOSAll;
 
 // Installs the status item and runs NSApp until the user quits. Returns
@@ -119,6 +121,12 @@ const
   StopPendingSelector = 'stopPending:';
   ToggleCameraSelector = 'toggleCamera:';
   RestoreCameraSelector = 'restoreCamera:';
+  ToggleZoomOnClickSelector = 'toggleZoomOnClick:';
+  ToggleFollowMouseSelector = 'toggleFollowMouse:';
+  // The live animator's 30 Hz tick while a recording with Zoom on Click
+  // or Follow Mouse is running. On the same target as everything else, so
+  // the feature adds no runtime-built class of its own.
+  LiveTickSelector = 'liveTick:';
   // KnipsAppTarget doubles as the Record Window submenu's NSMenuDelegate;
   // the list is rebuilt when AppKit is about to show it, so it is never
   // stale and never costs a ScreenCaptureKit query the user did not ask
@@ -181,6 +189,8 @@ const
   // NSUserDefaults keys. The system-audio checkbox and the last region
   // are the only two things the app remembers between launches.
   SystemAudioKey = 'KnipsRecordSystemAudio';
+  ZoomOnClickKey = ZoomOnClickDefaultsKey;
+  FollowMouseKey = FollowMouseDefaultsKey;
   LastRegionDisplayKey = 'KnipsLastRegionDisplay';
   LastRegionLeftKey = 'KnipsLastRegionLeft';
   LastRegionTopKey = 'KnipsLastRegionTop';
@@ -229,6 +239,8 @@ type
     FWindowMenu: NSMenu;
     FLastRegionItem: NSMenuItem;
     FSystemAudioItem: NSMenuItem;
+    FZoomOnClickItem: NSMenuItem;
+    FFollowMouseItem: NSMenuItem;
     FStopItem: NSMenuItem;
     FCancelItem: NSMenuItem;
     FRevealItem: NSMenuItem;
@@ -239,6 +251,12 @@ type
     // the first promotion and kept — see PromoteForPlayback.
     FMainMenu: NSMenu;
     FTimer: NSTimer;
+    // The live effects' own timer, only alive while a recording that has
+    // one is running. Separate from FTimer, which ticks once a second to
+    // rewrite the status item and would be a strange place to hang a
+    // thirty-hertz animation.
+    FLiveTimer: NSTimer;
+    FLive: TLiveAnimator;
     FOverlay: TSelectionOverlay;
     FCamera: TCameraPreview;
     FBorder: TRecordingBorder;
@@ -258,6 +276,8 @@ type
     FWindowListFailed: Boolean;
     // Persisted preferences.
     FSystemAudio: Boolean;
+    FZoomOnClick: Boolean;
+    FFollowMouse: Boolean;
     FHasLastRegion: Boolean;
     FLastRegionDisplayID: UInt32;
     FLastRegion: TCaptureRegion;
@@ -276,8 +296,16 @@ type
     procedure RecordError(const AMessage: string);
     procedure LoadPreferences;
     procedure StoreSystemAudio;
+    procedure StoreLiveEffects;
     procedure StoreLastRegion;
     procedure ClearPending;
+    // Starts the live animator and its timer for the recording that has
+    // just begun, if either effect applies to it. ABorderExcluded says
+    // whether the frame around the region really did reach the content
+    // filter — Follow Mouse is refused when it did not, because a frame
+    // that pans with the region would then be composited into the file.
+    procedure StartLive(ABorderWindowID: Cardinal; ABorderExcluded: Boolean);
+    procedure StopLive;
     // Puts the frame on the region about to be recorded and returns the
     // window id the capture must exclude. 0 when there is no region or
     // the border could not be shown; the recording then runs without one.
@@ -322,6 +350,8 @@ type
     procedure CommandRecordWindow(AWindowID: Cardinal);
     procedure CommandRecordLastRegion;
     procedure CommandToggleSystemAudio;
+    procedure CommandToggleZoomOnClick;
+    procedure CommandToggleFollowMouse;
     procedure CommandStop;
     procedure CommandCancelSelection;
     procedure CommandRevealRecordings;
@@ -337,11 +367,17 @@ type
     // NSMenuDelegate for the Record Window submenu.
     procedure RebuildWindowMenu;
     procedure Tick;
+    // One turn of the live animator; the 30 Hz timer's target.
+    procedure LiveTick;
     procedure StartPending;
     procedure StopPending;
     // Reports a failure the way every other failure is reported and puts
     // the status item back in step.
     procedure Fail(const AMessage: string);
+    // What a throwing live tick does instead of Fail: the animator stops
+    // and the recording keeps running with a fixed frame. A zoom is not
+    // worth a lost file.
+    procedure StopLiveAfterFailure(const AMessage: string);
     property Target: id read FTarget;
   end;
 
@@ -356,6 +392,20 @@ end;
 procedure LogMessage(const AMessage: string);
 begin
   NSLog(PascalToNSString('knips: %@'), PascalToNSString(AMessage));
+end;
+
+// Whether a window id was among the ones a recording asked to exclude.
+// Spelled out rather than assumed from the array's shape, because the
+// list has one entry today and the assumption would rot silently.
+function WindowIDRequested(const AIDs: array of Cardinal;
+  AWindowID: Cardinal): Boolean;
+var
+  I: Integer;
+begin
+  for I := Low(AIDs) to High(AIDs) do
+    if AIDs[I] = AWindowID then
+      Exit(True);
+  Result := False;
 end;
 
 { KnipsAppTarget method bodies. Each recovers the controller from the
@@ -468,6 +518,67 @@ begin
   except
     on E: Exception do
       HandleBodyException(Controller, ToggleSystemAudioSelector, E);
+  end;
+end;
+
+procedure TargetToggleZoomOnClick(ASelf: id; ACommand: SEL;
+  ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandToggleZoomOnClick;
+  except
+    on E: Exception do
+      HandleBodyException(Controller, ToggleZoomOnClickSelector, E);
+  end;
+end;
+
+procedure TargetToggleFollowMouse(ASelf: id; ACommand: SEL;
+  ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandToggleFollowMouse;
+  except
+    on E: Exception do
+      HandleBodyException(Controller, ToggleFollowMouseSelector, E);
+  end;
+end;
+
+// Thirty times a second while a live recording runs. Deliberately NOT on
+// the Fail path: a live effect that throws must not knock the recording
+// to idle and lose the file. The animator is stopped instead, and the
+// recording carries on with a fixed frame.
+procedure TargetLiveTick(ASelf: id; ACommand: SEL; ATimer: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.LiveTick;
+  except
+    on E: Exception do
+      try
+        if Controller <> nil then
+        begin
+          Controller.StopLiveAfterFailure(LiveTickSelector + ': '
+            + E.Message);
+        end
+        else
+          LogMessage(LiveTickSelector + ': ' + E.Message);
+      except
+        // Nothing left to try; swallowing beats unwinding into AppKit.
+      end;
   end;
 end;
 
@@ -722,6 +833,11 @@ begin
       @TargetRecordLastRegion);
     AddTargetMethod(Builder, ToggleSystemAudioSelector,
       @TargetToggleSystemAudio);
+    AddTargetMethod(Builder, ToggleZoomOnClickSelector,
+      @TargetToggleZoomOnClick);
+    AddTargetMethod(Builder, ToggleFollowMouseSelector,
+      @TargetToggleFollowMouse);
+    AddTargetMethod(Builder, LiveTickSelector, @TargetLiveTick);
     AddTargetMethod(Builder, MenuNeedsUpdateSelector, @TargetMenuNeedsUpdate);
     AddTargetMethod(Builder, ExportGifSelector, @TargetExportGif);
     AddTargetMethod(Builder, RevealRecordingSelector, @TargetRevealRecording);
@@ -971,8 +1087,10 @@ end;
 destructor TAppController.Destroy;
 begin
   StopElapsedTimer;
+  StopLive;
   if FTarget <> nil then
     SetPointerIvar(FTarget, OwnerIvarName, nil);
+  FreeAndNil(FLive);
   FreeAndNil(FOverlay);
   FreeAndNil(FCamera);
   FreeAndNil(FBorder);
@@ -1086,6 +1204,13 @@ begin
   // nothing the recorder owns — and mid-recording is exactly when the
   // user is most likely to want it on or off.
   FCameraItem := AddMenuItem(CameraMenuTitle, ToggleCameraSelector);
+  // The two live effects sit with the other recording settings and are
+  // idle-only for the same reason the audio checkbox is: what the stream
+  // is configured to capture is fixed when the capture starts.
+  FZoomOnClickItem := AddMenuItem(ZoomOnClickMenuTitle,
+    ToggleZoomOnClickSelector);
+  FFollowMouseItem := AddMenuItem(FollowMouseMenuTitle,
+    ToggleFollowMouseSelector);
   FSystemAudioItem := AddMenuItem(SystemAudioTitle, ToggleSystemAudioSelector);
   FMenu.addItem(NSMenuItem.separatorItem);
   FRevealItem := AddMenuItem(RevealRecordingsTitle, RevealRecordingsSelector);
@@ -1296,6 +1421,10 @@ var
 begin
   Defaults := NSUserDefaults.standardUserDefaults;
   FSystemAudio := Defaults.boolForKey(PascalToNSString(SystemAudioKey));
+  // Both default to False, which is what boolForKey: answers for a key
+  // that has never been written — no registerDefaults: needed.
+  FZoomOnClick := Defaults.boolForKey(PascalToNSString(ZoomOnClickKey));
+  FFollowMouse := Defaults.boolForKey(PascalToNSString(FollowMouseKey));
   FLastRegionDisplayID := UInt32(Defaults.integerForKey(
     PascalToNSString(LastRegionDisplayKey)));
   Stored.Left := Integer(Defaults.integerForKey(
@@ -1325,6 +1454,17 @@ procedure TAppController.StoreSystemAudio;
 begin
   NSUserDefaults.standardUserDefaults.setBool_forKey(ObjCBOOL(FSystemAudio),
     PascalToNSString(SystemAudioKey));
+end;
+
+procedure TAppController.StoreLiveEffects;
+var
+  Defaults: NSUserDefaults;
+begin
+  Defaults := NSUserDefaults.standardUserDefaults;
+  Defaults.setBool_forKey(ObjCBOOL(FZoomOnClick),
+    PascalToNSString(ZoomOnClickKey));
+  Defaults.setBool_forKey(ObjCBOOL(FFollowMouse),
+    PascalToNSString(FollowMouseKey));
 end;
 
 procedure TAppController.StoreLastRegion;
@@ -1511,6 +1651,10 @@ begin
     FSystemAudioItem.setState(NSOnState)
   else
     FSystemAudioItem.setState(NSOffState);
+  FZoomOnClickItem.setEnabled(IsCommandEnabled(FState, acToggleZoomOnClick));
+  FZoomOnClickItem.setState(MenuCheckState(FZoomOnClick));
+  FFollowMouseItem.setEnabled(IsCommandEnabled(FState, acToggleFollowMouse));
+  FFollowMouseItem.setState(MenuCheckState(FFollowMouse));
   FStopItem.setEnabled(IsCommandEnabled(FState, acStopRecording));
   FCancelItem.setEnabled(IsCommandEnabled(FState, acCancelSelection));
 
@@ -1575,6 +1719,9 @@ begin
   // would have no way back, since the failing command is the one the
   // user just tried.
   Transition(acCaptureFailed);
+  // The animator holds a session that may be on its way out; it must not
+  // outlive the recording it was animating.
+  StopLive;
   // A frame left on screen with no recording behind it is a lie about
   // what the app is doing.
   HideBorder;
@@ -1780,6 +1927,27 @@ begin
   RefreshStatusItem;
 end;
 
+// Both toggles are idle-only for the same reason as the audio checkbox:
+// the effects move the stream's sourceRect, and whether the stream has
+// one at all is decided when the capture starts.
+procedure TAppController.CommandToggleZoomOnClick;
+begin
+  if not Transition(acToggleZoomOnClick) then
+    Exit;
+  FZoomOnClick := not FZoomOnClick;
+  StoreLiveEffects;
+  RefreshStatusItem;
+end;
+
+procedure TAppController.CommandToggleFollowMouse;
+begin
+  if not Transition(acToggleFollowMouse) then
+    Exit;
+  FFollowMouse := not FFollowMouse;
+  StoreLiveEffects;
+  RefreshStatusItem;
+end;
+
 procedure TAppController.CommandExportGif;
 begin
   if FPlayback = nil then
@@ -1842,6 +2010,148 @@ begin
   RefreshStatusItem;
 end;
 
+{ The live effects. Everything that decides *what* they do is in
+  Knips.Recording.LiveMath (neutral, tested); everything that decides
+  *whether* they run is here, because it needs the recording that just
+  started. }
+
+procedure TAppController.StartLive(ABorderWindowID: Cardinal;
+  ABorderExcluded: Boolean);
+var
+  Zoom, Follow: Boolean;
+  TargetKind: TCaptureTargetKind;
+  DisplayID: UInt32;
+  ScreenFrame: NSRect;
+  Base: CGRect;
+  Border: TRecordingBorder;
+begin
+  StopLive;
+  if FSession = nil then
+    Exit;
+  // The same reading of the pending request StartPending made a moment
+  // ago, from the same fields.
+  if FPendingWindowID <> 0 then
+    TargetKind := ctkWindow
+  else
+    TargetKind := ctkDisplay;
+  if not ResolveLiveEffects(TargetKind, FPendingHasRegion, FZoomOnClick,
+    FFollowMouse, Zoom, Follow) then
+    Exit;
+  if not FSession.SupportsLiveUpdate then
+  begin
+    LogMessage('this ScreenCaptureKit has no updateConfiguration:, so Zoom '
+      + 'on Click and Follow Mouse are off for this recording');
+    Exit;
+  end;
+
+  // A pan moves the recorded rectangle across the screen, and the frame
+  // has to move with it. Rule 1 in Knips.App.Border — the stroke lies
+  // outside the recorded rectangle — cannot hold at every instant while
+  // both are moving, because the window server and ScreenCaptureKit
+  // apply their changes on their own schedules. Rule 2, the exclusion,
+  // can and does; but only if it actually took. Without it, refuse the
+  // pan rather than record a frame that keeps sliding into shot.
+  Border := nil;
+  if ABorderWindowID <> 0 then
+  begin
+    if ABorderExcluded then
+      Border := FBorder
+    else if Follow then
+    begin
+      Follow := False;
+      LogMessage('Follow Mouse is off for this recording: the frame around '
+        + 'the region was not excluded from the capture, and a region that '
+        + 'moves would record its own border');
+    end;
+  end;
+  if not Zoom and not Follow then
+    Exit;
+
+  DisplayID := FPendingDisplayID;
+  if DisplayID = 0 then
+    // What TShareableContent.RetainDisplay(-1) resolved to.
+    DisplayID := CGMainDisplayID;
+  if not ScreenFrameForDisplayID(DisplayID, ScreenFrame) then
+  begin
+    LogMessage('the recorded display has no NSScreen, so Zoom on Click and '
+      + 'Follow Mouse are off for this recording');
+    Exit;
+  end;
+
+  Base := FSession.BaseSourceRect;
+  if FLive = nil then
+    FLive := TLiveAnimator.Create;
+  FLive.Start(FSession, Border, ScreenFrame,
+    LiveRect(Base.origin.x, Base.origin.y, Base.size.width,
+    Base.size.height), Zoom, Follow);
+  if not FLive.Active then
+    Exit;
+  // Created unscheduled and added to the *common* modes, not scheduled
+  // and then added again: the camera window is draggable during a
+  // recording, and a drag puts the run loop in
+  // NSEventTrackingRunLoopMode, where a default-mode-only timer stops
+  // firing and a zoom freezes half way. NSRunLoopCommonModes already
+  // includes the default mode, so scheduling first would register the
+  // same timer twice and fire it at sixty hertz.
+  FLiveTimer := NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats(
+    LiveTickSeconds, FTarget, SelectorNamed(LiveTickSelector), nil, True);
+  if FLiveTimer <> nil then
+  begin
+    FLiveTimer.retain;
+    NSRunLoop.currentRunLoop.addTimer_forMode(FLiveTimer,
+      NSRunLoopCommonModes);
+  end;
+end;
+
+procedure TAppController.StopLive;
+begin
+  if FLiveTimer <> nil then
+  begin
+    FLiveTimer.invalidate;
+    FLiveTimer.release;
+    FLiveTimer := nil;
+  end;
+  // Every caller is on the stopping path *before* FinishCapture: the
+  // animator holds the session, and a tick that arrived after the writer
+  // had been finalised would be talking to a freed object.
+  if FLive <> nil then
+    FLive.Stop;
+end;
+
+procedure TAppController.LiveTick;
+begin
+  // An export owns the main thread and drains events to draw its
+  // progress, which is how a timer can fire in the middle of one. There
+  // is no recording running then, but the guard is cheap and the rule is
+  // the same everywhere else in this unit.
+  if Busy or (FLive = nil) then
+    Exit;
+  FLive.Tick;
+  // The animator switches itself off when the session stops capturing;
+  // the timer would otherwise keep firing until the stop path reaches it.
+  if FLive.Active then
+    Exit;
+  // The other way it switches itself off is ScreenCaptureKit giving up on
+  // live reconfiguration part way through. That is worth telling the user
+  // about, and is deliberately not a Fail: the recording is unharmed and
+  // goes on being written — it just stopped zooming and panning.
+  if (FSession <> nil) and FSession.Capturing
+    and not FSession.SupportsLiveUpdate
+    and (FSession.LiveUpdateError <> '') then
+  begin
+    RecordError(FSession.LiveUpdateError);
+    RefreshStatusItem;
+  end;
+  StopLive;
+end;
+
+procedure TAppController.StopLiveAfterFailure(const AMessage: string);
+begin
+  StopLive;
+  RecordError(AMessage);
+  RefreshStatusItem;
+end;
+
 // Runs one turn after the command that asked for a recording.
 procedure TAppController.StartPending;
 var
@@ -1849,6 +2159,7 @@ var
   Error: string;
   DisplayIndex: Integer;
   BorderWindowID: Cardinal;
+  LiveZoom, LiveFollow: Boolean;
 begin
   if FState <> asRecording then
     Exit;
@@ -1882,6 +2193,14 @@ begin
   end;
   if FSystemAudio then
     Options.AudioMode := amSystem;
+  // Zoom on Click and Follow Mouse move the stream's sourceRect, so the
+  // capture has to be started with one even for a whole display, which
+  // otherwise goes without. Asked for only when an effect is actually
+  // going to apply — ResolveLiveEffects is the single place that
+  // decides, and StartLive asks it again for the same answer.
+  ResolveLiveEffects(Options.TargetKind, Options.HasRegion, FZoomOnClick,
+    FFollowMouse, LiveZoom, LiveFollow);
+  Options.LiveSourceRect := LiveZoom or LiveFollow;
   // The border has to exist before the content filter is built: its
   // window id is what StartCapture hands to
   // initWithDisplay:excludingWindows:. The frame is stroked outside the
@@ -1909,6 +2228,9 @@ begin
     Exit;
   end;
 
+  // Nothing should be animating a session that is about to be freed, and
+  // the animator holds a bare pointer to it.
+  StopLive;
   FreeAndNil(FSession);
   FSession := TRecordingSession.Create(Options);
   if not FSession.StartCapture(Error) then
@@ -1932,6 +2254,23 @@ begin
       + 'capture (%d of %d windows resolved); the frame is drawn outside '
       + 'the recorded region, so the file is unaffected',
       [FSession.Report.ExcludedWindows, Length(Options.ExcludedWindowIDs)]));
+
+  // After the capture is running, because the animator needs the
+  // session's own base rectangle and a stream to send updates to.
+  //
+  // "The border was excluded" is deliberately conservative and not a
+  // count-above-zero test: the report says how many of the requested ids
+  // resolved, not *which*, so the honest reading is "the border was among
+  // the requests AND every request resolved". The moment a second
+  // exclusion joins the list — the camera window is the obvious
+  // candidate — a count test would call the border excluded because
+  // something else was, and this one refuses Follow Mouse instead. That
+  // is the right way round: the cost of being wrong is a recording with
+  // its own frame sliding through it.
+  StartLive(BorderWindowID, (BorderWindowID <> 0)
+    and WindowIDRequested(Options.ExcludedWindowIDs, BorderWindowID)
+    and (FSession.Report.ExcludedWindows
+    = Length(Options.ExcludedWindowIDs)));
 
   // Only once the capture is really running, so a repeat of a region that
   // no longer resolves does not become the region to repeat.
@@ -1965,6 +2304,10 @@ begin
   // more click once the export is done stops it.
   if not Transition(acStopRecording) then
     Exit;
+  // Before the deferred finalisation: the animator's last act is one
+  // more updateConfiguration:, and the stream has to still be running
+  // for it.
+  StopLive;
   StopElapsedTimer;
   RefreshStatusItem;
   ScheduleOneShot(StopPendingSelector);
@@ -1987,6 +2330,9 @@ var
 begin
   if FSession = nil then
     Exit;
+  // Idempotent, and the backstop for the paths that do not come through
+  // CommandStop — Quit, above all, which finalises inline.
+  StopLive;
   // The frame goes first: it belongs to the recording, not to the
   // finalisation, and finishing the writer pumps the run loop.
   HideBorder;

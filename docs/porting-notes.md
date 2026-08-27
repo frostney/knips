@@ -92,6 +92,19 @@ is a display name and reads `Knips` under the app bundle but `knips-bin`
 from the shell, so the Record Window submenu's own-window filter cannot
 be built on it.
 
+The live recording effects added one more:
+`SCStream.updateConfiguration:completionHandler:`. It is declared inside
+`@interface SCStream` in `SCStream.h` with no availability annotation of
+its own, and the interface is `API_AVAILABLE(macos(12.3))` — as old as
+`SCStream` itself, and three major versions below the project floor. Its
+completion handler is `nullable void (^)(NSError *)`, exactly the shape
+of `startCaptureWithCompletionHandler:`, so it takes the vendored
+`TSCErrorBlock` and a global `cdecl` procedure like the other two.
+`knips probe` still asks the runtime whether the selector is there before
+anything sends it: an unrecognised selector is an Objective-C exception
+no Pascal handler can catch, and this one would be sent into a live
+recording thirty times a second.
+
 ### The rename reached the vendored units too
 
 The project shipped its first milestones under the name *opname*, and the
