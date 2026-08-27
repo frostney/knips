@@ -67,7 +67,8 @@
 
 | Layer | Units | Notes |
 | --- | --- | --- |
-| CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `export`, `displays`, `windows`, `probe`; SIGINT/SIGTERM → `StopRequested` |
+| CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `export`, `displays`, `windows`, `mcp`, `probe`; SIGINT/SIGTERM → `StopRequested` |
+| MCP | `Knips.Mcp`, `Knips.Mcp.Params` | The tool surface over pascal-mcp-sdk's stdio transport; the neutral half is the tool table, argument mapping, and default paths (tested) |
 | App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window, and the neutral state machine (tested) |
 | Recording | `Knips.Recording` | Target → filter + geometry → writer → stream; progress; report |
 | Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
@@ -82,6 +83,77 @@ the recording layer knows about the CLI. The one edge that crosses
 sideways is `Knips.App.Playback` → `Knips.Export.Pipeline`: the
 playback window's *Export as GIF…* button runs the same session the
 `export` subcommand does, rather than a second implementation of it.
+
+## The MCP server
+
+`knips mcp` is a third front end onto the same machine, beside the CLI
+and the menu-bar app, and it is built the same way: `Knips.Mcp.Params`
+turns a `tools/call` arguments object into a `TRecordingOptions` or
+`TExportOptions` and hands it to `ValidateRecordingOptions` /
+`ValidateExportOptions`, so an agent and a shell user are refused for
+identical reasons. (The messages are rewritten once at that boundary —
+`--fps` becomes `fps` — because a refusal naming a flag sends an agent
+looking for an argument its schema never declared.) `Knips.Mcp` then
+runs the same `TRecordingSession`, `TExportSession`, and
+`TMovieTrimSession` the other two front ends do. The neutral half has a
+co-located suite and runs on Linux CI; the Darwin half compiles
+everywhere and refuses in-band off macOS, so the tool list an agent
+discovers is the same list on every host.
+
+Every in-band failure leaves through one function (`KnipsToolError`),
+which is where the flag rewrite happens — so a message from
+`Knips.Recording` ("no display at index 3 (see `knips displays`)") is
+translated exactly like one from `Knips.Options`, rather than the
+rewrite being remembered at each of a dozen call sites. The rewrites are
+anchored to token boundaries: these templates interpolate the caller's
+own text, and a file named `x.--fps.mp4` must come back spelled the way
+it was passed.
+
+Two places where the MCP contract deliberately differs from the CLI's,
+both because the caller is a program rather than a person:
+`record_start` refuses an existing `out` unless `overwrite` is set (the
+CLI replaces what you named), and `export_trim` refuses `fps`/`width`/
+`dither` rather than warning and ignoring them (nothing is reading
+stderr). Paths are expanded and returned absolute for the same reason —
+an agent cannot resolve a relative path against a working directory it
+never saw.
+
+The protocol comes from
+[pascal-mcp-sdk](https://github.com/frostney/pascal-mcp-sdk) (FPC RTL +
+fpjson, no third-party runtime dependency). Two consequences matter
+here:
+
+- **No new thread.** The SDK's stdio transport is a synchronous
+  read-handle-write loop on the calling thread: read one line, run one
+  handler, write one line, flush. It creates nothing and adopts nothing,
+  so the no-`cthreads` invariant below is untouched. (The SDK's *HTTP*
+  transport does need `cthreads` for its listener; Knips does not use
+  it, and adding it would cost the SIGSEGV immunity the whole capture
+  path depends on.) The SDK's own `TRTLCriticalSection` use is served by
+  the pthread-backed locks `Knips.ThreadManager` already installs.
+- **Recording outlives a handler.** `record_start` calls
+  `StartCapture` and returns; the loop goes straight back to blocking on
+  stdin. Nothing pumps a run loop in between and nothing needs to —
+  ScreenCaptureKit delivers on its own GCD queue into the writer, which
+  is exactly the arrangement the menu-bar app relies on between the
+  click that starts and the click that stops. `record_stop` calls
+  `FinishCapture` on the same main thread that started it, which is
+  where its `CFRunLoopRunInMode` waits belong. `record_status` reads the
+  writer's mutex-guarded counters live (`TRecordingSession.LiveStatistics`),
+  including `WriterFailed` — a writer that left its writing state stops
+  the session then and there and reports it, because every further frame
+  would be captured into a dead file. That is the same reason the CLI's
+  run loop aborts on it.
+
+The session lives on the server object for the life of the process, not
+of a connection, so "one recording at a time" is enforced in one place;
+stdin EOF tears the server down and finalises a capture still running,
+which is the only clean shutdown a stdio server gets.
+
+Screen Recording permission is granted per host application and this
+process inherits its client's attribution, so the first capture prompts
+whichever app launched the server — see
+[quick-start](quick-start.md#the-mcp-server).
 
 ## The export pipeline
 

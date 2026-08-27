@@ -4,7 +4,12 @@
 [package]
 name = "knips"
 version = "0.1.0"
-units = ["source", "source/capture"]
+# The third entry is the pascal-mcp-sdk module's unit directory, named
+# here rather than discovered: see the mcp dependency below for why its
+# nested manifest is deliberately not fetched. The module snapshot is
+# committed (zero-install, like cli and testing), so the path exists in a
+# fresh clone, and [format] keeps the formatter off it.
+units = ["source", "source/capture", ".lwpt/modules/mcp/source/units"]
 
 [format]
 # source/capture/** is vendored from the lantaarn/SoftKVM prototype; its
@@ -18,6 +23,24 @@ exclude = [".lwpt/**", "source/capture/**"]
 # testing is the *.Test.pas runner.
 cli = { source = "frostney/lwpt", version = "^0.7.0", include = ["packages/cli/**"], exclude = ["**/*.Test.pas"] }
 testing = { source = "frostney/lwpt", version = "^0.7.0", include = ["packages/testing/**"], exclude = ["**/*.Test.pas"] }
+# The MCP server library behind `knips mcp`. RTL + fpjson only; the stdio
+# transport is a synchronous single-threaded read/handle/write loop, so it
+# needs no thread manager beyond the pthread-backed locks Knips already
+# installs (the cthreads note in its README is for the HTTP transport,
+# which knips does not use).
+#
+# The include filter deliberately leaves out the SDK's own lwpt.toml.
+# lwpt reads a fetched module's manifest for two things at once — its
+# units dirs AND its dependencies — and pascal-mcp-sdk 2.0.0 declares a
+# dev-time testing = "^0.2.0" that knips's own testing = "^0.7.0" cannot
+# be reconciled with in lwpt's flat single-version graph (the SDK's test
+# files are excluded at fetch, so nothing here would compile against it
+# either way). Dropping the manifest drops the phantom constraint; the
+# units dir it would have contributed is named in [package] units above.
+# When either side moves — the SDK relaxing that pin, or lwpt learning
+# dev-only dependencies — restore "lwpt.toml" to the include list and
+# delete the units entry.
+mcp = { source = "frostney/pascal-mcp-sdk", version = "^2.0.0", include = ["source/units/**"], exclude = ["**/*.Test.pas"] }
 
 [build]
 # The one default target stays linker-flag-free (AGENTS.md hard constraint).

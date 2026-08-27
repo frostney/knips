@@ -20,3 +20,13 @@ constraintFingerprint = "sha256:e683929e4099c2fcabd950cdf9aaed873daa6ee951e7bee0
 resolvedURL = "https://github.com/frostney/lwpt/archive/360227fcd3f123af1a5d08735832e84c1bd4c3af.tar.gz"
 computedHash = "sha256:8fe5a5e1176557e57324aa13879b9b438e6b3e2f6176df94171bc85c303c2e35"
 archiveHash = "sha256:a8f0d4e406eb8c1f0e4bf669a06b2c47f11b67fb421e97bec8a5ca5e020c8e7a"
+
+[package.mcp]
+source = "frostney/pascal-mcp-sdk"
+resolvedRef = "2.0.0"
+resolvedCommit = "166422687ee0ab078df439f5c6949b3d8d63af89"
+sourceIdentity = "git|https://github.com/frostney/pascal-mcp-sdk.git|exclude=**/*.Test.pas|include=source/units/**"
+constraintFingerprint = "sha256:97b07a713461d6a50614da792515c8e75ec76fbddf0ad40221527bcb418bad48"
+resolvedURL = "https://github.com/frostney/pascal-mcp-sdk/archive/166422687ee0ab078df439f5c6949b3d8d63af89.tar.gz"
+computedHash = "sha256:aab951d7933d9c05eeef804ec45554aeb6c3f72d90b913a4d5cdb7403440d19d"
+archiveHash = "sha256:068e0397b2f864d6f5f93de94564e8fc7efde72c042f1212930ec1e2ab635b19"

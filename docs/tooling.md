@@ -91,3 +91,39 @@ types, nothing about the frameworks' behaviour.
   lwpt's own tagline. Knips prints its own top-level help and only
   delegates per-command help. Worth a small upstream change (a tagline
   parameter).
+- **pascal-mcp-sdk's dev dependency collides with ours.** lwpt reads a
+  fetched module's `lwpt.toml` for two things at once — the unit
+  directories it contributes *and* the dependencies it requires — and
+  the resolver graph is flat and single-version by design
+  ([lwpt ADR-0031](https://github.com/frostney/lwpt/blob/main/docs/adr/0031-fixed-point-single-version-resolution.md)),
+  because FPC has one global unit namespace. pascal-mcp-sdk 2.0.0
+  declares `testing = "^0.2.0"` for its own suites; knips declares
+  `testing = "^0.7.0"`; caret on a `0.x` version pins the minor, so the
+  two ranges are disjoint and `lwpt install` fails outright:
+
+  ```text
+  lwpt install: unresolvable version conflict on "testing":
+    knips wants "^0.7.0"
+    mcp wants "^0.2.0"
+  ```
+
+  The dependency is dev-time only — knips excludes the SDK's
+  `*.Test.pas` at fetch, so nothing here would ever compile against it —
+  but lwpt has no dev-dependency concept and no override table, so the
+  constraint is inherited anyway.
+
+  **What knips does:** the `mcp` dependency's `include` filter omits the
+  SDK's `lwpt.toml`. With no nested manifest, lwpt walks no transitive
+  dependencies (`FindModuleManifest` → manifest-less behaviour) and the
+  conflict disappears; the unit directory the manifest would have
+  contributed is named directly in `[package] units` instead. The SDK
+  stays a real, tag-resolved, hash-locked dependency — this is not
+  vendoring — and its module snapshot is committed like `cli` and
+  `testing`, so the named path exists in a fresh clone.
+
+  **What would remove the workaround:** either the SDK relaxing that
+  pin (its `main` already moved to `^0.5.1`, still disjoint from
+  `^0.7.0`), or lwpt gaining dev-only dependencies or a root-level
+  override. Either way the fix is two lines: put `"lwpt.toml"` back in
+  the `include` list and drop the `.lwpt/modules/mcp/...` entry from
+  `[package] units`.

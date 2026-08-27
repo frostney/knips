@@ -31,7 +31,15 @@ lwpt install && lwpt build    # produces build/knips
 ./build/knips export --in=demo.mp4 --out=demo.gif --width=800 --trim=1.5,4
 ./build/knips export --in=demo.mp4 --out=demo.apng    # truecolour APNG, no palette
 ./build/knips export --in=demo.mp4 --out=cut.mp4 --trim=1.5,3.5   # passthrough trim
+./build/knips mcp                                     # MCP server on stdin/stdout
 ```
+
+`knips mcp` serves the same capabilities to an AI client over the Model
+Context Protocol — `list_displays`, `list_windows`, `record_start` /
+`record_stop` / `record_status`, `export_gif`, `export_apng`,
+`export_trim` — using
+[pascal-mcp-sdk](https://github.com/frostney/pascal-mcp-sdk). Recording
+is non-blocking: the server keeps answering while it captures.
 
 `tools/make-app.sh` wraps the built binary in a menu-bar-only
 `build/Knips.app` ([docs/deployment.md](docs/deployment.md)).

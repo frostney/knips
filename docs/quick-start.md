@@ -256,11 +256,108 @@ knips export --in=<file>        .mp4 or .mov (required)
               [--no-dither]      skip Floyd–Steinberg dithering; GIF only
 knips displays
 knips windows
+knips mcp                       MCP server on stdin/stdout; no options
 knips probe
 knips --version
 ```
 
 `--window` and `--rect` are mutually exclusive.
+
+## The MCP server
+
+`knips mcp` speaks the Model Context Protocol on stdin/stdout, so an AI
+client can record and export without a shell. The protocol is
+[pascal-mcp-sdk](https://github.com/frostney/pascal-mcp-sdk)'s; the
+tools are the CLI's own code paths with JSON arguments instead of flags,
+validated by the same `Knips.Options` rules.
+
+Register it the way any local MCP server is registered — the command is
+the built binary with one argument:
+
+```json
+{
+  "mcpServers": {
+    "knips": { "command": "/absolute/path/to/build/knips", "args": ["mcp"] }
+  }
+}
+```
+
+| Tool | Arguments | Returns |
+| --- | --- | --- |
+| `list_displays` | — | index, size in points, backing scale, which is main |
+| `list_windows` | — | window id, size, application, title |
+| `record_start` | `out?`, `overwrite?`, `display?`, `window?`, `left`/`top`/`width`/`height`?, `fps?`, `scale?`, `audio?`, `cursor?`, `bitrate?` | the path, pixel size, and frame rate it started at |
+| `record_stop` | — | the path, duration, frame counters, bytes |
+| `record_status` | — | whether it is recording, elapsed seconds, frames so far |
+| `export_gif` | `in`, `out?`, `fps?`, `width?`, `trim_start?`, `trim_end?`, `dither?` | the path, pixel size, frames, bytes |
+| `export_apng` | `in`, `out?`, `fps?`, `width?`, `trim_start?`, `trim_end?` | as above |
+| `export_trim` | `in`, `out?`, `trim_start?`, `trim_end?` | the range kept and the bytes written |
+
+Every argument except `in` is optional. An omitted `out` becomes
+`~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4` for a recording — the same
+name the menu-bar app uses — and, for an export, the input path with the
+format's extension (a trim adds `-trim`, since it may not overwrite its
+own input). A region is four separate integers, all four or none. Every
+tool declares an `outputSchema`, so a client knows the shape of
+`structuredContent` before it calls.
+
+Paths in and out are absolute. A relative `in`/`out` is expanded against
+the server's working directory, and results always report the expanded
+path — a client has no way to resolve a relative path against a
+directory it never saw.
+
+**`record_start` will not silently replace a file.** `knips record`
+overwrites its `--out` without asking, which is right for a path a
+person typed; an agent guesses paths, so over MCP an existing `out` is
+refused by name unless `"overwrite": true` is passed. Exports keep the
+CLI's replace-in-place behaviour, since their default path is derived
+from `in` rather than guessed.
+
+**`export_trim` refuses `fps`, `width` and `dither`** instead of
+ignoring them. A passthrough trim copies coded samples, so those cannot
+be honoured, and the SDK ignores arguments a schema does not declare —
+an agent that asked for a scaled trim would otherwise get an unscaled
+movie and no hint that the request was dropped.
+
+**Recording does not block the server.** `record_start` returns as soon
+as the capture is running and the loop goes back to reading stdin;
+ScreenCaptureKit delivers frames on its own queue meanwhile, so
+`record_status` and everything else keep answering. `record_stop`
+finalises the file. Only one recording runs at a time: a second
+`record_start` is refused in-band, naming the file already being
+written. Closing stdin is the shutdown signal, and it is also what lets
+the server finalise a recording still in flight — a killed process loses
+the movie the same way `Ctrl-C`-twice does.
+
+If the writer dies mid-recording — a full disk, a directory that went
+away — `record_status` reports the failure as an error result, stops the
+session, and says whether the partial file could still be finalised.
+Frames stop being counted the moment the writer leaves its writing
+state, so a status that kept answering `recording: true` with frozen
+counters would leave a client waiting for a file that will never grow.
+
+**Permission.** Screen Recording is granted per *host application*, not
+per user, and an MCP server inherits the attribution of whatever
+launched it. The first capture therefore makes macOS prompt the MCP
+client's own app — Claude Desktop, an editor, a terminal — and until
+that is granted in System Settings ▸ Privacy & Security ▸ Screen
+Recording, every `record_start` fails with the framework's message. The
+same is true of `list_displays` and `list_windows`, which query
+ScreenCaptureKit.
+
+By hand, without a client (the stdio binding is one JSON-RPC message per
+line):
+
+```sh
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"probe","version":"1.0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_displays","arguments":{}}}' \
+  | ./build/knips mcp
+```
+
+Standard output carries nothing but MCP messages; diagnostics go to
+standard error.
 
 ### Audio
 

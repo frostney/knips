@@ -90,6 +90,13 @@ type
     // Blocks until StopRequested is set. False with a message on any
     // failure before or after capture.
     function Run(out AError: string): Boolean;
+    // The writer's counters as they stand right now, for a caller that
+    // wants progress without stopping — `knips mcp`'s record_status,
+    // which answers while the capture queue is still appending. The
+    // counters are mutex-guarded inside the writer, so reading them
+    // from the main thread mid-recording is safe; all-zero before
+    // StartCapture and after the writer is gone.
+    function LiveStatistics: TMovieWriterStatistics;
     // True between a successful StartCapture and FinishCapture.
     property Capturing: Boolean read FCapturing;
     property Geometry: TStreamGeometry read FGeometry;
@@ -427,6 +434,14 @@ begin
 
   Result := FWriter.Finish(AError);
   ReleaseFilter;
+end;
+
+function TRecordingSession.LiveStatistics: TMovieWriterStatistics;
+begin
+  if FWriter = nil then
+    Result := Default(TMovieWriterStatistics)
+  else
+    Result := FWriter.Statistics;
 end;
 
 function TRecordingSession.Run(out AError: string): Boolean;
