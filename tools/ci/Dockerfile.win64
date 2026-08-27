@@ -1,0 +1,123 @@
+# Windows (x86_64-win64) cross-compile image for knips.
+#
+# There is no Windows machine in this project's loop, so the Windows port's
+# first gate is "does it compile and link for win64". FPC's win64 target uses
+# the *internal* assembler and the *internal* linker, so a cross compiler
+# needs no mingw binutils at all — only an x86_64 code generator plus a win64
+# RTL and package set, both built from the FPC 3.2.2 sources with the host's
+# own 3.2.2 compiler.
+#
+# The image is host-architecture agnostic: on an Apple-silicon Mac it runs as
+# linux/arm64 under OrbStack and produces PE/COFF binaries for x86_64.
+#
+# Built and driven by tools/win64-cross.sh.
+
+FROM debian:bookworm
+
+# Same FPC 3.2.2 pin as tools/ci/Dockerfile.linux — the starting compiler
+# must match the sources it bootstraps a cross compiler from, and
+# `debian:bookworm` is a floating tag, so the version is asserted rather than
+# assumed.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      fpc \
+      binutils \
+      libc6-dev \
+      gcc \
+      make \
+      file \
+      ca-certificates \
+      curl \
+ && rm -rf /var/lib/apt/lists/* \
+ && test "$(fpc -iV)" = "3.2.2"
+
+# gcc is not there to compile anything: FPC's own `packages` stage builds a
+# native (host-Linux) fpmake driver, and linking that needs gcc's crtbegin.o
+# / crtend.o. Without gcc the cross build dies at packages_all with
+# "crtbegin.o not found".
+
+# Upstream FPC sources. Debian's fpc-source-3.2.2 package is not usable here:
+# it ships Makefile.fpc but none of the generated Makefiles, and no top-level
+# Makefile.fpc at all, so `make crossall` has nothing to run.
+ARG FPC_VERSION=3.2.2
+ARG FPC_SRC_SHA256=d542e349de246843d4f164829953d1f5b864126c5b62fd17c9b45b33e23d2f44
+RUN set -eu; \
+    curl -fsSL -o /tmp/fpc-src.tar.gz \
+      "https://downloads.freepascal.org/fpc/dist/${FPC_VERSION}/source/fpc-${FPC_VERSION}.source.tar.gz"; \
+    echo "${FPC_SRC_SHA256}  /tmp/fpc-src.tar.gz" | sha256sum -c -; \
+    mkdir -p /usr/src; \
+    tar -xzf /tmp/fpc-src.tar.gz -C /usr/src; \
+    rm /tmp/fpc-src.tar.gz
+
+# FPC 3.2.2 predates glibc 2.34, which deleted __libc_csu_init/__libc_csu_fini.
+# Building a cross compiler rebuilds the *host* Linux RTL on the way, and its
+# libc start-up stub still passes those two symbols to __libc_start_main, so
+# the first host-side link (packages/fpmake) dies with "undefined reference to
+# __libc_csu_init" on any modern distribution. glibc 2.34+ runs the init/fini
+# arrays itself and ignores both arguments, so passing null is the fix — it is
+# what FPC itself did after 3.2.2. Debian patches its own packaged compiler the
+# same way; these sources are upstream's, so the patch has to be re-applied
+# here. The greps make a future FPC bump fail loudly instead of silently
+# skipping the patch.
+RUN set -eu; \
+    cd "/usr/src/fpc-${FPC_VERSION}"; \
+    grep -q '__libc_csu_init' rtl/linux/aarch64/cprt0.as; \
+    grep -q '__libc_csu_init' rtl/linux/x86_64/cprt0.as; \
+    sed -i \
+      -e 's|^\tadrp\tx3,:got:__libc_csu_init$|\tmov\tx3,#0|' \
+      -e '/^\tldr\tx3,\[x3,#:got_lo12:__libc_csu_init\]$/d' \
+      -e 's|^\tadrp\tx4,:got:__libc_csu_fini$|\tmov\tx4,#0|' \
+      -e '/^\tldr\tx4,\[x4,#:got_lo12:__libc_csu_fini\]$/d' \
+      rtl/linux/aarch64/cprt0.as; \
+    sed -i \
+      -e 's|movq __libc_csu_init@GOTPCREL(%rip), %rcx|xorq %rcx,%rcx|' \
+      -e 's|movq __libc_csu_fini@GOTPCREL(%rip), %r8|xorq %r8,%r8|' \
+      rtl/linux/x86_64/cprt0.as; \
+    ! grep -q '__libc_csu' rtl/linux/aarch64/cprt0.as; \
+    ! grep -q '__libc_csu' rtl/linux/x86_64/cprt0.as
+
+# Build and install the cross compiler (ppcrossx64) plus the win64 RTL and
+# package set, next to the host compiler under /usr. (The unit search path
+# still needs three lines added to /etc/fpc.cfg afterwards — see below.)
+#
+# BINUTILSPREFIX= and CROSSBINDIR= are what keep the build from reaching for a
+# non-existent x86_64-win64-as / -ld: win64 assembles and links internally.
+ARG FPC_BUILD_JOBS=4
+RUN set -eu; \
+    cd "/usr/src/fpc-${FPC_VERSION}"; \
+    make -j"${FPC_BUILD_JOBS}" crossall \
+      CPU_TARGET=x86_64 OS_TARGET=win64 \
+      BINUTILSPREFIX= CROSSBINDIR= \
+      CROSSOPT="-O2"; \
+    make crossinstall \
+      CPU_TARGET=x86_64 OS_TARGET=win64 \
+      BINUTILSPREFIX= CROSSBINDIR= \
+      INSTALL_PREFIX=/usr; \
+    ls -l /usr/lib/fpc/${FPC_VERSION}/ppcrossx64; \
+    ls /usr/lib/fpc/${FPC_VERSION}/units/x86_64-win64/ | head
+
+# Two things the freshly installed cross target still needs:
+#
+# 1. The `fpc` driver picks its back end by name, so `-Twin64 -Px86_64` makes
+#    it look for `ppcrossx64` on PATH the way it finds `ppca64` for the host.
+# 2. Debian's /etc/fpc.cfg searches a *multiarch* unit root
+#    (/usr/lib/<host-triplet>/fpc/...), while `make crossinstall
+#    INSTALL_PREFIX=/usr` writes the plain /usr/lib/fpc/... layout upstream
+#    uses. Without these three lines the win64 RTL is found but nothing else
+#    is — rtl-objpas (StrUtils), rtl-generics (Generics.Collections),
+#    fcl-json (fpjson) and paszlib (ZStream) all go missing. $fpctarget
+#    expands per invocation, so the same lines are inert for host builds.
+RUN set -eu; \
+    ln -sf "/usr/lib/fpc/${FPC_VERSION}/ppcrossx64" /usr/bin/ppcrossx64; \
+    { \
+      echo '# knips: upstream-layout unit roots for cross targets'; \
+      echo '-Fu/usr/lib/fpc/$fpcversion/units/$fpctarget'; \
+      echo '-Fu/usr/lib/fpc/$fpcversion/units/$fpctarget/*'; \
+      echo '-Fu/usr/lib/fpc/$fpcversion/units/$fpctarget/rtl'; \
+    } >> /etc/fpc.cfg; \
+    fpc -Twin64 -Px86_64 -iV -iTO -iTP; \
+    test "$(fpc -Twin64 -Px86_64 -iV)" = "3.2.2"; \
+    test "$(fpc -Twin64 -Px86_64 -iTO)" = "win64"; \
+    test "$(fpc -Twin64 -Px86_64 -iTP)" = "x86_64"
+
+WORKDIR /work

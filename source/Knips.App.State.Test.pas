@@ -439,9 +439,22 @@ end;
 
 procedure TOutputTests.TestDirectoryIsUnderMovies;
 begin
+  // MoviesFolderName is the unit's one per-target constant ('Movies' on
+  // macOS, 'Videos' elsewhere), so it is named rather than spelled out;
+  // everything else about the shape is asserted literally.
   Expect<string>(RecordingsDirectory('/Users/x'))
-    .ToBe('/Users/x' + PathDelim + 'Movies' + PathDelim + 'knips'
+    .ToBe('/Users/x' + PathDelim + MoviesFolderName + PathDelim + 'knips'
     + PathDelim);
+  // And the constant's value is pinned per target, so a merge that
+  // resolves the conditional to the wrong branch cannot pass silently —
+  // the assertion above routes through the constant and would mirror
+  // any wrong value. A conditional in a test file is covered by no
+  // repo claim about the neutral units.
+  {$IFDEF DARWIN}
+  Expect<string>(MoviesFolderName).ToBe('Movies');
+  {$ELSE}
+  Expect<string>(MoviesFolderName).ToBe('Videos');
+  {$ENDIF}
 end;
 
 procedure TOutputTests.TestDirectoryToleratesATrailingSlash;

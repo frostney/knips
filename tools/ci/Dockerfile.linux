@@ -1,0 +1,78 @@
+# Linux CI image for knips: FPC 3.2.2 + the real lwpt 0.7.0 Linux binary.
+#
+# The platform-neutral core (Knips.Options, Knips.App.State, the GIF/APNG/
+# Timing/Bitmap encoders, Knips.Recording.LiveMath, Knips.Mcp.Params,
+# Knips.ObjC.TypeEncoding) has no {$IFDEF DARWIN} at all, so it compiles and
+# its suites run on Linux exactly as ADR-0004 promised. This image is how
+# that promise is checked without a Linux machine.
+#
+# lwpt stays the only toolchain entry point (AGENTS.md): upstream publishes
+# linux-arm64 and linux-x64 release binaries, so the container runs the same
+# `lwpt test` a developer runs on the Mac. No `fpc` invocation and no
+# hand-rolled build script is involved.
+#
+# Built and driven by tools/linux-ci.sh.
+
+FROM debian:bookworm
+
+# Debian bookworm ships FPC 3.2.2 (3.2.2+dfsg-20) for both arm64 and amd64 —
+# the exact pin in docs/tooling.md. `fpc` is the metapackage: compiler plus
+# the RTL, FCL (fpjson) and base (paszlib) unit sets the suites need.
+#
+# `debian:bookworm` is a floating tag, so the version is *asserted*, not just
+# printed: if a point release ever moves the compiler off 3.2.2, this image
+# fails to build rather than quietly gating against the wrong compiler.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      fpc \
+      binutils \
+      libc6-dev \
+      gcc \
+      file \
+      ca-certificates \
+      curl \
+      xz-utils \
+      xvfb \
+      x11-utils \
+      libx11-dev \
+      libxext-dev \
+ && rm -rf /var/lib/apt/lists/* \
+ && test "$(fpc -iV)" = "3.2.2"
+
+# Notes on the less obvious packages:
+#
+# - gcc is not there to compile anything. FPC links Linux programs that pull
+#   in libc (the X11 bindings do) against gcc's crtbegin.o / crtend.o; without
+#   it every such link warns and is one library away from failing outright.
+# - Xvfb and the X11/Xext development symlinks are what let the capture spike
+#   in source/capture-linux/ build and grab a real frame headlessly. FPC's own
+#   x11 package supplies the bindings; libx11-dev / libxext-dev supply the
+#   libX11.so / libXext.so its `{$LinkLib}` directives resolve against.
+# - x11-utils supplies xdpyinfo, which the gate uses to wait for Xvfb rather
+#   than guessing at a sleep. Nothing paints the root from the shell: xsetroot
+#   silently leaves a bare Xvfb root black, so the spike paints it itself
+#   through the same X connection it grabs from.
+
+# lwpt release binary, pinned by version and sha256 from the release's own
+# checksums.txt. Do not bump without updating both.
+ARG LWPT_VERSION=0.7.0
+ARG LWPT_SHA256_ARM64=57da21404b048c88e98861ca3b42834817514386d1f6ae38469563b2fe1bd257
+ARG LWPT_SHA256_AMD64=cf7457e08f7e73d80a2c6a4f5d98047b9aac39b7be0776469973a95bfc2e638c
+ARG TARGETARCH
+
+RUN set -eu; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+      arm64) slug=linux-arm64; sum="$LWPT_SHA256_ARM64" ;; \
+      amd64) slug=linux-x64;   sum="$LWPT_SHA256_AMD64" ;; \
+      *) echo "unsupported architecture: ${TARGETARCH:-unknown}" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/frostney/lwpt/releases/download/${LWPT_VERSION}/lwpt-${LWPT_VERSION}-${slug}.tar.gz"; \
+    curl -fsSL -o /tmp/lwpt.tar.gz "$url"; \
+    echo "${sum}  /tmp/lwpt.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/lwpt.tar.gz -C /tmp; \
+    install -m 0755 "$(find /tmp -maxdepth 3 -type f -name lwpt | head -n1)" /usr/local/bin/lwpt; \
+    rm -rf /tmp/lwpt.tar.gz /tmp/lwpt-*; \
+    lwpt --version; \
+    fpc -iV
+
+WORKDIR /work

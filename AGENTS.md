@@ -17,7 +17,10 @@
   `external` bindings ([ADR-0002](docs/adr/0002-runtime-built-objc-classes.md)).
   The `-k-ld_classic` variant is a separate, documented entry if it is ever
   needed ([docs/tooling.md](docs/tooling.md)).
-- **No `cthreads`.** The capture queue is a GCD thread the RTL never
+- **No `cthreads` on Darwin** (a Darwin-only rule: Linux uses `cthreads`
+  and Windows the native RTL thread manager — see
+  [ADR-0005](docs/adr/0005-windows-linux-ports.md)). The capture queue is
+  a GCD thread the RTL never
   adopts. On that thread (`TScreenStream.OnSample` and everything it
   calls): no exceptions, no `try..finally`, no `WriteLn`, no managed-type
   writes outside a `TPThreadMutex`. `cmem` stays the first unit of the
@@ -80,7 +83,7 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | `source/Knips.Export.MovieWriter.pas` | AVAssetWriter bindings + the movie sink |
 | `source/Knips.Export.MovieReader.pas` | AVAssetReader bindings; BGRA frames + presentation stamps, with a trim range |
 | `source/Knips.Export.Bitmap.pas` | Platform-neutral BGRA buffer + box/bilinear resampling (tested) |
-| `source/Knips.Export.Gif.pas` | Platform-neutral GIF89a: exact-colour histogram, median cut, dithering, LZW (tested) |
+| `source/Knips.Export.Gif.pas` | Platform-neutral GIF89a: exact-colour histogram (64-bit counters, no sampling budget), median cut, dithering, LZW, and the self-thinning palette sample schedule the pipeline drives (tested) |
 | `source/Knips.Export.Apng.pas` | Platform-neutral APNG: acTL/fcTL/fdAT, PNG filters, paszlib, truecolour (tested) |
 | `source/Knips.Export.Timing.pas` | Platform-neutral frame-delay planning: grid-snapped, drift-free (tested) |
 | `source/Knips.Export.MovieTrim.pas` | AVAssetExportSession passthrough trim (no decode, no re-encode) |
@@ -89,7 +92,9 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | `source/Knips.Mcp.Params.pas` | Platform-neutral MCP tool table, JSON argument mapping, default paths, flag→argument message rewriting (tested) |
 | `source/Knips.Mcp.pas` | `knips mcp`: the tool handlers on pascal-mcp-sdk's stdio transport; one recording at a time |
 | `source/capture/` | Vendored bindings: CoreMedia/CoreVideo/VideoToolbox/GCD, ScreenCaptureKit, pthread mutex |
-| `docs/` | Architecture, quick-start, tooling, code style, deployment, porting notes, spikes, ADRs |
+| `source/capture-linux/` | X11/MIT-SHM capture **spike** and its runner — not shipped, not an lwpt build entry; run against Xvfb by `tools/linux-ci.sh` ([docs/ports.md](docs/ports.md)) |
+| `tools/linux-ci.sh`, `tools/win64-cross.sh`, `tools/wine-smoke.sh` | Cross-platform gates in Docker: the neutral suites on Linux, an `x86_64-win64` compile-and-link, a Wine smoke ([docs/ports.md](docs/ports.md)) |
+| `docs/` | Architecture, quick-start, tooling, code style, deployment, ports, porting notes, spikes, ADRs |
 
 Layering: `knips.pas` → {`Knips.App`, `Knips.Mcp`, `Knips.Recording`,
 `Knips.Export.Pipeline`, `Knips.Export.MovieTrim`} (`Knips.Mcp` reaches

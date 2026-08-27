@@ -9,7 +9,16 @@ version = "0.1.0"
 # nested manifest is deliberately not fetched. The module snapshot is
 # committed (zero-install, like cli and testing), so the path exists in a
 # fresh clone, and [format] keeps the formatter off it.
-units = ["source", "source/capture", ".lwpt/modules/mcp/source/units"]
+# source/capture-linux holds the X11/MIT-SHM capture spike (docs/ports.md).
+# Nothing on macOS `uses` it, so naming the directory here costs a search
+# path and nothing else — and it is what puts the new units under
+# `lwpt format`, which source/capture is deliberately exempt from.
+units = [
+  "source",
+  "source/capture",
+  "source/capture-linux",
+  ".lwpt/modules/mcp/source/units",
+]
 
 [format]
 # source/capture/** is vendored from the lantaarn/SoftKVM prototype; its

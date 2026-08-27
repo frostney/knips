@@ -25,8 +25,21 @@ const
   // they inherit the menu bar's foreground colour in light and dark mode.
   IdleGlyph = '◉';
   RecordingGlyph = '⏺';
-  // ~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4
+  // ~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4 on macOS,
+  // ~/Videos/knips/… everywhere else. The one conditional in this
+  // otherwise platform-neutral unit, and it is here because the *host*
+  // differs, not the code: macOS's home movie folder is `~/Movies`,
+  // the Windows shell's movie library is `Videos` (FOLDERID_Videos),
+  // and XDG's default for XDG_VIDEOS_DIR is `~/Videos`. Selecting a
+  // constant by target is the same shape Knips.ObjC.TypeEncoding uses
+  // for its per-CPU encodings — no branch in behaviour, nothing to
+  // test twice. Tests assert through this constant, so a single
+  // expectation stays true on every host.
+  {$IFDEF DARWIN}
   MoviesFolderName = 'Movies';
+  {$ELSE}
+  MoviesFolderName = 'Videos';
+  {$ENDIF}
   RecordingsFolderName = 'knips';
   RecordingFilePrefix = 'knips-';
   RecordingTimestampFormat = 'yyyymmdd-hhnnss';
@@ -44,7 +57,7 @@ const
   AppGifFramesPerSecond = 20;
   // How much of the export's progress the palette pass is worth. It
   // reads every frame but only resamples every Nth
-  // (PaletteSampleFrames), so it is decode-bound while the encode pass
+  // (TGifPaletteSampler), so it is decode-bound while the encode pass
   // is per-pixel — measured on real recordings (release build) the
   // palette pass takes 1.9-5.8% of the export's wall time, and the gap
   // widens with canvas size. The old weight of 25 made the bar rocket

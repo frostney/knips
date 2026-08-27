@@ -22,6 +22,12 @@ parameters of locally declared Objective-C bindings to `A`-prefixed
 PascalCase; the `message 'selector:'` clause is what binds them, so the
 Pascal identifier is free.
 
+Do not put `//` comments *inside* a uses-clause: lwpt 0.7.0's formatter
+desynchronises on them and rewrites the whole file into garbage on the
+next `lwpt format` (the `--check` mode only reports "needs formatting",
+so the damage lands silently later — see docs/ports.md, "how they were
+fixed", for the incident). Comment above the clause instead.
+
 ## Compiler mode and modeswitches
 
 - Default: `{$mode delphi}{$H+}` from `source/Knips.inc`.

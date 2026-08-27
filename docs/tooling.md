@@ -3,6 +3,8 @@
 ## Executive Summary
 
 - lwpt drives everything: `install`, `build`, `test`, `format`, `health`.
+- Other platforms are gated from a Mac in Docker: `tools/linux-ci.sh`,
+  `tools/win64-cross.sh`, `tools/wine-smoke.sh` ([ports.md](ports.md)).
 - Pinned: FPC 3.2.2, lwpt ≥ 0.7.0, `cli`/`testing` `^0.7.0` (locked in
   `lwpt.lock`).
 - The default build entry has no `flags`; the `-k-ld_classic` variant is
@@ -53,6 +55,29 @@ lwpt 0.7.0 passes `flags` verbatim per entry (see lwpt's
 `docs/build-system.md`). Do not commit that entry: it fails on Linux,
 where the GNU linker has no such option, and `lwpt build` builds every
 entry by default.
+
+## Other platforms (Docker)
+
+Three scripts run the parts of the tree that are not macOS-only, from a
+Mac, in containers. The design behind them is [ports.md](ports.md).
+
+| Script | What it does |
+| --- | --- |
+| `tools/linux-ci.sh` | Debian bookworm + FPC 3.2.2 + the real lwpt 0.7.0 Linux binary; `lwpt test`, `lwpt build`, a binary smoke, `lwpt format --check`, and the X11/MIT-SHM capture spike against Xvfb. `--platform linux/amd64` for x86_64. |
+| `tools/win64-cross.sh` | Bootstraps an FPC 3.2.2 `x86_64-win64` cross compiler in the container, then compiles and links `knips.pas` and every suite; verifies each artefact is PE32+. Compile-and-link only — it never runs what it builds. |
+| `tools/wine-smoke.sh` | Runs those `.exe` files under Wine in an amd64 container. A smoke test, not a gate — but it is what caught the POSIX assumptions in `Knips.Mcp.Params.Test` (stale literals and a wrong absolute-path predicate in the *tests*; the helpers themselves already use `PathDelim`). |
+
+All three mount the checkout read-only and copy it inside the container,
+so a Linux or Windows build never leaves foreign `.ppu`/`.o` files or an
+ELF/PE `build/knips` in a Mac checkout. `wine-smoke.sh` is the exception
+by design: it extracts the built executables into `build/win64/`, which
+`.gitignore` already covers.
+
+lwpt stays the entry point on Linux — upstream publishes `linux-arm64`
+and `linux-x64` release binaries, so the container runs the same
+`lwpt test` a developer runs. Only the cross-compile has no lwpt path;
+it uses `fpc @lwpt.cfg`, the one direct-compiler form AGENTS.md sanctions,
+adding nothing but `-Twin64 -Px86_64` and output directories.
 
 ## Off-device type checking (cross compiler)
 
