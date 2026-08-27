@@ -3,6 +3,10 @@
 A change is shippable only when every applicable item holds.
 
 - `lwpt format --check`, `lwpt build`, and `lwpt test` exit zero.
+- `lwpt build --mode release` exits zero and the release binary passes
+  `knips probe` (release turns on -O4's field reordering, which dev
+  builds never exercise — an alignment bug it exposed shipped
+  crash-free in dev mode from the first on-device commit).
 - Platform-neutral code has co-located `*.Test.pas` coverage of its
   public surface.
 - Darwin changes have been exercised on a Mac: `knips probe` passes and

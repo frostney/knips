@@ -23,9 +23,30 @@ const
     but we use 128 to be safe across platforms/versions }
   PTHREAD_MUTEX_OPAQUE_SIZE = 128;
 
+  { The storage is declared in QWords rather than Bytes because
+    pthread_mutex_t is 8-byte aligned: Apple's _opaque_pthread_mutex_t
+    (sys/_pthread/_pthread_types.h) leads with `long __sig`, and
+    libsystem_pthread reaches that word with `casa`, an atomic that
+    faults with SIGBUS on an unaligned address. A record whose fields are
+    Bytes has alignment 1, so a class holding one may put it at any
+    offset — and `lwpt build --mode release` (-O4) enables ORDERFIELDS,
+    which reorders class fields by alignment and therefore parks an
+    alignment-1 field wherever the padding is. That is what killed
+    `knips probe` in pthread_mutex_destroy, at a TCameraBlur.FLock offset
+    of 231. QWord storage gives the record alignment 8 in every mode, so
+    no placement can produce an address libsystem cannot use. See
+    docs/porting-notes.md, "pthread opaque storage is 8-byte aligned". }
+  { knips change: QWord storage (was Byte); see the comment above }
+  PTHREAD_MUTEX_OPAQUE_QWORDS = PTHREAD_MUTEX_OPAQUE_SIZE div 8;
+
+{$IF (PTHREAD_MUTEX_OPAQUE_SIZE mod 8) <> 0}
+  {$ERROR PTHREAD_MUTEX_OPAQUE_SIZE must be a multiple of 8: div 8 below would silently shrink the storage}
+{$ENDIF}
+
 type
   TPThreadMutex = record
-    _opaque: array[0..PTHREAD_MUTEX_OPAQUE_SIZE - 1] of Byte;
+    { knips change: QWord storage (was Byte); see the comment above }
+    _opaque: array[0..PTHREAD_MUTEX_OPAQUE_QWORDS - 1] of QWord;
   end;
   PPThreadMutex = ^TPThreadMutex;
 

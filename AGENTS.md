@@ -47,6 +47,7 @@ lwpt ≥ 0.7.0 is expected on PATH (or a locally built binary; see
 ```bash
 lwpt install          # resolve cli + testing from the lwpt release tag
 lwpt build            # build/knips (dev mode)
+lwpt build --mode release   # -O4; gate: release probe must pass too (DoD)
 lwpt test             # co-located unit suites (*.Test.pas) — run on any OS
 lwpt format --check   # formatter gate (no flag = rewrite in place)
 
