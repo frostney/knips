@@ -3,10 +3,9 @@
 #
 # The bundle exists to make the menu-bar app launchable and Dock-less:
 # LSUIElement keeps it out of the Dock, and CFBundleIdentifier gives it a
-# stable identity for anything that keys off one. It does NOT decide the
-# Screen Recording grant — TCC keys that on the code signature of the
-# process that actually asks, which here is Contents/MacOS/knips-bin, not
-# the bundle. See docs/deployment.md.
+# stable identity — including for TCC, whose grants key on the signing
+# step's identifier-anchored designated requirement (see the codesign
+# comment at the bottom and docs/deployment.md).
 #
 # NSMicrophoneUsageDescription and NSCameraUsageDescription are the keys
 # TCC reads from this plist: a bundled process asking for the microphone
@@ -99,19 +98,27 @@ printf 'APPL????' > "$CONTENTS/PkgInfo"
 # The app icon: generated from the one committed 1024px source at build
 # time (sips + iconutil are stock macOS), so the repo carries a single
 # PNG rather than ten derived sizes.
+# In a subshell with || so a cosmetic failure cannot abort the script
+# under set -e before the SIGNING below - an unsigned bundle silently
+# loses its camera permission prompts, which is a far worse failure
+# than a generic icon.
 if [ -f "$ICON_SOURCE" ]; then
-  RESOURCES=$CONTENTS/Resources
-  ICONSET=$(mktemp -d)/AppIcon.iconset
-  mkdir -p "$RESOURCES" "$ICONSET"
-  for SIZE in 16 32 128 256 512; do
-    sips -z "$SIZE" "$SIZE" "$ICON_SOURCE" \
-      --out "$ICONSET/icon_${SIZE}x${SIZE}.png" > /dev/null
-    DOUBLE=$((SIZE * 2))
-    sips -z "$DOUBLE" "$DOUBLE" "$ICON_SOURCE" \
-      --out "$ICONSET/icon_${SIZE}x${SIZE}@2x.png" > /dev/null
-  done
-  iconutil -c icns "$ICONSET" -o "$RESOURCES/AppIcon.icns"
-  rm -rf "$(dirname "$ICONSET")"
+  ICONTMP=$(mktemp -d)
+  (
+    set -e
+    RESOURCES=$CONTENTS/Resources
+    ICONSET=$ICONTMP/AppIcon.iconset
+    mkdir -p "$RESOURCES" "$ICONSET"
+    for SIZE in 16 32 128 256 512; do
+      sips -z "$SIZE" "$SIZE" "$ICON_SOURCE" \
+        --out "$ICONSET/icon_${SIZE}x${SIZE}.png" > /dev/null
+      DOUBLE=$((SIZE * 2))
+      sips -z "$DOUBLE" "$DOUBLE" "$ICON_SOURCE" \
+        --out "$ICONSET/icon_${SIZE}x${SIZE}@2x.png" > /dev/null
+    done
+    iconutil -c icns "$ICONSET" -o "$RESOURCES/AppIcon.icns"
+  ) || echo "make-app.sh: icon generation failed, continuing unsigned-icon" >&2
+  rm -rf "$ICONTMP"
 fi
 
 # Ad-hoc sign the finished bundle. An UNSIGNED bundle gets a limbo TCC

@@ -464,6 +464,12 @@ var
 begin
   if not BuildMcpExportOptions(AArguments, AFormat, Options, Error) then
     Exit(KnipsToolError(Error));
+  // The same no-silent-truncation contract record_start carries: agents
+  // guess paths, and one server must not refuse an overwrite in one tool
+  // and perform it wordlessly in the next.
+  if not McpMayWriteRecording(AArguments, Options.OutputPath,
+    FileExists(Options.OutputPath), Error) then
+    Exit(KnipsToolError(Error));
   Session := TExportSession.Create(Options);
   try
     // Progress on stdout would land in the middle of the JSON-RPC
@@ -678,15 +684,22 @@ begin
     RecordStopOutputSchema), RecordStop)
     .Title('Stop recording').OpenWorldHint(False);
 
+  // NOT ReadOnlyHint: on a dead writer this tool stops and finalises
+  // the recording (the CLI's abort-don't-record-into-a-dead-file rule),
+  // and clients auto-approve read-only tools — an annotation that
+  // promised no side effects would let a polling agent finalise the
+  // user's recording without anyone consenting to a mutating call.
   AServer.RegisterTool(ToolDefinition(kmtRecordStatus, ObjectSchema,
     RecordStatusOutputSchema), RecordStatus)
-    .Title('Recording status').ReadOnlyHint;
+    .Title('Recording status').OpenWorldHint(False);
 
   AServer.RegisterTool(ToolDefinition(kmtExportGif,
     ObjectSchema
       .AddString('in', 'The recorded movie to convert (.mp4 or .mov).')
       .AddString('out', 'Output .gif; defaults to the input path with '
       + 'a .gif extension. Returned absolute.', False)
+      .AddBoolean('overwrite', 'Replace "out" if it already exists '
+      + '(default false: an existing file is refused).', False)
       .AddInteger('fps', Format('Frames per second, %d-%d (default %d).',
       [MinGifFramesPerSecond, MaxGifFramesPerSecond,
       DefaultGifFramesPerSecond]), False)
@@ -706,6 +719,8 @@ begin
       .AddString('in', 'The recorded movie to convert (.mp4 or .mov).')
       .AddString('out', 'Output .apng; defaults to the input path with '
       + 'an .apng extension. Returned absolute.', False)
+      .AddBoolean('overwrite', 'Replace "out" if it already exists '
+      + '(default false: an existing file is refused).', False)
       .AddInteger('fps', Format('Frames per second, %d-%d (default %d).',
       [MinGifFramesPerSecond, MaxGifFramesPerSecond,
       DefaultGifFramesPerSecond]), False)
@@ -724,6 +739,8 @@ begin
       .AddString('out', 'Output movie; defaults to the input path with '
       + 'a -trim suffix. Must not be the input itself. Returned '
       + 'absolute.', False)
+      .AddBoolean('overwrite', 'Replace "out" if it already exists '
+      + '(default false: an existing file is refused).', False)
       .AddNumber('trim_start', 'Seconds to start from.', False)
       .AddNumber('trim_end', 'Seconds to stop at; omit to run to the '
       + 'end. At least one side is required.', False),

@@ -134,7 +134,9 @@ const
       + 'until record_stop. Only one recording at a time.',
     'Stop the running recording and finalise the file. Returns the '
       + 'output path and the frame counters.',
-    'Report whether a recording is running, and for how long.',
+    'Report whether a recording is running, and for how long. If the '
+    + 'writer has failed, this stops the recording and finalises the '
+    + 'partial file.',
     'Convert a recorded movie to an animated GIF.',
     'Convert a recorded movie to an animated PNG (APNG): truecolour, '
       + 'larger than a GIF, no palette banding.',

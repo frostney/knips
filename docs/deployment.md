@@ -7,9 +7,9 @@
 - `tools/make-app.sh` wraps that binary in `build/Knips.app`, an
   `LSUIElement` bundle whose executable is the binary itself; the binary
   detects the bundle launch from its own path and runs app mode.
-- Distribution needs code signing with the Screen Recording entitlement
-  story in mind: TCC grants are per-binary identity, so ad-hoc-signed
-  builds re-prompt on every rebuild.
+- The bundle is ad-hoc signed with an identifier-only designated
+  requirement, so TCC grants survive rebuilds locally; distribution
+  still wants a Developer ID (see Signing and permissions).
 - No CI workflow yet; the PR gate is manual (`format --check`, `build`,
   `test` on Linux or macOS; `probe` + a recording on macOS).
 
@@ -55,20 +55,22 @@ so the bundle is a build artefact, never a committed one.
 
 ## Signing and permissions
 
-Screen Recording permission is keyed to the binary's code signature.
-For local use an unsigned build works and re-prompts after each rebuild.
-For anything shared, sign with a stable Developer ID identity so the
-grant persists across updates. Hardened runtime is compatible with
-ScreenCaptureKit; no entitlement beyond the TCC prompt is required for
-a non-sandboxed CLI. A sandboxed app (milestone 2) will need the usual
-app-sandbox entitlements.
+TCC keys a grant to the app's *designated requirement*. `make-app.sh`
+ad-hoc signs the bundle with an explicit identifier-only requirement
+(`designated => identifier "org.knips.app"`), which is byte-identical
+build after build — so Screen Recording and Camera grants persist
+across rebuilds on a development machine (measured; an unsigned bundle
+gets a limbo identity whose camera requests tccd silently drops, and a
+default ad-hoc signature's requirement is the cdhash of the exact
+binary, orphaning the grant on every rebuild).
 
-The bundle inherits the same story: an unsigned `Knips.app` re-prompts
-whenever `knips-bin` changes. Because the launcher is a shell script, the
-process macOS attributes the Screen Recording grant to is the exec'd
-binary; sign both the binary and the bundle with the same Developer ID
-identity if the grant is meant to survive updates. This is untested on a
-signed build — verify before the first release.
+The trade-off of identifier-only matching: ANY ad-hoc binary claiming
+`org.knips.app` inherits the grant. That is acceptable for one
+developer's machine and wrong for distribution — a release build must
+be signed with a Developer ID identity, whose certificate-anchored
+requirement replaces this one wholesale. Hardened runtime is compatible
+with ScreenCaptureKit; no entitlement beyond the TCC prompts is
+required for a non-sandboxed app.
 
 ## Release flow
 

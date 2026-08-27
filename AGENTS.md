@@ -98,10 +98,11 @@ session `knips export` does) →
 `Knips.Export.Timing`} →
 {`Knips.ObjC.*`, `Knips.Export.Bitmap`, `source/capture/*`}.
 `Knips.Options` is used by every layer and depends on nothing;
-`Knips.App.State`, `Knips.Mcp.Params` (plus fpjson) and
-`Knips.Recording.LiveMath` depend only on it (`Knips.App.Live` consumes
-the latter, the way `Knips.App.Playback` consumes
-`Knips.Export.Pipeline`). The GIF encoder, the APNG encoder, the delay
+`Knips.App.State` and `Knips.Recording.LiveMath` depend only on it;
+`Knips.Mcp.Params` sits beside them (on it plus fpjson and
+`Knips.App.State`, whose path helpers it reuses). `Knips.App.Live`
+consumes `Knips.Recording.LiveMath`, the way `Knips.App.Playback`
+consumes `Knips.Export.Pipeline`. The GIF encoder, the APNG encoder, the delay
 planner, the MCP argument mapping and the live-effect maths are
 deliberately below the Darwin line: they have
 no `{$IFDEF DARWIN}` at all and are tested on every host.

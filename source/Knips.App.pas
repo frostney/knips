@@ -2450,6 +2450,15 @@ begin
     Exit;
   end;
   Options := DefaultRecordingOptions;
+  // Known gap, accepted: this index was resolved against
+  // ResolvePendingTarget's snapshot, and StartCapture resolves it again
+  // on a fresh one ~100 ms later. An index that goes OUT of range in
+  // between fails cleanly ("display N is not capturable"); one that
+  // stays in range but now names a different display — displays [A,B],
+  // A unplugged in that window — would record the wrong screen. Carrying
+  // FPendingDisplayID through TRecordingOptions and re-resolving by ID
+  // inside the session would close it; not worth the plumbing until a
+  // display is ever hot-unplugged mid-click.
   Options.DisplayIndex := DisplayIndex;
   Options.HasRegion := FPendingHasRegion;
   Options.Region := FPendingRegion;
