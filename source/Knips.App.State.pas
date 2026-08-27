@@ -187,6 +187,17 @@ const
   BigCursorMenuTitle = 'Big Cursor';
   BigCursorDefaultsKey = 'KnipsBigCursor';
 
+  // Smooth Cursor, beside it, and mutually exclusive with it: both switch
+  // ScreenCaptureKit's own pointer off, and they mean opposite things
+  // about what happens next. Big Cursor bakes an enlarged pointer into
+  // the movie; Smooth Cursor leaves the movie cursorless and draws a
+  // smoothed one into a GIF or an APNG exported from it
+  // (Knips.Export.CursorEffect). The title says where the pointer turns
+  // up, because a mode whose movie has no pointer is exactly the mode
+  // somebody would otherwise pick for an MP4 and be surprised by.
+  SmoothCursorMenuTitle = 'Smooth Cursor (GIF/APNG only)';
+  SmoothCursorDefaultsKey = 'KnipsSmoothCursor';
+
   // The Audio submenu: two independent checkboxes, System Audio and
   // Microphone, in the same shape Record System Audio always had and the
   // same shape as Zoom on Click and Follow Mouse. They live behind one
@@ -307,6 +318,10 @@ type
     // the capture started with, and the sprite is rendered before the
     // first frame arrives. Neither can be introduced halfway through.
     acToggleBigCursor,
+    // idle -> idle: the Smooth Cursor checkbox, idle-only for exactly the
+    // reason above — it is the same showsCursor decision, made once when
+    // the stream configuration is built.
+    acToggleSmoothCursor,
     acSelectionCommitted, // selecting -> recording: mouse released
     acSelectionCancelled, // selecting -> idle: Esc or an empty drag
     // selecting -> idle, asked for from the menu rather than from inside
@@ -594,6 +609,15 @@ function ExportPercent(AIsPalettePass: Boolean; AFramesDone,
 // The playback window's title while an export is running.
 function ExportProgressTitle(APercent: Integer): string;
 
+// The same, with the size the export is heading for. The app has no
+// console, so the title bar is where the progress and the size both have
+// to live (Knips.App.Playback). ASize is already formatted — the arithmetic
+// and the units belong to Knips.Export.SizeEstimate, which sits below the
+// Darwin line for the same reason this does; an empty one gives back the
+// plain title, which is what the palette pass shows before a byte exists.
+function ExportProgressTitleWithSize(APercent: Integer;
+  const ASize: string): string;
+
 // A region read back out of NSUserDefaults, made safe to hand to
 // ScreenCaptureKit's sourceRect. `defaults write` is a public interface:
 // anything at all can be sitting under those keys, and a negative origin
@@ -643,7 +667,7 @@ begin
         acRecordDisplay, acRecordWindow, acRecordLastRegion:
           ANext := asRecording;
         acToggleSystemAudio, acToggleMicrophone, acToggleZoomOnClick,
-          acToggleFollowMouse, acToggleBigCursor:
+          acToggleFollowMouse, acToggleBigCursor, acToggleSmoothCursor:
           ANext := asIdle;
       else
         Result := False;
@@ -949,6 +973,14 @@ begin
   if Percent > 100 then
     Percent := 100;
   Result := Format('%s%d%%', [ExportingTitlePrefix, Percent]);
+end;
+
+function ExportProgressTitleWithSize(APercent: Integer;
+  const ASize: string): string;
+begin
+  Result := ExportProgressTitle(APercent);
+  if ASize <> '' then
+    Result := Result + ' · ' + ASize;
 end;
 
 function MenuCheckState(AChecked: Boolean): Integer;

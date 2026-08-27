@@ -41,8 +41,10 @@ uses
   Knips.Capture.CoreMedia,
   Knips.Export.Apng,
   Knips.Export.Bitmap,
+  Knips.Export.CursorEffect,
   Knips.Export.Gif,
   Knips.Export.MovieReader,
+  Knips.Export.SizeEstimate,
   Knips.Export.Timing,
   Knips.Options,
   MacOSAll;
@@ -68,8 +70,13 @@ type
   // one. AFramesTotal is an estimate during the palette pass (done can
   // overshoot it slightly) and the measured count during a GIF encode
   // pass, where done runs one behind until the trailing frame reports.
+  // ABytesWritten is what the sink has put on disk so far — zero for the
+  // whole palette pass, which writes nothing. It is here so a caller with
+  // no console can show the projection (Knips.Export.SizeEstimate) rather
+  // than only a percentage: an export whose percentage is crawling and
+  // whose size is heading for 40 MB is one somebody wants to stop.
   TGifExportProgressEvent = procedure(AStage: TGifExportStage;
-    AFramesDone, AFramesTotal: Int64) of object;
+    AFramesDone, AFramesTotal, ABytesWritten: Int64) of object;
 
   TExportReport = record
     Format: TExportFormat;
@@ -90,6 +97,22 @@ type
     // Playback length: the sum of the frame delays.
     DurationSeconds: Double;
     OutputBytes: Int64;
+    // The cursor effect (Knips.Export.CursorEffect): whether a pointer
+    // was drawn into the frames from the event sidecar, and how many
+    // frames got one. SmoothCursorNote says why it did not happen when
+    // something asked for it and it could not — never a reason to fail an
+    // export, and never silent either.
+    SmoothCursor: Boolean;
+    SmoothCursorFrames: Int64;
+    SmoothCursorNote: string;
+    // What the size was expected to be before a byte was written, and how
+    // many output frames that was over. Kept in the report so the caller
+    // can say afterwards how close it came — which is the only way the
+    // constants behind it ever get better.
+    EstimatedBytes: Int64;
+    EstimatedLowBytes: Int64;
+    EstimatedHighBytes: Int64;
+    EstimatedFrames: Int64;
   end;
 
   // What a pass of scaled frames is written into. The GIF and APNG
@@ -150,6 +173,19 @@ type
     FScaled: TBgraImage;
     FPending: TBgraImage;
     FScratch: TResampleScratch;
+    // Nil unless the movie's sidecar says its pointer is waiting to be
+    // drawn. Prepared once, when the output size is settled, and consulted
+    // in ScaleFrame — which is on BOTH passes on purpose: a GIF's palette
+    // is chosen from scaled frames, and a palette that had never seen the
+    // pointer would quantise it into whatever was nearest.
+    FCursorEffect: TExportCursor;
+    // The source movie's bytes per pixel-frame — H.264's own verdict on
+    // how busy the content is, and the only content signal the size
+    // estimate has that costs nothing to get
+    // (Knips.Export.SizeEstimate). Zero when the file could not be
+    // measured, which makes the estimate fall back to a flat prior and
+    // say so.
+    FSourceDensity: Double;
     FStartSeconds: Double;
     FRangeSeconds: Double;
     // The decimation grid, in whole slots of 1/fps counted from the
@@ -165,14 +201,21 @@ type
     FMeasuredFrames: Int64;
     FVerbose: Boolean;
     FOnProgress: TGifExportProgressEvent;
-    procedure Progress(AStage: TGifExportStage; AFramesDone: Int64);
+    procedure Progress(AStage: TGifExportStage; AFramesDone,
+      ABytesWritten: Int64);
     procedure BeginPass;
     function NextEmittedFrame(out AFrame: TMovieReaderFrame): Boolean;
     procedure EnsureTargetSize(ASourceWidth, ASourceHeight: Integer);
+    procedure PrepareSmoothCursor;
     function ScaleFrame(const AFrame: TMovieReaderFrame;
       var ADestination: TBgraImage; out AError: string): Boolean;
     function RangeSeconds: Double;
     function ExpectedFrameCount: Integer;
+    // Fills the report's estimate from the settings and the source
+    // movie's density, and returns the line to print. '' when there is
+    // nothing to estimate.
+    function BuildEstimate: string;
+    procedure MeasureSourceDensity;
     function ResolveRange(out AError: string): Boolean;
     function CollectPalette(out APalette: TGifPalette;
       out AError: string): Boolean;
@@ -308,16 +351,17 @@ begin
   FVerbose := True;
 end;
 
-procedure TExportSession.Progress(AStage: TGifExportStage;
-  AFramesDone: Int64);
+procedure TExportSession.Progress(AStage: TGifExportStage; AFramesDone,
+  ABytesWritten: Int64);
 begin
   if Assigned(FOnProgress) then
-    FOnProgress(AStage, AFramesDone, ExpectedFrameCount);
+    FOnProgress(AStage, AFramesDone, ExpectedFrameCount, ABytesWritten);
 end;
 
 destructor TExportSession.Destroy;
 begin
   FreeAndNil(FReader);
+  FreeAndNil(FCursorEffect);
   inherited Destroy;
 end;
 
@@ -385,6 +429,34 @@ begin
     TargetWidth);
   BgraImageResize(FScaled, FReport.PixelWidth, FReport.PixelHeight);
   BgraImageResize(FPending, FReport.PixelWidth, FReport.PixelHeight);
+  PrepareSmoothCursor;
+end;
+
+// The synthetic pointer, if the movie is one that was recorded waiting for
+// it. Every refusal below is the ordinary case, not a failure: almost no
+// movie has a sidecar asking for this, and an export of one that does not
+// simply has no pointer drawn. Only a sidecar that *did* ask and could not
+// be honoured leaves a note, and even that never fails the export — the
+// animation is correct, it is the pointer that is missing.
+procedure TExportSession.PrepareSmoothCursor;
+var
+  Note: string;
+begin
+  if FCursorEffect <> nil then
+    Exit;
+  FCursorEffect := TExportCursor.Create;
+  if FCursorEffect.Prepare(FOptions.InputPath, FOptions.Effects,
+    FReport.PixelWidth, FReport.PixelHeight, Note) then
+  begin
+    FReport.SmoothCursor := True;
+    Exit;
+  end;
+  // Told apart by whether the sidecar asked. A movie with no sidecar, or
+  // one whose header says the pointer is already in the pixels, is not
+  // something to report.
+  if FCursorEffect.Asked then
+    FReport.SmoothCursorNote := Note;
+  FreeAndNil(FCursorEffect);
 end;
 
 // A frame that cannot be read has to fail the export. Leaving the
@@ -422,6 +494,11 @@ begin
     end;
     BgraResample(PByte(Base), Stride, SourceWidth, SourceHeight,
       ADestination, FScratch);
+    // After the resample, into the scaled frame: the sprite was rendered
+    // at the OUTPUT's scale, so drawing it before would shrink it with
+    // the picture and soften its edges twice over.
+    if FCursorEffect <> nil then
+      FCursorEffect.DrawInto(ADestination, AFrame.Seconds);
     Result := True;
   finally
     CVPixelBufferUnlockBaseAddress(AFrame.PixelBuffer,
@@ -508,6 +585,43 @@ begin
     Result := 1;
 end;
 
+// The movie's own size against its own pixels. Everything here is
+// metadata plus one stat(2); nothing is decoded for it.
+procedure TExportSession.MeasureSourceDensity;
+var
+  Handle: THandle;
+  Bytes: Int64;
+  Frames: Double;
+begin
+  FSourceDensity := 0;
+  if (FReader.NominalFrameRate <= 0) or (FReader.DurationSeconds <= 0) then
+    Exit;
+  Handle := FileOpen(FOptions.InputPath, fmOpenRead or fmShareDenyNone);
+  if Handle = THandle(-1) then
+    Exit;
+  Bytes := FileSeek(Handle, Int64(0), fsFromEnd);
+  FileClose(Handle);
+  Frames := FReader.DurationSeconds * FReader.NominalFrameRate;
+  if Frames < 1 then
+    Frames := 1;
+  FSourceDensity := SourceBytesPerPixelFrame(Bytes, Round(Frames),
+    FReader.PixelWidth, FReader.PixelHeight);
+end;
+
+function TExportSession.BuildEstimate: string;
+var
+  Estimate: TExportSizeEstimate;
+begin
+  FReport.EstimatedFrames := ExpectedFrameCount;
+  Estimate := EstimateExportSize(FOptions.Format, FReport.PixelWidth,
+    FReport.PixelHeight, FReport.EstimatedFrames, FOptions.Dither,
+    FSourceDensity);
+  FReport.EstimatedBytes := Estimate.Bytes;
+  FReport.EstimatedLowBytes := Estimate.LowBytes;
+  FReport.EstimatedHighBytes := Estimate.HighBytes;
+  Result := DescribeEstimate(Estimate);
+end;
+
 function TExportSession.ResolveRange(out AError: string): Boolean;
 begin
   Result := False;
@@ -579,7 +693,7 @@ begin
             FScaled.Width, FScaled.Height);
         end;
         Inc(Index);
-        Progress(gesPalette, Index);
+        Progress(gesPalette, Index, 0);
         if Index mod PoolDrainEveryFrames = 0 then
         begin
           Pool.release;
@@ -645,6 +759,10 @@ var
 begin
   Result := False;
   FReport.FramesRead := 0;
+  // The palette pass has already drawn the pointer into every frame it
+  // sampled; only this pass's frames end up in the file.
+  if FCursorEffect <> nil then
+    FCursorEffect.ResetCounters;
   if not FReader.StartPass(FStartSeconds, FRangeSeconds, AError) then
     Exit;
 
@@ -679,12 +797,18 @@ begin
         FPending := FScaled;
         FScaled := Swap;
         HasPending := True;
-        Progress(gesEncode, ASink.FrameCount);
+        Progress(gesEncode, ASink.FrameCount, ASink.BytesWritten);
         if FVerbose and (ASink.FrameCount > 0)
           and (ASink.FrameCount mod ProgressEveryFrames = 0) then
         begin
-          WriteLn(Format('  %d frames, %d kB', [ASink.FrameCount,
-            ASink.BytesWritten div 1024]));
+          // Bytes so far and where that is heading. The projection is
+          // measured, not modelled: it is this encoder on this content,
+          // so it replaces the estimate rather than repeating it.
+          WriteLn(Format('  %d of ~%d frames, %s written, heading for %s',
+            [ASink.FrameCount, FReport.EstimatedFrames,
+            FormatByteSize(ASink.BytesWritten),
+            FormatByteSize(ProjectExportSize(ASink.BytesWritten,
+            ASink.FrameCount, FReport.EstimatedFrames))]));
           Flush(Output);
         end;
         if FEmitted mod PoolDrainEveryFrames = 0 then
@@ -716,7 +840,7 @@ begin
     // by one); with the total now an exact count rather than a loose
     // estimate, this is the difference between a bar that finishes and
     // one that parks at 95% on a short export.
-    Progress(gesEncode, ASink.FrameCount);
+    Progress(gesEncode, ASink.FrameCount, ASink.BytesWritten);
     if not ASink.Finish(AError) then
       Exit;
     FReport.FramesWritten := ASink.FrameCount;
@@ -733,6 +857,7 @@ var
   Palette: TGifPalette;
   Sink: TExportSink;
   Written: Boolean;
+  Preview: string;
 begin
   Result := False;
   // A fresh run measures afresh; a stale count would make
@@ -750,6 +875,7 @@ begin
     Exit;
   if not ResolveRange(AError) then
     Exit;
+  MeasureSourceDensity;
 
   Palette := Default(TGifPalette);
   if FOptions.Format = efGif then
@@ -780,6 +906,18 @@ begin
     Flush(Output);
   end;
 
+  // Before a byte is written, so somebody watching a large export start
+  // can stop it and pass --width or --fps instead of finding out three
+  // minutes later. Computed whether or not anything is printed: the
+  // menu-bar app has no console and takes the same numbers out of the
+  // report to put in the playback window.
+  Preview := BuildEstimate;
+  if FVerbose and (Preview <> '') then
+  begin
+    WriteLn('  estimated size: ', Preview);
+    Flush(Output);
+  end;
+
   if FOptions.Format = efGif then
     Sink := TGifSink.Create(FReport.PixelWidth, FReport.PixelHeight, Palette,
       FOptions.Dither)
@@ -801,6 +939,11 @@ begin
     DeleteFile(FOptions.OutputPath);
     Exit;
   end;
+  // Counted rather than assumed, for the same reason Big Cursor's frames
+  // are: a pointer that was asked for and silently drawn into nothing
+  // looks exactly like one that was never asked for.
+  if FCursorEffect <> nil then
+    FReport.SmoothCursorFrames := FCursorEffect.DrawnFrames;
   Result := True;
 end;
 

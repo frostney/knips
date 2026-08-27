@@ -46,6 +46,12 @@ const
   // Bumped once per release that changes the CLI surface.
   KnipsVersion = '0.1.0';
 
+  // What counts as silence, as a sample magnitude in 0..1. About -60 dBFS.
+  // Chosen so a muted source and a source recording a quiet room are told
+  // apart: a real room floor measures well above this, and a track that
+  // never crosses it carried nothing anybody will hear.
+  AudioSilenceThreshold = 0.001;
+
   // GIF delays are whole centiseconds, so anything above 50 fps cannot
   // be represented and 20 is what Kap-sized clips actually want. APNG
   // could go faster, but sharing the bound keeps one --fps rule.
@@ -119,6 +125,27 @@ type
     // relationship to the screen the pointer is measured against, which
     // is the same reason the live effects refuse one.
     BigCursor: Boolean;
+    // Leave the pointer out of the recording and draw it back at export
+    // time from the event sidecar's track, smoothed
+    // (Knips.Export.CursorEffect). ScreenCaptureKit's own cursor is
+    // switched off exactly as Big Cursor switches it off, so the movie
+    // itself is genuinely cursorless — the pointer only appears in a GIF
+    // or an APNG exported from it. Display targets only, and mutually
+    // exclusive with BigCursor: both suppress the real pointer, and a
+    // recording cannot be waiting for a pointer it already has.
+    SmoothCursor: Boolean;
+    // Which live effects the caller has switched on. Nothing in the
+    // capture path reads these: they are carried so the event sidecar's
+    // header can say what the recording was doing, which is the one thing
+    // a reader cannot work out from the samples (a Follow Mouse take
+    // where the mouse never moved looks exactly like one with it off).
+    LiveZoomOnClick: Boolean;
+    LiveFollowMouse: Boolean;
+    // The composited window recording's own pan: a display capture whose
+    // source rectangle is polled onto a window as the user drags it. Not
+    // a live effect — nothing animates it — but it moves the framing just
+    // as much, so a take that had one is not a raw take.
+    LiveWindowFollow: Boolean;
     // 0 = derive from the capture size and frame rate.
     BitRate: Integer;
     OutputPath: string;
@@ -134,6 +161,50 @@ type
   // passthrough trim, where the same coded samples are copied into a new
   // container between two stamps.
   TExportFormat = (efGif, efApng, efMovie);
+
+  // What the pointer does in the exported animation.
+  //
+  // The four are a list rather than a boolean because this is the first
+  // member of a set that is going to grow: the playback window's Effects
+  // control offers post-recording effects applied at export time from the
+  // event sidecar's track, and the cursor is one of them. Everything here
+  // needs a movie whose pixels do NOT already carry a pointer — a take
+  // recorded with --smooth-cursor, or with --no-cursor — because nothing
+  // can take a baked pointer out again.
+  TExportCursorMode = (
+    // Whatever the recording decided. A take recorded with
+    // --smooth-cursor gets its pointer drawn back; every other take is
+    // exported exactly as it was captured. The default, and the only
+    // mode a caller that has not thought about it can get.
+    ecmAsRecorded,
+    // No pointer, even if the sidecar asked for one.
+    ecmNone,
+    // The pointer, at its ordinary size, from the smoothed track.
+    ecmSmooth,
+    // The same, enlarged — Big Cursor's look, decided at export instead
+    // of at record time.
+    ecmBig);
+
+  // The post-recording effects an export applies, read from the event
+  // sidecar (Knips.Recording.Sidecar) rather than from the pixels.
+  //
+  // One record rather than a handful of flags on TExportOptions, because
+  // the set is open: post-hoc Zoom on Click is the next member — the
+  // sidecar's click track drives a per-frame crop, and the cursor's
+  // position is transformed by the same crop — and it will arrive as
+  // fields here rather than as a second parameter everywhere. Which
+  // effects a given take can still have is the sidecar's own question;
+  // see Knips.Recording.Sidecar.AvailableExportEffects.
+  TExportEffects = record
+    Cursor: TExportCursorMode;
+    // How much bigger than the system pointer ecmBig draws. Ignored by
+    // every other mode. 0 takes the feature's own default.
+    CursorMagnification: Double;
+    // Full width of the smoothing window over the pointer track, in
+    // seconds. 0 takes the default; negative is treated as 0, which is
+    // no smoothing at all.
+    CursorSmoothingSeconds: Double;
+  end;
 
   TExportOptions = record
     InputPath: string;
@@ -157,6 +228,10 @@ type
     HasTrimEnd: Boolean;
     TrimEndSeconds: Double;
     Dither: Boolean;
+    // Post-recording effects, applied from the event sidecar while the
+    // frames are re-encoded. Meaningless for efMovie, which decodes
+    // nothing — validation says so rather than ignoring it.
+    Effects: TExportEffects;
   end;
 
 function DefaultRecordingOptions: TRecordingOptions;
@@ -178,6 +253,30 @@ function AudioModeCapturesSystem(AMode: TAudioMode): Boolean;
 
 function AudioModeCapturesMicrophone(AMode: TAudioMode): Boolean;
 
+// The live note for a menu while a recording runs: '' when the source is
+// off, and otherwise one of three words for what has arrived so far. Kept
+// to a few characters on purpose — this hangs off a menu item, not a
+// meter.
+//
+// AInspected is how many buffers the peak was actually measured over. Zero
+// means the format could not be read, and then the honest answer is that
+// samples are arriving and nothing can be said about their level.
+function AudioLevelNote(AEnabled: Boolean; ASamples, AInspected: Int64;
+  APeak: Double): string;
+
+// What to say after the stop when an enabled source produced nothing
+// audible. '' when there is nothing to say, which is the usual case.
+// ASourceName is the human word for the track ('system audio', 'the
+// microphone').
+//
+// The distinction this draws is the whole point: no samples at all is a
+// plumbing failure and points at permissions and devices; samples that
+// were all silence is a mixer or a muted input and points somewhere else
+// entirely. Telling somebody to check System Settings when the microphone
+// was simply muted wastes their afternoon.
+function AudioSilenceWarning(const ASourceName: string; AEnabled: Boolean;
+  ASamples, AInspected: Int64; APeak: Double): string;
+
 // Container from the output path's extension; False for unknown ones.
 function ContainerForPath(const APath: string;
   out AContainer: TOutputContainer): Boolean;
@@ -198,7 +297,18 @@ function SuggestedBitRate(APixelWidth, APixelHeight,
 
 function ContainerFileType(AContainer: TOutputContainer): string;
 
+function DefaultExportEffects: TExportEffects;
+
 function DefaultExportOptions: TExportOptions;
+
+// Whether this effects record asks for a pointer to be drawn at all.
+function EffectsDrawCursor(const AEffects: TExportEffects): Boolean;
+
+function ExportCursorModeName(AMode: TExportCursorMode): string;
+
+// "as-recorded", "none", "smooth", or "big", case-insensitively.
+function ParseExportCursorMode(const AText: string;
+  out AMode: TExportCursorMode): Boolean;
 
 // Export format from the output path's extension; False for unknown ones.
 function ExportFormatForPath(const APath: string;
@@ -279,6 +389,41 @@ end;
 function AudioModeCapturesMicrophone(AMode: TAudioMode): Boolean;
 begin
   Result := AMode in [amMicrophone, amBoth];
+end;
+
+function AudioLevelNote(AEnabled: Boolean; ASamples, AInspected: Int64;
+  APeak: Double): string;
+begin
+  Result := '';
+  if not AEnabled then
+    Exit;
+  if ASamples <= 0 then
+    Exit('waiting');
+  if AInspected <= 0 then
+    // Arriving, but in a format this build does not read. Saying "sound"
+    // would be a claim; saying "silent" would be a lie.
+    Exit('arriving');
+  if APeak < AudioSilenceThreshold then
+    Exit('silent');
+  Result := 'sound';
+end;
+
+function AudioSilenceWarning(const ASourceName: string; AEnabled: Boolean;
+  ASamples, AInspected: Int64; APeak: Double): string;
+begin
+  Result := '';
+  if not AEnabled then
+    Exit;
+  if ASamples <= 0 then
+    Exit(ASourceName + ' was on but delivered nothing at all to this '
+      + 'recording — check the privacy grant and the input device');
+  if AInspected <= 0 then
+    // Not a warning: nothing went wrong that can be shown.
+    Exit;
+  if APeak >= AudioSilenceThreshold then
+    Exit;
+  Result := ASourceName + ' was on and arrived, but every sample was '
+    + 'silence — check that the source is not muted';
 end;
 
 function ParseCaptureRegion(const AText: string;
@@ -398,6 +543,28 @@ begin
     AError := '--window needs a non-zero window id (see `knips windows`)';
     Exit;
   end;
+  if AOptions.SmoothCursor and AOptions.BigCursor then
+  begin
+    // Both switch the real pointer off, and they mean opposite things
+    // about what is supposed to happen next: one bakes a big pointer into
+    // the movie, the other leaves the movie cursorless so an export can
+    // draw a smooth one. Refusing beats picking.
+    AError := '--big-cursor and --smooth-cursor are mutually exclusive';
+    Exit;
+  end;
+  if AOptions.SmoothCursor and not AOptions.ShowsCursor then
+  begin
+    AError := '--no-cursor and --smooth-cursor are mutually exclusive';
+    Exit;
+  end;
+  if (AOptions.TargetKind = ctkWindow) and AOptions.SmoothCursor then
+  begin
+    // Same reason as the big cursor below: the drawn pointer is placed by
+    // mapping a screen position into the frame, and a window's frames
+    // move under the recorder with no way to find out.
+    AError := 'a smooth cursor applies to display recordings only';
+    Exit;
+  end;
   if AOptions.BigCursor and not AOptions.ShowsCursor then
   begin
     // One asks for no pointer and the other for a bigger one. Guessing
@@ -470,9 +637,52 @@ begin
   Result := True;
 end;
 
+function DefaultExportEffects: TExportEffects;
+begin
+  Result := Default(TExportEffects);
+  Result.Cursor := ecmAsRecorded;
+end;
+
+function EffectsDrawCursor(const AEffects: TExportEffects): Boolean;
+begin
+  Result := AEffects.Cursor in [ecmAsRecorded, ecmSmooth, ecmBig];
+end;
+
+function ExportCursorModeName(AMode: TExportCursorMode): string;
+begin
+  case AMode of
+    ecmNone: Result := 'none';
+    ecmSmooth: Result := 'smooth';
+    ecmBig: Result := 'big';
+  else
+    Result := 'as-recorded';
+  end;
+end;
+
+function ParseExportCursorMode(const AText: string;
+  out AMode: TExportCursorMode): Boolean;
+var
+  Normalized: string;
+begin
+  Result := True;
+  AMode := ecmAsRecorded;
+  Normalized := LowerCase(Trim(AText));
+  if (Normalized = 'as-recorded') or (Normalized = '') then
+    AMode := ecmAsRecorded
+  else if Normalized = 'none' then
+    AMode := ecmNone
+  else if Normalized = 'smooth' then
+    AMode := ecmSmooth
+  else if Normalized = 'big' then
+    AMode := ecmBig
+  else
+    Result := False;
+end;
+
 function DefaultExportOptions: TExportOptions;
 begin
   Result := Default(TExportOptions);
+  Result.Effects := DefaultExportEffects;
   Result.Format := efGif;
   Result.InputContainer := ocMPEG4;
   Result.OutputContainer := ocMPEG4;
@@ -612,6 +822,17 @@ begin
     ExpandFileName(AOptions.OutputPath)) then
   begin
     AError := '--in and --out are the same file';
+    Exit;
+  end;
+  if (AOptions.Format = efMovie)
+    and (AOptions.Effects.Cursor <> ecmAsRecorded) then
+  begin
+    // The scope limit, refused rather than ignored. A passthrough trim
+    // copies coded samples; drawing anything into them would mean
+    // decoding and re-encoding the whole video, which is the one thing
+    // this output format exists not to do.
+    AError := 'export effects apply to .gif and .apng only, not to a '
+      + 'passthrough trim';
     Exit;
   end;
   if AOptions.Format = efMovie then

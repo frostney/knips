@@ -53,6 +53,7 @@ uses
   Knips.App.State,
   Knips.Capture.ShareableContent,
   Knips.Export.Pipeline,
+  Knips.Export.SizeEstimate,
   Knips.ObjC.Runtime,
   Knips.Options,
   MacOSAll;
@@ -92,16 +93,30 @@ type
     FScale: Integer;
     FExporting: Boolean;
     FLastPercent: Integer;
+    // The running export, borrowed for the length of Run so the progress
+    // callback can read its pre-export size estimate. Not owned, and
+    // cleared in the same finally that frees it — a stale pointer here
+    // would be read from a timer.
+    FEstimateSource: TExportSession;
+    // A word appended to the window's title, for something about the take
+    // the user should see while they are looking at it — a track that was
+    // enabled and came out silent, above all. The window has no message
+    // area, and inventing one for a single word would be worse.
+    FTitleNote: string;
     FOnError: TPlaybackErrorEvent;
     FOnClosed: TPlaybackClosedEvent;
     function AddButton(AContent: NSView; const ATitle, ASelector: string;
       ATarget: id; var ARight: Double): NSButton;
     procedure SetButtonsEnabled(AEnabled: Boolean);
     procedure HandleProgress(AStage: TGifExportStage;
-      AFramesDone, AFramesTotal: Int64);
+      AFramesDone, AFramesTotal, ABytesWritten: Int64);
+    function TitleWithNote: string;
     procedure ReleasePlayer;
   public
     destructor Destroy; override;
+    // Sets the note beside the file name in the title. Safe before or
+    // after the window exists; '' clears it.
+    procedure SetTitleNote(const ANote: string);
     // Opens the window on APath. APixelWidth/Height come from the
     // recording's report and only set the initial aspect ratio; a zero
     // pair falls back to 16:9. AScale is the report's pixels per point,
@@ -541,9 +556,10 @@ begin
 end;
 
 procedure TPlaybackWindow.HandleProgress(AStage: TGifExportStage;
-  AFramesDone, AFramesTotal: Int64);
+  AFramesDone, AFramesTotal, ABytesWritten: Int64);
 var
   Percent: Integer;
+  Size: string;
 begin
   // Service the event queue on EVERY frame, not just whole percents: the
   // window server shows the beachball when the app stops DEQUEUEING
@@ -564,7 +580,19 @@ begin
   if Percent = FLastPercent then
     Exit;
   FLastPercent := Percent;
-  FWindow.setTitle(PascalToNSString(ExportProgressTitle(Percent)));
+  // The size the export is heading for. Before a byte is written that is
+  // the pre-export estimate; from the first written frame on it is the
+  // projection from what the encoder has actually produced, which is a
+  // much better number and replaces the estimate rather than joining it.
+  Size := '';
+  if ABytesWritten > 0 then
+    Size := FormatByteSize(ProjectExportSize(ABytesWritten, AFramesDone,
+      AFramesTotal))
+  else if (FEstimateSource <> nil)
+    and (FEstimateSource.Report.EstimatedBytes > 0) then
+    Size := FormatByteSize(FEstimateSource.Report.EstimatedBytes);
+  FWindow.setTitle(PascalToNSString(ExportProgressTitleWithSize(Percent,
+    Size)));
   // setTitle: alone only marks the titlebar dirty and pushes the string
   // to the window server; the *drawn* title comes from a CoreAnimation
   // commit, which runs as a run-loop observer. Without a turn of the run
@@ -631,6 +659,12 @@ begin
         // report.
         Session.Verbose := False;
         Session.OnProgress := HandleProgress;
+        // Filled by the session as soon as the output size is settled,
+        // which is before the first progress callback of the encode pass
+        // and (for a GIF) before the palette pass has finished; reading
+        // it from the report each time is what lets the title show the
+        // estimate until there is a projection to replace it.
+        FEstimateSource := Session;
         Succeeded := Session.Run(Error);
         if Succeeded then
         begin
@@ -639,6 +673,7 @@ begin
           WarnBytes := Session.Report.OutputBytes;
         end;
       finally
+        FEstimateSource := nil;
         Session.Free;
       end;
     finally
@@ -648,7 +683,7 @@ begin
     FExporting := False;
     SetButtonsEnabled(True);
     if FWindow <> nil then
-      FWindow.setTitle(PascalToNSString(ExtractFileName(FPath)));
+      FWindow.setTitle(PascalToNSString(TitleWithNote));
   end;
   if Succeeded then
   begin
@@ -663,6 +698,21 @@ begin
   end
   else
     ReportError('GIF export: ' + Error);
+end;
+
+procedure TPlaybackWindow.SetTitleNote(const ANote: string);
+begin
+  FTitleNote := ANote;
+  if (FWindow = nil) or FExporting or (FPath = '') then
+    Exit;
+  FWindow.setTitle(PascalToNSString(TitleWithNote));
+end;
+
+function TPlaybackWindow.TitleWithNote: string;
+begin
+  Result := ExtractFileName(FPath);
+  if FTitleNote <> '' then
+    Result := Result + ' · ' + FTitleNote;
 end;
 
 procedure TPlaybackWindow.ReportError(const AMessage: string);

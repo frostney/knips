@@ -6,6 +6,7 @@ uses
   SysUtils,
 
   Knips.Options,
+  Knips.Recording.CursorMath,
   TestingPascalLibrary;
 
 type
@@ -45,6 +46,8 @@ type
     function Valid: TRecordingOptions;
   public
     procedure SetupTests; override;
+    procedure TestPointerFlagsAreMutuallyExclusive;
+    procedure TestSmoothCursorNeedsADisplay;
     procedure TestDefaultsPlusOutputAreValid;
     procedure TestRequiresOutput;
     procedure TestRejectsBadExtension;
@@ -106,6 +109,10 @@ type
     procedure TestMovieOutputNeedsATrim;
     procedure TestMovieOutputFillsItsContainer;
     procedure TestMovieOutputRefusesAWholeMovieRange;
+    procedure TestDefaultEffectsAskForNothingUnusual;
+    procedure TestCursorModeNamesRoundTrip;
+    procedure TestAnEffectOnAPassthroughTrimIsRefused;
+    procedure TestAnEffectOnAGifIsAccepted;
   end;
 
   TExportFormatTests = class(TTestSuite)
@@ -324,6 +331,10 @@ end;
 
 procedure TValidationTests.SetupTests;
 begin
+  Test('the three pointer flags are mutually exclusive',
+    TestPointerFlagsAreMutuallyExclusive);
+  Test('a smooth cursor is refused for a window capture',
+    TestSmoothCursorNeedsADisplay);
   Test('defaults plus an output path validate', TestDefaultsPlusOutputAreValid);
   Test('an output path is required', TestRequiresOutput);
   Test('unknown container extension is rejected', TestRejectsBadExtension);
@@ -785,6 +796,63 @@ begin
   Result.OutputPath := 'demo.gif';
 end;
 
+// The record side of the pointer decision. All three flags switch
+// ScreenCaptureKit's own cursor off or on, and any two of them together
+// ask for opposite things — so every pair is refused rather than
+// silently resolved, and this pins that none of the three refusals was
+// lost when the third arrived.
+procedure TValidationTests.TestPointerFlagsAreMutuallyExclusive;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.BigCursor := True;
+  Options.SmoothCursor := True;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+  Expect<Boolean>(Pos('--big-cursor and --smooth-cursor', Error) > 0)
+    .ToBe(True);
+
+  Options := Valid;
+  Options.SmoothCursor := True;
+  Options.ShowsCursor := False;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+  Expect<Boolean>(Pos('--no-cursor and --smooth-cursor', Error) > 0)
+    .ToBe(True);
+
+  Options := Valid;
+  Options.BigCursor := True;
+  Options.ShowsCursor := False;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+  Expect<Boolean>(Pos('--no-cursor and --big-cursor', Error) > 0).ToBe(True);
+
+  // Each on its own is fine.
+  Options := Valid;
+  Options.SmoothCursor := True;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(True);
+  Options := Valid;
+  Options.BigCursor := True;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(True);
+end;
+
+procedure TValidationTests.TestSmoothCursorNeedsADisplay;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.TargetKind := ctkWindow;
+  Options.WindowID := 42;
+  Options.SmoothCursor := True;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+  Expect<Boolean>(Pos('display recordings only', Error) > 0).ToBe(True);
+  // And the resolver agrees with the validator, which is what keeps the
+  // app (which resolves rather than refuses) from asking for a
+  // combination the recorder would reject.
+  Expect<Boolean>(ResolveSmoothCursor(ctkWindow, True)).ToBe(False);
+  Expect<Boolean>(ResolveSmoothCursor(ctkDisplay, True)).ToBe(True);
+end;
+
 procedure TExportValidationTests.SetupTests;
 begin
   Test('defaults plus both paths validate', TestDefaultsPlusPathsAreValid);
@@ -805,6 +873,14 @@ begin
   Test('a movie output without --trim is refused', TestMovieOutputNeedsATrim);
   Test('a movie output fills in its own container',
     TestMovieOutputFillsItsContainer);
+  Test('the default effects are as-recorded and nothing else',
+    TestDefaultEffectsAskForNothingUnusual);
+  Test('every cursor mode survives a name round trip',
+    TestCursorModeNamesRoundTrip);
+  Test('an export effect on a passthrough trim is refused',
+    TestAnEffectOnAPassthroughTrimIsRefused);
+  Test('an export effect on a GIF is accepted',
+    TestAnEffectOnAGifIsAccepted);
   Test('a movie output refuses a range that is the whole movie',
     TestMovieOutputRefusesAWholeMovieRange);
 end;
@@ -1019,6 +1095,88 @@ end;
 // --trim=0, parses and is a range, so it slips past "a movie output
 // needs --trim" while being exactly the whole-file copy that rule
 // exists to refuse.
+// The export-effects list: the cursor is its first member, and the shape
+// matters more than the member — the playback window's Effects control and
+// the next post-recording effect both hang off this record.
+procedure TExportValidationTests.TestDefaultEffectsAskForNothingUnusual;
+var
+  Options: TExportOptions;
+begin
+  Options := DefaultExportOptions;
+  Expect<string>(ExportCursorModeName(Options.Effects.Cursor))
+    .ToBe('as-recorded');
+  Expect<Boolean>(EffectsDrawCursor(Options.Effects)).ToBe(True);
+  Expect<Boolean>(EffectsDrawCursor(DefaultExportEffects)).ToBe(True);
+  // Zero means "the feature's own default" everywhere, so a caller that
+  // fills nothing in gets the sensible thing.
+  Expect<Boolean>(Options.Effects.CursorMagnification = 0).ToBe(True);
+  Expect<Boolean>(Options.Effects.CursorSmoothingSeconds = 0).ToBe(True);
+end;
+
+procedure TExportValidationTests.TestCursorModeNamesRoundTrip;
+var
+  Mode: TExportCursorMode;
+  Parsed: TExportCursorMode;
+begin
+  for Mode := Low(TExportCursorMode) to High(TExportCursorMode) do
+  begin
+    Expect<Boolean>(ParseExportCursorMode(ExportCursorModeName(Mode),
+      Parsed)).ToBe(True);
+    Expect<string>(ExportCursorModeName(Parsed))
+      .ToBe(ExportCursorModeName(Mode));
+  end;
+  // An empty string is the default, not an error: it is what an unset
+  // --cursor looks like.
+  Expect<Boolean>(ParseExportCursorMode('', Parsed)).ToBe(True);
+  Expect<string>(ExportCursorModeName(Parsed)).ToBe('as-recorded');
+  Expect<Boolean>(ParseExportCursorMode('BIG', Parsed)).ToBe(True);
+  Expect<string>(ExportCursorModeName(Parsed)).ToBe('big');
+  Expect<Boolean>(ParseExportCursorMode('enormous', Parsed)).ToBe(False);
+  Expect<Boolean>(EffectsDrawCursor(DefaultExportEffects)).ToBe(True);
+end;
+
+// The scope limit, as a rule rather than as a note in a document: a
+// passthrough trim copies coded samples, so an effect on one would have
+// to re-encode the video, and that is the one thing that output exists
+// not to do.
+procedure TExportValidationTests.TestAnEffectOnAPassthroughTrimIsRefused;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := Valid;
+  Options.OutputPath := 'cut.mp4';
+  Options.HasTrim := True;
+  Options.TrimStartSeconds := 0;
+  Options.HasTrimEnd := True;
+  Options.TrimEndSeconds := 3;
+  Options.Effects.Cursor := ecmSmooth;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+  Expect<Boolean>(Pos('.gif and .apng only', Error) > 0).ToBe(True);
+  // as-recorded is not "an effect": it is what every export has always
+  // done, and a trim must go on validating.
+  Options.Effects.Cursor := ecmAsRecorded;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+end;
+
+procedure TExportValidationTests.TestAnEffectOnAGifIsAccepted;
+var
+  Options: TExportOptions;
+  Error: string;
+  Mode: TExportCursorMode;
+begin
+  for Mode := Low(TExportCursorMode) to High(TExportCursorMode) do
+  begin
+    Options := Valid;
+    Options.Effects.Cursor := Mode;
+    Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+    Options := Valid;
+    Options.OutputPath := 'demo.apng';
+    Options.Effects.Cursor := Mode;
+    Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
+  end;
+end;
+
 procedure TExportValidationTests.TestMovieOutputRefusesAWholeMovieRange;
 var
   Options: TExportOptions;

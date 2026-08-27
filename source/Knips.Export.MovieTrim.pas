@@ -164,7 +164,7 @@ begin
     Exit;
   end;
 
-  URL := NSURL.fileURLWithPath(NSSTR(PAnsiChar(FOptions.InputPath)));
+  URL := NSURL.fileURLWithPath(NSString.stringWithUTF8String(PAnsiChar(FOptions.InputPath)));
   Asset := AVAsset(AVURLAsset.URLAssetWithURL_options(URL, nil));
   if Asset = nil then
   begin
@@ -220,7 +220,7 @@ begin
     Session.retain;
     try
       Session.setOutputURL(NSURL.fileURLWithPath(
-        NSSTR(PAnsiChar(FOptions.OutputPath))));
+        NSString.stringWithUTF8String(PAnsiChar(FOptions.OutputPath))));
       Session.setOutputFileType(FileTypeString);
       Session.setShouldOptimizeForNetworkUse(ObjCBOOL(True));
       Range.start := CMTimeMakeWithSeconds(FReport.StartSeconds,

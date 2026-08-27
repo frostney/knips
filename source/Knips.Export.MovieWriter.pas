@@ -43,6 +43,7 @@ interface
 {$modeswitch cvar}
 
 uses
+  ctypes,
   SysUtils,
 
   CocoaAll,
@@ -92,6 +93,13 @@ type
     procedure AddInput(AInput: AVAssetWriterInput); message 'addInput:';
     procedure SetShouldOptimizeForNetworkUse(AOptimize: ObjCBOOL);
       message 'setShouldOptimizeForNetworkUse:';
+    // Movie fragments. Set before startWriting, this makes AVAssetWriter
+    // flush a moof/mdat pair every interval instead of holding everything
+    // for one moov at the end — which is what turns a killed recording
+    // from an unplayable stub into a movie that ends where the process
+    // did. See "Never lose a take" in docs/architecture.md.
+    procedure SetMovieFragmentInterval(AInterval: CMTime);
+      message 'setMovieFragmentInterval:';
     function StartWriting: ObjCBOOL; message 'startWriting';
     procedure StartSessionAtSourceTime(AStartTime: CMTime);
       message 'startSessionAtSourceTime:';
@@ -142,11 +150,33 @@ type
     DroppedMicrophoneEarly: Int64;
     DroppedMicrophoneStalled: Int64;
     FailedMicrophoneAppends: Int64;
+    // The loudest sample seen on each track, as a magnitude in 0..1, and
+    // how many buffers it was actually measured over. Zero inspected
+    // means the format was not one this code reads (see MeasurePeak), and
+    // the peak then says nothing at all — which is why the two travel
+    // together and no caller may read one without the other.
+    //
+    // This is what turns "the microphone was enabled" into "the
+    // microphone was enabled and produced sound": a track that arrived
+    // and was silent is the failure nobody notices until the take cannot
+    // be repeated.
+    AudioPeak: Double;
+    AudioInspected: Int64;
+    MicrophonePeak: Double;
+    MicrophoneInspected: Int64;
     // True once the writer left Writing state; the recording is dead and
     // the main thread should stop instead of appending into it.
     WriterFailed: Boolean;
     // Seconds between the first and last appended frame.
     Duration: Double;
+    // True once startSessionAtSourceTime: has been called, which is the
+    // instant the movie's timeline begins.
+    SessionStarted: Boolean;
+    // The presentation stamp the session was started at, in seconds on
+    // ScreenCaptureKit's host clock — the anchor that turns a host-clock
+    // event time into a time on the movie's own timeline. Meaningless
+    // until SessionStarted; see Knips.Recording.Sidecar.
+    FirstSampleSeconds: Double;
   end;
 
   TMovieWriter = class
@@ -181,6 +211,10 @@ type
     FMicrophoneDroppedEarly: Int64;
     FMicrophoneDroppedStalled: Int64;
     FMicrophoneFailed: Int64;
+    FAudioPeak: Double;
+    FAudioInspected: Int64;
+    FMicrophonePeak: Double;
+    FMicrophoneInspected: Int64;
     FWriterFailed: Boolean;
     FOpen: Boolean;
     function BuildOutputSettings: NSDictionary;
@@ -193,7 +227,8 @@ type
     // under FLock; no allocation, no managed types, no exceptions.
     function AppendAudioTo(AInput: AVAssetWriterInput;
       ASampleBuffer: CMSampleBufferRef;
-      var AAppended, ADroppedEarly, ADroppedStalled, AFailed: Int64): Boolean;
+      var AAppended, ADroppedEarly, ADroppedStalled, AFailed: Int64;
+      var APeak: Double; var AInspected: Int64): Boolean;
     function WriterError: string;
   public
     constructor Create(const AOutputPath: string;
@@ -233,6 +268,12 @@ implementation
 const
   // Keyframe every four seconds: fine for playback, small files.
   KeyframeIntervalSeconds = 4;
+  // How often a movie fragment is flushed. Two seconds is the most a
+  // kill -9 can cost, and the overhead is one moof header per fragment —
+  // measured at well under a tenth of a percent of a real recording.
+  // Shorter would buy less than it costs in index bloat; longer starts
+  // to lose takes.
+  MovieFragmentSeconds = 2;
   FinishTimeoutSlices = 30000;
   RunLoopSliceSeconds = 0.001;
 
@@ -389,7 +430,13 @@ begin
     Exit;
   end;
 
-  URL := NSURL.fileURLWithPath(NSSTR(PAnsiChar(FOutputPath)));
+  // stringWithUTF8String:, not NSSTR: NSSTR bridges through MacRoman, so
+  // a path with a non-ASCII character in it becomes a DIFFERENT path —
+  // measured, it double-encodes the UTF-8 bytes. The movie would then be
+  // written somewhere the event sidecar beside it does not name, and
+  // recovery would never find the pair again.
+  URL := NSURL.fileURLWithPath(
+    NSString.stringWithUTF8String(PAnsiChar(FOutputPath)));
   Error := nil;
   FWriter := AVAssetWriter(AVAssetWriter.assetWriterWithURL_fileType_error(
     URL, ContainerFileTypeString(FContainer), @Error));
@@ -403,7 +450,34 @@ begin
     Exit;
   end;
   FWriter.retain;
-  FWriter.setShouldOptimizeForNetworkUse(ObjCBOOL(True));
+  // Deliberately OFF, and it is the price of the line below. With it on,
+  // AVAssetWriter holds the movie back and puts a complete file at the
+  // output path only when finishWriting succeeds — measured on device, a
+  // recording killed six seconds in left a file of exactly zero bytes,
+  // fragments or no fragments. With it off and fragments on, the same
+  // kill left 483 kB that ffprobe decoded as 117 frames of 4.0 s.
+  //
+  // What this costs a NORMALLY finished take is one thing only: the moov
+  // atom sits after the media data instead of before it. Measured by
+  // walking the boxes, a finished take is ftyp / mdat / moov with no moof
+  // at all — finishWriting consolidates the fragments — so the file is an
+  // ordinary MP4 in every other respect, and only a crashed one stays
+  // fragmented (ftyp / mdat / moov / mdat / moof / …). Front-loaded moov
+  // matters for progressive download over a network and not at all for a
+  // recorder writing to a local disk.
+  //
+  // To revert, if that trade is ever the wrong way round: this one line
+  // back to setShouldOptimizeForNetworkUse(ObjCBOOL(True)). Crash
+  // recovery then loses everything, so the movieFragmentInterval below
+  // should go with it.
+  FWriter.setShouldOptimizeForNetworkUse(ObjCBOOL(False));
+  // Before startWriting, which is where AVAssetWriter reads it. Every
+  // recording is fragmented, not only the ones that go wrong: there is no
+  // way to know in advance which ones those are, and the cost is a header
+  // every two seconds. What it buys is that a process killed mid-take
+  // leaves a file that plays up to its last fragment instead of a stub
+  // with no moov atom at all.
+  FWriter.setMovieFragmentInterval(MakeCMTime(MovieFragmentSeconds, 1));
 
   FInput := AVAssetWriterInput(
     AVAssetWriterInput.assetWriterInputWithMediaType_outputSettings(
@@ -485,9 +559,89 @@ begin
   PThreadMutexUnlock(FLock);
 end;
 
+// The loudest magnitude in one PCM buffer, or -1 when the buffer is not a
+// layout this reads.
+//
+// Capture-queue code, and written to the same rules as the cursor blit:
+// no allocation, no exception, no managed type, no Objective-C message.
+// Every step is a check rather than an assumption — the format
+// description is asked what the bytes are, and anything that is not
+// 32-bit float linear PCM is declined rather than guessed at. Interleaved
+// and planar both work, because a peak does not care which channel a
+// sample belongs to.
+//
+// The scan is capped: a peak is a peak, and reading four thousand samples
+// out of a buffer answers the question "was there any sound at all" as
+// well as reading all of them, at a fixed cost per buffer.
+function MeasurePeak(ASampleBuffer: CMSampleBufferRef): Double;
+const
+  MaxSamplesScanned = 4096;
+var
+  Format: CMFormatDescriptionRef;
+  Description: PAudioStreamBasicDescription;
+  Block: CMBlockBufferRef;
+  Data: Pointer;
+  Total, LengthAtOffset: csize_t;
+  Count, I, Step: PtrInt;
+  Value: Single;
+  Peak: Double;
+begin
+  Result := -1;
+  Format := CMSampleBufferGetFormatDescription(ASampleBuffer);
+  if Format = nil then
+    Exit;
+  Description := CMAudioFormatDescriptionGetStreamBasicDescription(Format);
+  if Description = nil then
+    Exit;
+  if (Description^.mFormatID <> kKnipsAudioFormatLinearPCM)
+    or ((Description^.mFormatFlags and kKnipsAudioFormatFlagIsFloat) = 0)
+    or (Description^.mBitsPerChannel <> 32) then
+    Exit;
+  Block := CMSampleBufferGetDataBuffer(ASampleBuffer);
+  if Block = nil then
+    Exit;
+  Data := nil;
+  Total := 0;
+  LengthAtOffset := 0;
+  if CMBlockBufferGetDataPointer(Block, 0, @LengthAtOffset, @Total,
+    @Data) <> noErr then
+    Exit;
+  // Only the contiguous run at offset zero is scanned: a block buffer can
+  // be a chain, and walking one on this thread is more machinery than a
+  // silence check is worth.
+  if (Data = nil) or (LengthAtOffset < SizeOf(Single)) then
+    Exit;
+  Count := PtrInt(LengthAtOffset) div SizeOf(Single);
+  // Ceiling division, so the scan really is bounded by MaxSamplesScanned:
+  // a plain `div` leaves a stride one too small and reads up to twice the
+  // cap (Count = 8191 with a cap of 4096 gives Step 1).
+  Step := (Count + MaxSamplesScanned - 1) div MaxSamplesScanned;
+  if Step < 1 then
+    Step := 1;
+  Peak := 0;
+  I := 0;
+  while I < Count do
+  begin
+    Value := PSingle(PByte(Data) + I * SizeOf(Single))^;
+    // A NaN or an infinity compares false against everything, so this
+    // rejects both without a special case: neither is louder than Peak.
+    if Value > Peak then
+      Peak := Value
+    else if -Value > Peak then
+      Peak := -Value;
+    Inc(I, Step);
+  end;
+  if Peak > 1 then
+    Peak := 1;
+  Result := Peak;
+end;
+
 function TMovieWriter.AppendAudioTo(AInput: AVAssetWriterInput;
   ASampleBuffer: CMSampleBufferRef;
-  var AAppended, ADroppedEarly, ADroppedStalled, AFailed: Int64): Boolean;
+  var AAppended, ADroppedEarly, ADroppedStalled, AFailed: Int64;
+  var APeak: Double; var AInspected: Int64): Boolean;
+var
+  Peak: Double;
 begin
   Result := False;
   if not FOpen or (AInput = nil) then
@@ -532,13 +686,28 @@ begin
   else
     Inc(AFailed);
   PThreadMutexUnlock(FLock);
+  // After the append and outside the lock: the measurement reads the
+  // buffer's own bytes, which AVAssetWriter has copied out by now, and
+  // holding the mutex across a four-thousand-sample scan would put the
+  // video track's appends behind it.
+  if not Result then
+    Exit;
+  Peak := MeasurePeak(ASampleBuffer);
+  if Peak < 0 then
+    Exit;
+  PThreadMutexLock(FLock);
+  Inc(AInspected);
+  if Peak > APeak then
+    APeak := Peak;
+  PThreadMutexUnlock(FLock);
 end;
 
 function TMovieWriter.AppendAudioSample(
   ASampleBuffer: CMSampleBufferRef): Boolean;
 begin
   Result := AppendAudioTo(FAudioInput, ASampleBuffer, FAudioAppended,
-    FAudioDroppedEarly, FAudioDroppedStalled, FAudioFailed);
+    FAudioDroppedEarly, FAudioDroppedStalled, FAudioFailed, FAudioPeak,
+    FAudioInspected);
 end;
 
 function TMovieWriter.AppendMicrophoneSample(
@@ -546,7 +715,7 @@ function TMovieWriter.AppendMicrophoneSample(
 begin
   Result := AppendAudioTo(FMicrophoneInput, ASampleBuffer,
     FMicrophoneAppended, FMicrophoneDroppedEarly, FMicrophoneDroppedStalled,
-    FMicrophoneFailed);
+    FMicrophoneFailed, FMicrophonePeak, FMicrophoneInspected);
 end;
 
 function TMovieWriter.Finish(out AError: string): Boolean;
@@ -623,7 +792,16 @@ begin
   Result.DroppedMicrophoneEarly := FMicrophoneDroppedEarly;
   Result.DroppedMicrophoneStalled := FMicrophoneDroppedStalled;
   Result.FailedMicrophoneAppends := FMicrophoneFailed;
+  Result.AudioPeak := FAudioPeak;
+  Result.AudioInspected := FAudioInspected;
+  Result.MicrophonePeak := FMicrophonePeak;
+  Result.MicrophoneInspected := FMicrophoneInspected;
   Result.WriterFailed := FWriterFailed;
+  Result.SessionStarted := FSessionStarted;
+  if FSessionStarted then
+    Result.FirstSampleSeconds := CMTimeGetSeconds(FFirstTime)
+  else
+    Result.FirstSampleSeconds := 0;
   if FSessionStarted and (FAppended > 0) then
     Result.Duration := CMTimeGetSeconds(FLastTime)
       - CMTimeGetSeconds(FFirstTime)

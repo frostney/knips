@@ -1,12 +1,64 @@
 # Changelog
 
-All notable changes to this project are documented here. Generated from
-conventional commits by git-cliff (`cliff.toml`).
+All notable changes to this project are documented here. Hand-maintained:
+entries are written for someone deciding whether they want the change,
+not transcribed from commit subjects. (`cliff.toml` is kept for the
+release-tagging step; it does not produce the entries below.)
 
 ## [Unreleased]
 
 ### Features
 
+- **Event sidecar.** Every recording writes `<take>.knips.jsonl` beside
+  its movie: the pointer's path at about thirty samples a second, mouse
+  button edges, the rectangle the capture was reading at each instant, and
+  what was baked into the pixels. Times are on ScreenCaptureKit's own host
+  clock and anchored to the movie's first frame, so an event's place on the
+  movie's timeline is a subtraction rather than an estimate — measured over
+  a 61 s take, the sidecar's prediction matched the recorded pointer's
+  pixel position within 1 px on 109 of 120 frames, with a best-fit time lag
+  of zero. The format is public and documented in
+  [docs/event-sidecar.md](docs/event-sidecar.md).
+- **Smooth Cursor.** `record --smooth-cursor` (and a menu item beside Big
+  Cursor) leaves the pointer out of the movie entirely and draws it back
+  into GIF and APNG exports from the sidecar's track, interpolated to each
+  output frame and smoothed over a centred window. `export --cursor=` picks
+  the pointer for any take that has room for one: `as-recorded`, `none`,
+  `smooth`, or `big`. Mutually exclusive with Big Cursor, and refused for a
+  passthrough trim, which re-encodes nothing.
+- **Export size estimates.** `export` says what the animation is likely to
+  weigh before it writes a byte — from the source movie's own bytes per
+  pixel-frame, which is H.264's verdict on how busy the content is — and
+  then replaces the estimate with a projection from what the encoder has
+  actually produced. The playback window shows both in its title.
+
+  The estimate is reported as a range, and the range is honest about what
+  it is rather than about what would sound good: calibrated on sixteen
+  exports over seven takes at four output widths, the worst residual is
+  2.2x, the band shown is 3x, and content unlike anything in that set can
+  still land outside it. Measured too, and stated because it is the sort
+  of thing a model like this is usually assumed to need: downscaling does
+  **not** need its own term — across a fourfold reduction the ratio moves
+  by at most 31 % while content moves it fourfold. The in-flight
+  projection is the number that is actually accurate, and it was inside
+  5 % of the final size on busy takes (30 % on ones that went quiet
+  half way through).
+- **Never lose a take.** The writer now flushes a movie fragment every two
+  seconds, so a process killed mid-recording leaves a playable movie
+  instead of a zero-byte stub (measured: 117 frames of a six-second take
+  survived a `kill -9`). The next `knips record`, and the menu-bar app at
+  launch, find the unfinished take, re-mux it into an ordinary movie and
+  close its sidecar off — a check that costs about ten milliseconds over
+  a directory of fifty finished takes, because it reads each sidecar's
+  last four kilobytes rather than parsing it. A normally finished take is
+  unchanged apart from where its `moov` atom sits: it is `ftyp/mdat/moov`
+  with no fragments, since `finishWriting` consolidates them.
+- **Audio assurance.** The writer measures each PCM buffer's peak on the
+  capture queue, so a track that was enabled and arrived as pure silence is
+  now said out loud — on the *Stop Recording* menu item while the recording
+  runs, and afterwards in the log, the menu and the playback window's
+  title. "Nothing arrived" and "everything arrived and was silence" are
+  told apart, because they send the user to different places.
 - Headless `record` to `.mp4`/`.mov` from a display, region, or window via
   ScreenCaptureKit and AVAssetWriter.
 - `app`: the Kap gesture as a menu-bar app — click the icon, drag a

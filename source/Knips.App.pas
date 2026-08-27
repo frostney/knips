@@ -56,11 +56,13 @@ uses
   Knips.App.State,
   Knips.Capture.ShareableContent,
   Knips.Capture.Stream,
+  Knips.Export.MovieWriter,
   Knips.ObjC.Runtime,
   Knips.Options,
   Knips.Recording,
   Knips.Recording.CursorMath,
   Knips.Recording.LiveMath,
+  Knips.Recording.Recovery,
   MacOSAll;
 
 // Installs the status item and runs NSApp until the user quits. Returns
@@ -134,6 +136,8 @@ const
   ToggleZoomOnClickSelector = 'toggleZoomOnClick:';
   ToggleFollowMouseSelector = 'toggleFollowMouse:';
   ToggleBigCursorSelector = 'toggleBigCursor:';
+  ToggleSmoothCursorSelector = 'toggleSmoothCursor:';
+  RecoverTakesSelector = 'recoverTakes:';
   // The live animator's 30 Hz tick while a recording with Zoom on Click
   // or Follow Mouse is running. On the same target as everything else, so
   // the feature adds no runtime-built class of its own.
@@ -212,6 +216,7 @@ const
   ZoomOnClickKey = ZoomOnClickDefaultsKey;
   FollowMouseKey = FollowMouseDefaultsKey;
   BigCursorKey = BigCursorDefaultsKey;
+  SmoothCursorKey = SmoothCursorDefaultsKey;
   LastRegionDisplayKey = 'KnipsLastRegionDisplay';
   LastRegionLeftKey = 'KnipsLastRegionLeft';
   LastRegionTopKey = 'KnipsLastRegionTop';
@@ -292,6 +297,7 @@ type
     FZoomOnClickItem: NSMenuItem;
     FFollowMouseItem: NSMenuItem;
     FBigCursorItem: NSMenuItem;
+    FSmoothCursorItem: NSMenuItem;
     FStopItem: NSMenuItem;
     FCancelItem: NSMenuItem;
     FRevealItem: NSMenuItem;
@@ -307,11 +313,17 @@ type
     // the first promotion and kept — see PromoteForPlayback.
     FMainMenu: NSMenu;
     FTimer: NSTimer;
-    // The live effects' own timer, only alive while a recording that has
-    // one is running. Separate from FTimer, which ticks once a second to
+    // The recording's own thirty-hertz tick, alive for the whole of every
+    // recording. Separate from FTimer, which ticks once a second to
     // rewrite the status item and would be a strange place to hang a
     // thirty-hertz animation.
-    FLiveTimer: NSTimer;
+    //
+    // It used to belong to the live effects and start only when one was
+    // switched on. The event sidecar changed that: every recording logs
+    // where the pointer went (Knips.Recording.Sidecar), so every recording
+    // needs the tick, and the animator is now one of the two things that
+    // happen inside it rather than the reason it exists.
+    FTickTimer: NSTimer;
     // The camera ride's timer, alive only while a WINDOW recording has a
     // docked camera. A region ride needs no timer of its own: it happens
     // inside the live animator's tick, in the same turn as the frame.
@@ -351,6 +363,8 @@ type
     FZoomOnClick: Boolean;
     FFollowMouse: Boolean;
     FBigCursor: Boolean;
+    // Mutually exclusive with FBigCursor — see CommandToggleSmoothCursor.
+    FSmoothCursor: Boolean;
     FHasLastRegion: Boolean;
     FLastRegionDisplayID: UInt32;
     FLastRegion: TCaptureRegion;
@@ -391,6 +405,7 @@ type
     procedure StoreZoomOnClick;
     procedure StoreFollowMouse;
     procedure StoreBigCursor;
+    procedure StoreSmoothCursor;
     procedure StoreLastRegion;
     procedure ClearPending;
     // Starts the live animator and its timer for the recording that has
@@ -398,6 +413,12 @@ type
     // whether the frame around the region really did reach the content
     // filter — Follow Mouse is refused when it did not, because a frame
     // that pans with the region would then be composited into the file.
+    // The recording's thirty-hertz tick. Started as soon as a capture is
+    // running, whatever it is recording and whatever effects are on, and
+    // stopped when the file is finalised — the event sidecar's sampler is
+    // driven from it and has no timer of its own.
+    procedure StartRecordingTick;
+    procedure StopRecordingTick;
     procedure StartLive(ABorderWindowID: Cardinal; ABorderExcluded: Boolean);
     procedure StopLive;
     // Puts the frame on the region about to be recorded and returns the
@@ -466,6 +487,10 @@ type
     procedure HandleCameraError(const AMessage: string);
   public
     constructor Create;
+    // The crash-recovery pass, run one turn after launch over the
+    // recordings directory (Knips.Recording.Recovery). Public because the
+    // deferred one-shot dispatches into it.
+    procedure RecoverUnfinishedTakes;
     destructor Destroy; override;
     function Setup(out AError: string): Boolean;
     procedure RefreshStatusItem;
@@ -478,8 +503,12 @@ type
     procedure CommandToggleZoomOnClick;
     procedure CommandToggleFollowMouse;
     procedure CommandToggleBigCursor;
+    procedure CommandToggleSmoothCursor;
     procedure CommandStop;
     procedure CommandCancelSelection;
+    // What to append to the Stop item's title: '' when no audio source is
+    // on, and otherwise what the two tracks have delivered so far.
+    function RecordingAudioNote: string;
     procedure CommandRevealRecordings;
     procedure CommandToggleCamera;
     procedure CommandToggleCameraShape;
@@ -790,6 +819,41 @@ begin
   except
     on E: Exception do
       HandleBodyException(Controller, ToggleBigCursorSelector, E);
+  end;
+end;
+
+// The crash-recovery pass, one run-loop turn after launch. Deferred and
+// not inline: it lists a directory that only grows, and a status item
+// that appears half a second late is exactly the kind of launch nobody
+// can explain. Same shape as the deferred camera restore.
+procedure TargetRecoverTakes(ASelf: id; ACommand: SEL; ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.RecoverUnfinishedTakes;
+  except
+    on E: Exception do
+      HandleBodyException(Controller, RecoverTakesSelector, E);
+  end;
+end;
+
+procedure TargetToggleSmoothCursor(ASelf: id; ACommand: SEL;
+  ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandToggleSmoothCursor;
+  except
+    on E: Exception do
+      HandleBodyException(Controller, ToggleSmoothCursorSelector, E);
   end;
 end;
 
@@ -1135,6 +1199,9 @@ begin
       @TargetToggleFollowMouse);
     AddTargetMethod(Builder, ToggleBigCursorSelector,
       @TargetToggleBigCursor);
+    AddTargetMethod(Builder, ToggleSmoothCursorSelector,
+      @TargetToggleSmoothCursor);
+    AddTargetMethod(Builder, RecoverTakesSelector, @TargetRecoverTakes);
     AddTargetMethod(Builder, LiveTickSelector, @TargetLiveTick);
     AddTargetMethod(Builder, CameraRideSelector, @TargetCameraRideTick);
     AddTargetMethod(Builder, MenuNeedsUpdateSelector, @TargetMenuNeedsUpdate);
@@ -1390,6 +1457,7 @@ end;
 destructor TAppController.Destroy;
 begin
   StopElapsedTimer;
+  StopRecordingTick;
   StopLive;
   StopCameraRide;
   // Before the target goes: the hotkey's handler talks to this object,
@@ -1622,6 +1690,8 @@ begin
     ToggleFollowMouseSelector);
   FBigCursorItem := AddBehaviourItem(BigCursorMenuTitle,
     ToggleBigCursorSelector);
+  FSmoothCursorItem := AddBehaviourItem(SmoothCursorMenuTitle,
+    ToggleSmoothCursorSelector);
 end;
 
 procedure TAppController.BuildMenu;
@@ -1871,6 +1941,11 @@ begin
     RecordError(HotKeyError);
 
   RefreshStatusItem;
+  // A take whose process died is finished off on the next turn of the run
+  // loop, not here: the scan lists a directory that only grows, and the
+  // status item has to be in the menu bar first. Same reason the camera
+  // restore below is deferred.
+  ScheduleOneShot(RecoverTakesSelector);
   // Deferred, not inline: starting an AVCaptureSession blocks for the
   // better part of a second, and the status item should be in the menu
   // bar before that happens.
@@ -1914,6 +1989,17 @@ begin
   FZoomOnClick := Defaults.boolForKey(PascalToNSString(ZoomOnClickKey));
   FFollowMouse := Defaults.boolForKey(PascalToNSString(FollowMouseKey));
   FBigCursor := Defaults.boolForKey(PascalToNSString(BigCursorKey));
+  FSmoothCursor := Defaults.boolForKey(PascalToNSString(SmoothCursorKey));
+  // A pair of defaults that both say yes is a preferences file somebody
+  // edited, or one written by a future version with a rule this one does
+  // not have. Either way the recorder would refuse the combination, so it
+  // is resolved here — the newer feature yields to the older, and the
+  // menu then shows what the app will actually do.
+  if FSmoothCursor and FBigCursor then
+  begin
+    FSmoothCursor := False;
+    StoreSmoothCursor;
+  end;
   FLastRegionDisplayID := UInt32(Defaults.integerForKey(
     PascalToNSString(LastRegionDisplayKey)));
   Stored.Left := Integer(Defaults.integerForKey(
@@ -1986,6 +2072,12 @@ procedure TAppController.StoreBigCursor;
 begin
   NSUserDefaults.standardUserDefaults.setBool_forKey(ObjCBOOL(FBigCursor),
     PascalToNSString(BigCursorKey));
+end;
+
+procedure TAppController.StoreSmoothCursor;
+begin
+  NSUserDefaults.standardUserDefaults.setBool_forKey(ObjCBOOL(FSmoothCursor),
+    PascalToNSString(SmoothCursorKey));
 end;
 
 procedure TAppController.StoreLastRegion;
@@ -2549,14 +2641,26 @@ begin
   // does: enabled while any of them could be.
   FBehaviourItem.setEnabled(IsCommandEnabled(FState, acToggleZoomOnClick)
     or IsCommandEnabled(FState, acToggleFollowMouse)
-    or IsCommandEnabled(FState, acToggleBigCursor));
+    or IsCommandEnabled(FState, acToggleBigCursor)
+    or IsCommandEnabled(FState, acToggleSmoothCursor));
   FZoomOnClickItem.setEnabled(IsCommandEnabled(FState, acToggleZoomOnClick));
   FZoomOnClickItem.setState(MenuCheckState(FZoomOnClick));
   FFollowMouseItem.setEnabled(IsCommandEnabled(FState, acToggleFollowMouse));
   FFollowMouseItem.setState(MenuCheckState(FFollowMouse));
   FBigCursorItem.setEnabled(IsCommandEnabled(FState, acToggleBigCursor));
   FBigCursorItem.setState(MenuCheckState(FBigCursor));
+  FSmoothCursorItem.setEnabled(IsCommandEnabled(FState,
+    acToggleSmoothCursor));
+  FSmoothCursorItem.setState(MenuCheckState(FSmoothCursor));
   FStopItem.setEnabled(IsCommandEnabled(FState, acStopRecording));
+  // The audio assurance, and it lives here rather than in the menu bar on
+  // purpose: a level indicator in the menu bar would be a second moving
+  // thing beside the clock, and the question "is it actually hearing
+  // anything?" is one people ask once, on the way to the Stop item. So
+  // the answer is written on the Stop item, and is invisible until the
+  // menu is open.
+  FStopItem.setTitle(PascalToNSString(StopRecordingTitle
+    + RecordingAudioNote));
   FCancelItem.setEnabled(IsCommandEnabled(FState, acCancelSelection));
 
   // Not part of the state machine — see BuildCameraMenu. The titles are
@@ -2634,7 +2738,9 @@ begin
   // user just tried.
   Transition(acCaptureFailed);
   // The animator holds a session that may be on its way out; it must not
-  // outlive the recording it was animating.
+  // outlive the recording it was animating — and neither must the tick
+  // that samples the pointer into its sidecar.
+  StopRecordingTick;
   StopLive;
   // A frame left on screen with no recording behind it is a lie about
   // what the app is doing.
@@ -2964,6 +3070,45 @@ begin
     Exit;
   FBigCursor := not FBigCursor;
   StoreBigCursor;
+  // The two are mutually exclusive: both switch ScreenCaptureKit's own
+  // pointer off, and they disagree about what happens next. Switching one
+  // on switches the other off, rather than greying it out — a checkbox
+  // that goes grey when you tick its neighbour tells you less than one
+  // that visibly unticks.
+  if FBigCursor and FSmoothCursor then
+  begin
+    FSmoothCursor := False;
+    StoreSmoothCursor;
+    LogMessage('Smooth Cursor is off: Big Cursor bakes the pointer into '
+      + 'the movie, and the two cannot both have it');
+  end;
+  RefreshStatusItem;
+end;
+
+// Idle-only for exactly the reason Big Cursor is: this is the same
+// showsCursor decision, and it is settled in the configuration the
+// capture started with.
+//
+// The movie itself comes out with NO pointer in it — that is the whole
+// mechanism — and the pointer appears only in a GIF or an APNG exported
+// from it. The menu title says so, and the log says so again the moment
+// it is switched on, because it is the one setting whose effect is
+// invisible until somebody opens the MP4 and finds nothing there.
+procedure TAppController.CommandToggleSmoothCursor;
+begin
+  if not Transition(acToggleSmoothCursor) then
+    Exit;
+  FSmoothCursor := not FSmoothCursor;
+  StoreSmoothCursor;
+  if FSmoothCursor and FBigCursor then
+  begin
+    FBigCursor := False;
+    StoreBigCursor;
+  end;
+  if FSmoothCursor then
+    LogMessage('Smooth Cursor is on: the recorded movie will have no '
+      + 'pointer in it, and a smoothed one is drawn into GIF and APNG '
+      + 'exports from the event sidecar');
   RefreshStatusItem;
 end;
 
@@ -3119,33 +3264,44 @@ begin
   FLive.Start(FSession, Border, FCamera, ScreenFrame,
     LiveRect(Base.origin.x, Base.origin.y, Base.size.width,
     Base.size.height), Zoom, Follow);
-  if not FLive.Active then
-    Exit;
-  // Created unscheduled and added to the *common* modes, not scheduled
-  // and then added again: the camera window is draggable during a
-  // recording, and a drag puts the run loop in
-  // NSEventTrackingRunLoopMode, where a default-mode-only timer stops
-  // firing and a zoom freezes half way. NSRunLoopCommonModes already
-  // includes the default mode, so scheduling first would register the
-  // same timer twice and fire it at sixty hertz.
-  FLiveTimer := NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats(
+end;
+
+// Created unscheduled and added to the *common* modes, not scheduled and
+// then added again: the camera window is draggable during a recording, and
+// a drag puts the run loop in NSEventTrackingRunLoopMode, where a
+// default-mode-only timer stops firing — a zoom would freeze half way and
+// the pointer track would have a hole in it exactly where the user was
+// doing something. NSRunLoopCommonModes already includes the default mode,
+// so scheduling first would register the same timer twice and fire it at
+// sixty hertz.
+procedure TAppController.StartRecordingTick;
+begin
+  StopRecordingTick;
+  FTickTimer := NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats(
     LiveTickSeconds, FTarget, SelectorNamed(LiveTickSelector), nil, True);
-  if FLiveTimer <> nil then
+  if FTickTimer <> nil then
   begin
-    FLiveTimer.retain;
-    NSRunLoop.currentRunLoop.addTimer_forMode(FLiveTimer,
+    FTickTimer.retain;
+    NSRunLoop.currentRunLoop.addTimer_forMode(FTickTimer,
       NSRunLoopCommonModes);
   end;
 end;
 
+procedure TAppController.StopRecordingTick;
+begin
+  if FTickTimer = nil then
+    Exit;
+  FTickTimer.invalidate;
+  FTickTimer.release;
+  FTickTimer := nil;
+end;
+
+// Stops the animator and nothing else. The tick it used to own outlives
+// it now: the sidecar sampler rides the same timer and has to keep
+// sampling right up to FinishCapture, which is one turn later than every
+// caller of this.
 procedure TAppController.StopLive;
 begin
-  if FLiveTimer <> nil then
-  begin
-    FLiveTimer.invalidate;
-    FLiveTimer.release;
-    FLiveTimer := nil;
-  end;
   // Every caller is on the stopping path *before* FinishCapture: the
   // animator holds the session, and a tick that arrived after the writer
   // had been finalised would be talking to a freed object.
@@ -3155,15 +3311,21 @@ end;
 
 procedure TAppController.LiveTick;
 begin
-  // An export owns the main thread and drains events to draw its
-  // progress, which is how a timer can fire in the middle of one. There
-  // is no recording running then, but the guard is cheap and the rule is
-  // the same everywhere else in this unit.
+  // The sidecar sample comes first, and is deliberately outside the Busy
+  // guard below: an export owns the main thread and drains events to draw
+  // its progress, which is how a timer can fire in the middle of one, and
+  // a recording really can still be running then (the stop is refused
+  // while an export holds the thread). Writing a line to a file is safe
+  // there in a way that sending updateConfiguration: is not.
+  if (FSession <> nil) and FSession.Capturing then
+    FSession.SampleMetadata;
   if Busy or (FLive = nil) then
     Exit;
-  FLive.Tick;
   // The animator switches itself off when the session stops capturing;
-  // the timer would otherwise keep firing until the stop path reaches it.
+  // the tick goes on until the recording is finalised.
+  if not FLive.Active then
+    Exit;
+  FLive.Tick;
   if FLive.Active then
     Exit;
   // The other way it switches itself off is ScreenCaptureKit giving up on
@@ -3275,6 +3437,10 @@ begin
     LiveZoom := False;
     LiveFollow := False;
     Options.LiveSourceRect := True;
+    // Nothing animates this one, but the poll pans the source rectangle
+    // onto the window for the whole take, so the framing is every bit as
+    // baked as a Follow Mouse take's.
+    Options.LiveWindowFollow := True;
   end
   else
   begin
@@ -3282,6 +3448,12 @@ begin
       FFollowMouse, LiveZoom, LiveFollow);
     Options.LiveSourceRect := LiveZoom or LiveFollow;
   end;
+  // The RESOLVED answers, not the preferences: what goes into the event
+  // sidecar's header is what the capture actually did, because that is
+  // what decides which effects a later export can still apply. A window
+  // recording with Zoom on Click ticked is not a zoomed recording.
+  Options.LiveZoomOnClick := LiveZoom;
+  Options.LiveFollowMouse := LiveFollow;
   // Big Cursor, resolved rather than passed straight through: the
   // preference is global and a window recording cannot have one, and
   // ValidateRecordingOptions *refuses* that combination rather than
@@ -3301,6 +3473,18 @@ begin
     Options.BigCursor := ResolveBigCursor(Options.TargetKind, FBigCursor);
   if FBigCursor and not Options.BigCursor then
     LogMessage('Big Cursor is off for this recording: a window capture '
+      + 'has no fixed relationship to the screen the pointer is '
+      + 'measured against');
+  // Same question, same answer, and resolved against what the USER asked
+  // for rather than the filter this path happens to build — see the
+  // comment above Options.BigCursor.
+  if FCompositedWindowID <> 0 then
+    Options.SmoothCursor := ResolveSmoothCursor(ctkWindow, FSmoothCursor)
+  else
+    Options.SmoothCursor := ResolveSmoothCursor(Options.TargetKind,
+      FSmoothCursor);
+  if FSmoothCursor and not Options.SmoothCursor then
+    LogMessage('Smooth Cursor is off for this recording: a window capture '
       + 'has no fixed relationship to the screen the pointer is '
       + 'measured against');
   // The frame is stroked outside the region either way, so a failed
@@ -3336,8 +3520,9 @@ begin
   // undocks below.
   DockCameraForPending;
 
-  // Nothing should be animating a session that is about to be freed, and
-  // the animator holds a bare pointer to it.
+  // Nothing should be animating or sampling a session that is about to be
+  // freed, and both hold a bare pointer to it.
+  StopRecordingTick;
   StopLive;
   FreeAndNil(FSession);
   FSession := TRecordingSession.Create(Options);
@@ -3353,6 +3538,12 @@ begin
     RefreshStatusItem;
     Exit;
   end;
+
+  // The recording's own clock, started the moment the capture is running
+  // and before anything that could fail: the event sidecar's pointer track
+  // begins here, and every recording has one whether or not it has an
+  // effect to animate.
+  StartRecordingTick;
 
   // A sprite that could not be made costs the user the checkbox they
   // ticked, so it is said out loud rather than logged: the recording is
@@ -3475,14 +3666,19 @@ end;
 
 procedure TAppController.FinishRecording(AShowPlayback: Boolean);
 var
-  Error, Path: string;
+  Error, Path, Silence, PlaybackNote: string;
   Finished, MicrophoneAsked: Boolean;
   PixelWidth, PixelHeight, Scale: Integer;
 begin
+  PlaybackNote := '';
   if FSession = nil then
     Exit;
   // Idempotent, and the backstop for the paths that do not come through
-  // CommandStop — Quit, above all, which finalises inline.
+  // CommandStop — Quit, above all, which finalises inline. The tick goes
+  // with it: FinishCapture takes the recording's last pointer sample
+  // itself, and everything after that pumps the run loop for the writer's
+  // completion handler, which is no place for a timer to fire.
+  StopRecordingTick;
   StopLive;
   // The frame goes first: it belongs to the recording, not to the
   // finalisation, and finishing the writer pumps the run loop.
@@ -3505,6 +3701,42 @@ begin
   // silence, with no error anywhere. Counting what actually arrived is
   // the one check that does not depend on knowing how the failure
   // happened. Never a Fail: the video is fine and on disk.
+  // Silence on a track that was on. Separate from the count check below,
+  // which is about nothing arriving at all: this one is about buffers
+  // that arrived and carried no sound, which points at a muted source
+  // rather than at a permission.
+  if Finished then
+  begin
+    // Accumulated, never reassigned: a take whose system audio was silent
+    // and whose microphone was fine used to reach the playback title with
+    // the microphone's empty answer, and say nothing at all.
+    Silence := AudioSilenceWarning('system audio',
+      AudioModeCapturesSystem(FSession.Report.AudioMode),
+      FSession.Report.AppendedAudioSamples, FSession.Report.AudioInspected,
+      FSession.Report.AudioPeak);
+    if Silence <> '' then
+    begin
+      RecordError(Silence);
+      PlaybackNote := 'no system audio';
+    end;
+    // Only the silence case here; the "nothing arrived" case for the
+    // microphone is the older, more detailed check below.
+    if FSession.Report.AppendedMicrophoneSamples > 0 then
+    begin
+      Silence := AudioSilenceWarning('the microphone', MicrophoneAsked,
+        FSession.Report.AppendedMicrophoneSamples,
+        FSession.Report.MicrophoneInspected,
+        FSession.Report.MicrophonePeak);
+      if Silence <> '' then
+      begin
+        RecordError(Silence);
+        if PlaybackNote = '' then
+          PlaybackNote := 'no mic audio'
+        else
+          PlaybackNote := 'no audio';
+      end;
+    end;
+  end;
   if Finished and MicrophoneAsked
     and (FSession.Report.AppendedMicrophoneSamples = 0) then
   begin
@@ -3548,7 +3780,76 @@ begin
   // Finder window) flashing up on the last turn before terminate: is
   // noise, not information.
   if AShowPlayback and Finished and (Path <> '') then
+  begin
     ShowPlayback(Path, PixelWidth, PixelHeight, Scale);
+    // The playback window has no message area of its own, and this is the
+    // one moment the user is looking straight at the take: a silent track
+    // goes on the window's title, beside the file name, where it cannot
+    // be missed and costs no layout.
+    if (PlaybackNote <> '') and (FPlayback <> nil) then
+      FPlayback.SetTitleNote(PlaybackNote);
+  end;
+end;
+
+function TAppController.RecordingAudioNote: string;
+var
+  Statistics: TMovieWriterStatistics;
+  System, Microphone: string;
+begin
+  Result := '';
+  if (FSession = nil) or not FSession.Capturing then
+    Exit;
+  Statistics := FSession.LiveStatistics;
+  System := AudioLevelNote(AudioModeCapturesSystem(FSession.Report.AudioMode),
+    Statistics.AppendedAudioSamples, Statistics.AudioInspected,
+    Statistics.AudioPeak);
+  Microphone := AudioLevelNote(
+    AudioModeCapturesMicrophone(FSession.Report.AudioMode),
+    Statistics.AppendedMicrophoneSamples, Statistics.MicrophoneInspected,
+    Statistics.MicrophonePeak);
+  if (System = '') and (Microphone = '') then
+    Exit;
+  if System = '' then
+    Result := ' — mic: ' + Microphone
+  else if Microphone = '' then
+    Result := ' — audio: ' + System
+  else
+    Result := ' — audio: ' + System + ', mic: ' + Microphone;
+end;
+
+procedure TAppController.RecoverUnfinishedTakes;
+var
+  Takes: TRecoveredTakes;
+  Summary: string;
+  I: Integer;
+begin
+  try
+    if RecoverOrphanedTakes(RecordingsDirectory(GetUserDir), Takes) = 0 then
+      Exit;
+  except
+    // Never a reason to refuse to launch: the app's job is recording, and
+    // tidying up after a crash is a courtesy.
+    on E: Exception do
+    begin
+      LogMessage('recovering an unfinished recording: ' + E.Message);
+      Exit;
+    end;
+  end;
+  Summary := DescribeRecoveredTakes(Takes);
+  if Summary <> '' then
+    LogMessage(Summary);
+  // RecordError, not LogMessage alone: a recording the user thought they
+  // had lost is exactly the thing they should be told about, and the menu
+  // is the only place this app can tell them.
+  if Length(Takes) = 1 then
+    RecordError('an earlier recording did not finish and has been '
+      + 'recovered: ' + ExtractFileName(Takes[0].MoviePath))
+  else
+  begin
+    I := Length(Takes);
+    RecordError(Format('%d earlier recordings did not finish and have '
+      + 'been recovered', [I]));
+  end;
 end;
 
 procedure TAppController.CommandRevealRecordings;

@@ -19,6 +19,7 @@ type
     procedure TestAudioTogglesOnlyWhileIdle;
     procedure TestLiveEffectsToggleOnlyWhileIdle;
     procedure TestBigCursorTogglesOnlyWhileIdle;
+    procedure TestSmoothCursorTogglesOnlyWhileIdle;
     procedure TestToggleDefaultsKeysAreDistinct;
     procedure TestIdleRejectsStop;
     procedure TestSelectingCommitsOrCancels;
@@ -183,6 +184,8 @@ begin
     TestLiveEffectsToggleOnlyWhileIdle);
   Test('the big-cursor checkbox only toggles while idle',
     TestBigCursorTogglesOnlyWhileIdle);
+  Test('smooth cursor toggles only while idle',
+    TestSmoothCursorTogglesOnlyWhileIdle);
   Test('no two remembered toggles share a defaults key',
     TestToggleDefaultsKeysAreDistinct);
   Test('idle rejects stop', TestIdleRejectsStop);
@@ -300,6 +303,26 @@ begin
     .ToBe(False);
 end;
 
+// Smooth Cursor is the same showsCursor decision made the other way, so
+// it is settled at the same moment and refused at the same two.
+procedure TTransitionTests.TestSmoothCursorTogglesOnlyWhileIdle;
+var
+  Next: TAppState;
+begin
+  Next := asRecording;
+  Expect<Boolean>(NextAppState(asIdle, acToggleSmoothCursor, Next)).ToBe(True);
+  Expect<Integer>(Ord(Next)).ToBe(Ord(asIdle));
+  Expect<Boolean>(NextAppState(asRecording, acToggleSmoothCursor, Next))
+    .ToBe(False);
+  Expect<Boolean>(NextAppState(asSelecting, acToggleSmoothCursor, Next))
+    .ToBe(False);
+  Expect<Boolean>(IsCommandEnabled(asIdle, acToggleSmoothCursor)).ToBe(True);
+  Expect<Boolean>(IsCommandEnabled(asRecording, acToggleSmoothCursor))
+    .ToBe(False);
+  Expect<Boolean>(IsCommandEnabled(asSelecting, acToggleSmoothCursor))
+    .ToBe(False);
+end;
+
 // Pins the big-cursor key's value and that it collides with none of the
 // established toggle keys. (This cannot catch a writer touching a
 // neighbour's key — that guarantee lives in the per-key store shape in
@@ -314,6 +337,16 @@ begin
   Expect<Boolean>(BigCursorDefaultsKey = CameraVisibleDefaultsKey)
     .ToBe(False);
   Expect<Boolean>(BigCursorDefaultsKey = CameraShapeDefaultsKey).ToBe(False);
+  Expect<string>(SmoothCursorDefaultsKey).ToBe('KnipsSmoothCursor');
+  Expect<Boolean>(SmoothCursorDefaultsKey = BigCursorDefaultsKey).ToBe(False);
+  Expect<Boolean>(SmoothCursorDefaultsKey = ZoomOnClickDefaultsKey)
+    .ToBe(False);
+  Expect<Boolean>(SmoothCursorDefaultsKey = FollowMouseDefaultsKey)
+    .ToBe(False);
+  Expect<Boolean>(SmoothCursorDefaultsKey = SystemAudioDefaultsKey)
+    .ToBe(False);
+  Expect<Boolean>(SmoothCursorDefaultsKey = MicrophoneDefaultsKey)
+    .ToBe(False);
 end;
 
 procedure TTransitionTests.TestIdleRejectsStop;
@@ -1428,6 +1461,14 @@ begin
   Expect<string>(ExportProgressTitle(42)).ToBe(ExportingTitlePrefix + '42%');
   Expect<string>(ExportProgressTitle(-1)).ToBe(ExportingTitlePrefix + '0%');
   Expect<string>(ExportProgressTitle(101)).ToBe(ExportingTitlePrefix + '100%');
+  // With a size beside it, and without one — the palette pass has no
+  // bytes to report yet and must not show an empty separator.
+  Expect<string>(ExportProgressTitleWithSize(42, '6.7 MB'))
+    .ToBe(ExportingTitlePrefix + '42% · 6.7 MB');
+  Expect<string>(ExportProgressTitleWithSize(42, ''))
+    .ToBe(ExportingTitlePrefix + '42%');
+  Expect<string>(ExportProgressTitleWithSize(-1, '1 kB'))
+    .ToBe(ExportingTitlePrefix + '0% · 1 kB');
 end;
 
 { TWindowMenuTests }
