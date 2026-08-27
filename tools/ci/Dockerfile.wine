@@ -1,0 +1,29 @@
+# Wine image for running the cross-built Windows binaries.
+#
+# This is a *smoke test*, not a Windows gate: Wine is not Windows, and a pass
+# here proves the Pascal is Windows-shaped, not that Knips works on Windows.
+# It is still worth having — the first run of it found eight real POSIX-path
+# assumptions in the neutral MCP suite that no compiler would ever flag.
+#
+# Must be built and run as linux/amd64: Wine here runs x86_64 PE binaries, and
+# Debian's Wine on arm64 cannot. On an Apple-silicon Mac, OrbStack/Rosetta
+# makes that practical.
+#
+# Built and driven by tools/wine-smoke.sh.
+
+FROM --platform=linux/amd64 debian:bookworm
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      wine \
+      wine64 \
+ && rm -rf /var/lib/apt/lists/*
+
+# A prepared prefix keeps the first run from spending its time on wineboot,
+# and keeps mscoree/mshtml from prompting for downloads that will never come.
+ENV WINEDEBUG=-all \
+    WINEPREFIX=/root/.wine \
+    WINEDLLOVERRIDES="mscoree,mshtml="
+RUN wineboot -u >/dev/null 2>&1; wineserver -w; true
+
+WORKDIR /work
