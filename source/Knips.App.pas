@@ -25,9 +25,11 @@ unit Knips.App;
 // controller from an ivar back-pointer — the same shape as the capture
 // layer's SCStreamOutput.
 //
-// Errors never open a dialog. The message goes to NSLog (where a
-// menu-bar-only process's output actually lands) and to a disabled
-// "Last error: …" menu item, and the app returns to idle without
+// Errors never open a dialog. The message goes to ~/Library/Logs/
+// Knips.log (the channel that works from a Finder-launched bundle,
+// where stderr is /dev/null and the unified log redacts NSLog to
+// <private>), to NSLog for terminal runs, and to a disabled
+// "Last error: …" menu item; the app returns to idle without
 // retrying — a denied Screen Recording grant must not become a loop.
 
 {$I Knips.inc}
@@ -40,6 +42,7 @@ interface
 {$IFDEF DARWIN}
 
 uses
+  BaseUnix,
   SysUtils,
 
   CocoaAll,
@@ -186,8 +189,9 @@ const
     + StatusItemAutosaveName;
   StatusItemSeedFromRight = 280.0;
 
-  // NSUserDefaults keys. The system-audio checkbox and the last region
-  // are the only two things the app remembers between launches.
+  // NSUserDefaults keys — everything the app remembers between launches
+  // lives under one of these (plus the camera's and the status item's
+  // own keys declared where they are used).
   SystemAudioKey = 'KnipsRecordSystemAudio';
   ZoomOnClickKey = ZoomOnClickDefaultsKey;
   FollowMouseKey = FollowMouseDefaultsKey;
@@ -196,6 +200,11 @@ const
   LastRegionTopKey = 'KnipsLastRegionTop';
   LastRegionWidthKey = 'KnipsLastRegionWidth';
   LastRegionHeightKey = 'KnipsLastRegionHeight';
+
+  // LogMessage's second channel; see the comment on it for why NSLog on
+  // its own reaches nobody. Relative to the user's home directory.
+  LogFileRelativePath = 'Library/Logs/Knips.log';
+  LogFileMaxBytes = 1024 * 1024;
 
   ElapsedTimerSeconds = 1.0;
   // A zero-delay one-shot: the selection commits inside the overlay
@@ -218,6 +227,13 @@ const
   // menu for five seconds on every single hover.
   WindowListTimeoutSeconds = 1.0;
   WindowListCacheSeconds = 5.0;
+
+  // How many SCShareableContent snapshots the recording frame gets to
+  // turn up in before the recording gives up on excluding it. See
+  // TAppController.ResolvePendingTarget: one query is normally enough,
+  // and each further one costs about 50 ms on the start path — only when
+  // the previous snapshot was taken too early to contain the window.
+  BorderVisibilityAttempts = 3;
 
 type
   // One line of the Record Window submenu, cached between hovers so the
@@ -296,7 +312,8 @@ type
     procedure RecordError(const AMessage: string);
     procedure LoadPreferences;
     procedure StoreSystemAudio;
-    procedure StoreLiveEffects;
+    procedure StoreZoomOnClick;
+    procedure StoreFollowMouse;
     procedure StoreLastRegion;
     procedure ClearPending;
     // Starts the live animator and its timer for the recording that has
@@ -320,8 +337,9 @@ type
     procedure HandlePlaybackClosed;
     procedure ClosePlaybackForRecording;
     function Transition(ACommand: TAppCommand): Boolean;
-    function ResolveDisplayIndex(ADisplayID: UInt32; out AIndex: Integer;
-      out AError: string): Boolean;
+    function ResolvePendingTarget(ADisplayID: UInt32;
+      ABorderWindowID: Cardinal; out AIndex: Integer;
+      out ABorderVisible: Boolean; out AError: string): Boolean;
     function PrepareOutputPath(out APath: string; out AError: string): Boolean;
     procedure ScheduleOneShot(const ASelector: string);
     procedure StartElapsedTimer;
@@ -389,9 +407,87 @@ begin
   Result := TargetClassName;
 end;
 
+// Where LogMessage's lines land besides NSLog. `~/Library/Logs` is the
+// standard place for an application's own log on macOS and exists on
+// every account; Console.app lists it, and so does `tail`.
+function LogFilePath: string;
+begin
+  Result := IncludeTrailingPathDelimiter(GetUserDir) + LogFileRelativePath;
+end;
+
+// Appends one timestamped line, and never raises: a diagnostic that can
+// fail the thing it is diagnosing is worse than no diagnostic.
+//
+// The file is started over once it passes LogFileMaxBytes rather than
+// rotated. A menu-bar app that runs for months has no business growing an
+// unbounded file, and there is nothing here worth keeping two of.
+procedure AppendToLogFile(const AMessage: string);
+var
+  Path, Line: string;
+  Handle: THandle;
+begin
+  try
+    Path := LogFilePath;
+    // O_APPEND, so each write is atomic at the end of the file even when
+    // two processes — the installed bundle and a development build both
+    // answering to org.knips.app — log at once. A seek-then-write pair
+    // is not: one process's truncation between another's seek and write
+    // punches a NUL hole the size of the old file.
+    Handle := FpOpen(PAnsiChar(Path),
+      O_WRONLY or O_APPEND or O_CREAT, &666);
+    if Handle < 0 then
+      Exit;
+    if FpLseek(Handle, 0, SEEK_END) > LogFileMaxBytes then
+    begin
+      FileClose(Handle);
+      Handle := FileCreate(Path);
+      if Handle = THandle(-1) then
+        Exit;
+    end;
+    try
+      Line := FormatDateTime('yyyy-mm-dd hh:nn:ss', Now) + ' knips: '
+        + AMessage + LineEnding;
+      FileWrite(Handle, Line[1], Length(Line));
+    finally
+      FileClose(Handle);
+    end;
+  except
+    // Nothing left to try, and nothing here is worth an exception.
+  end;
+end;
+
+// Every refusal in this unit reports through here — why Follow Mouse was
+// turned off for a recording, why the window list was empty — so a line
+// that goes nowhere makes those failures undiagnosable, which is exactly
+// what happened.
+//
+// NSLog alone is not enough, and the reason is measured on this machine
+// rather than assumed. FPC hands NSLog a *dynamic* NSString as the format,
+// so NSLog cannot take the compile-time os_log path; the unified log gets
+// the line with its whole payload redacted, and `log show` prints
+// `<private>` for every one of them — literal format strings included.
+// NSLog's other half, a write to fd 2, does survive (checked: it reaches a
+// redirected stderr, not only a terminal) — but a bundle launched from
+// Finder has fd 2 on /dev/null, and the bundle is how the app is actually
+// used. The file is therefore the channel that works in both, and NSLog
+// stays for the terminal, where it is the convenient one.
 procedure LogMessage(const AMessage: string);
 begin
   NSLog(PascalToNSString('knips: %@'), PascalToNSString(AMessage));
+  AppendToLogFile(AMessage);
+end;
+
+// Which half of the exclusion went wrong, for the message that reports it.
+// ScreenCaptureKit not having the frame in its window list at all and
+// ScreenCaptureKit having it and dropping it anyway are different faults
+// with different fixes, and the line is the only place they can be told
+// apart afterwards.
+function BorderVisibleNote(ABorderVisible: Boolean): string;
+begin
+  if ABorderVisible then
+    Result := ', though ScreenCaptureKit did list the frame'
+  else
+    Result := ', and ScreenCaptureKit never listed the frame';
 end;
 
 // Whether a window id was among the ones a recording asked to exclude.
@@ -1456,14 +1552,26 @@ begin
     PascalToNSString(SystemAudioKey));
 end;
 
-procedure TAppController.StoreLiveEffects;
-var
-  Defaults: NSUserDefaults;
+// One key each, and deliberately not one procedure writing both.
+//
+// The fields these come from are read once, at Setup, and never read
+// again; writing the pair on every toggle therefore writes one value the
+// user just chose and one that is however old this process is. Anything
+// that changed the other key in the meantime — a second Knips (the
+// installed app beside a development build both answer to
+// org.knips.app), or the `defaults write` that LoadPreferences already
+// treats as a public interface to these keys — is silently reverted by
+// the next toggle of its neighbour, and what the user sees is a
+// preference that would not stay switched on.
+procedure TAppController.StoreZoomOnClick;
 begin
-  Defaults := NSUserDefaults.standardUserDefaults;
-  Defaults.setBool_forKey(ObjCBOOL(FZoomOnClick),
+  NSUserDefaults.standardUserDefaults.setBool_forKey(ObjCBOOL(FZoomOnClick),
     PascalToNSString(ZoomOnClickKey));
-  Defaults.setBool_forKey(ObjCBOOL(FFollowMouse),
+end;
+
+procedure TAppController.StoreFollowMouse;
+begin
+  NSUserDefaults.standardUserDefaults.setBool_forKey(ObjCBOOL(FFollowMouse),
     PascalToNSString(FollowMouseKey));
 end;
 
@@ -1764,32 +1872,84 @@ begin
     FState := Next;
 end;
 
-function TAppController.ResolveDisplayIndex(ADisplayID: UInt32;
-  out AIndex: Integer; out AError: string): Boolean;
+// Both questions ScreenCaptureKit has to answer before a recording can
+// start, out of one query: which index the pending display sits at, and —
+// when there is a frame around the region — whether that frame has
+// reached the framework's window list yet.
+//
+// They are answered together because the query is the expensive part (40
+// to 60 ms, measured on device) and because the second question is on a
+// clock. The frame is a window created milliseconds earlier, and
+// SCShareableContent hands back a snapshot: a window the window server
+// has not published yet is simply absent from it, and an absent window
+// cannot be turned into the SCWindow that
+// SCContentFilter.initWithDisplay:excludingWindows: needs. That exclusion
+// is rule 2 in Knips.App.Border, and it is the only thing that keeps a
+// *panning* frame out of the file — proven by measurement: an unexcluded
+// frame that pans puts its own edges through the picture as full-width
+// red lines, while an unexcluded frame that stands still never does.
+// Losing it therefore costs the user Follow Mouse for the whole
+// recording, which is exactly how "Follow Mouse does nothing" is
+// produced.
+//
+// So a first snapshot without the frame in it is retried rather than
+// believed. The retry costs nothing in the ordinary case, where the
+// answer comes back on the first attempt.
+//
+// ABorderWindowID may be 0 — a display recording has no frame — and
+// ABorderVisible is then False and means nothing to anybody.
+function TAppController.ResolvePendingTarget(ADisplayID: UInt32;
+  ABorderWindowID: Cardinal; out AIndex: Integer;
+  out ABorderVisible: Boolean; out AError: string): Boolean;
 var
   Content: TShareableContent;
+  Window: Pointer;
+  Attempt: Integer;
 begin
   Result := False;
   AIndex := -1;
+  ABorderVisible := False;
   AError := '';
-  try
-    Content := TShareableContent.Create;
-  except
-    on E: EShareableContent do
-    begin
-      AError := E.Message;
-      Exit;
+  for Attempt := 1 to BorderVisibilityAttempts do
+  begin
+    try
+      Content := TShareableContent.Create;
+    except
+      on E: EShareableContent do
+      begin
+        // A later attempt only exists to look for the frame again; a
+        // query that worked once and then failed must not turn a good
+        // answer into an aborted recording. Keep what attempt 1 found.
+        if AIndex >= 0 then
+          Break;
+        AError := E.Message;
+        Exit;
+      end;
     end;
-  end;
-  try
-    AIndex := Content.IndexOfDisplayID(ADisplayID);
-    if AIndex < 0 then
-    begin
-      AError := Format('display %u is not capturable', [ADisplayID]);
-      Exit;
+    try
+      // Latch the first resolution; a display that drops out of a LATER
+      // snapshot (sleep, replug) stops the retries, not the recording.
+      if AIndex < 0 then
+        AIndex := Content.IndexOfDisplayID(ADisplayID);
+      if AIndex < 0 then
+      begin
+        AError := Format('display %u is not capturable', [ADisplayID]);
+        Exit;
+      end;
+      if ABorderWindowID <> 0 then
+      begin
+        Window := Pointer(Content.RetainWindow(ABorderWindowID));
+        if Window <> nil then
+        begin
+          NSObject(Window).release;
+          ABorderVisible := True;
+        end;
+      end;
+    finally
+      Content.Free;
     end;
-  finally
-    Content.Free;
+    if (ABorderWindowID = 0) or ABorderVisible then
+      Break;
   end;
   Result := True;
 end;
@@ -1935,7 +2095,7 @@ begin
   if not Transition(acToggleZoomOnClick) then
     Exit;
   FZoomOnClick := not FZoomOnClick;
-  StoreLiveEffects;
+  StoreZoomOnClick;
   RefreshStatusItem;
 end;
 
@@ -1944,7 +2104,7 @@ begin
   if not Transition(acToggleFollowMouse) then
     Exit;
   FFollowMouse := not FFollowMouse;
-  StoreLiveEffects;
+  StoreFollowMouse;
   RefreshStatusItem;
 end;
 
@@ -2039,8 +2199,12 @@ begin
     Exit;
   if not FSession.SupportsLiveUpdate then
   begin
-    LogMessage('this ScreenCaptureKit has no updateConfiguration:, so Zoom '
-      + 'on Click and Follow Mouse are off for this recording');
+    // RecordError rather than LogMessage, here and below: every one of
+    // these three lines says "the effect you switched on is not going to
+    // happen", and the user has no other way to find that out. None of
+    // them touches the state machine — the recording is fine.
+    RecordError('this ScreenCaptureKit has no updateConfiguration:, so '
+      + 'Zoom on Click and Follow Mouse are off for this recording');
     Exit;
   end;
 
@@ -2059,9 +2223,17 @@ begin
     else if Follow then
     begin
       Follow := False;
-      LogMessage('Follow Mouse is off for this recording: the frame around '
-        + 'the region was not excluded from the capture, and a region that '
-        + 'moves would record its own border');
+      // StartPending has just recorded the DETAILED exclusion message —
+      // which snapshot half failed — and this generic line must not
+      // overwrite it in the menu's single Last-error slot. Log it either
+      // way; put it in the menu only when the slot is free.
+      if FLastError = '' then
+        RecordError('Follow Mouse is off for this recording: the frame '
+          + 'around the region was not excluded from the capture, and a '
+          + 'region that moves would record its own frame')
+      else
+        LogMessage('Follow Mouse is off for this recording: the frame '
+          + 'around the region was not excluded from the capture');
     end;
   end;
   if not Zoom and not Follow then
@@ -2073,8 +2245,8 @@ begin
     DisplayID := CGMainDisplayID;
   if not ScreenFrameForDisplayID(DisplayID, ScreenFrame) then
   begin
-    LogMessage('the recorded display has no NSScreen, so Zoom on Click and '
-      + 'Follow Mouse are off for this recording');
+    RecordError('the recorded display has no NSScreen, so Zoom on Click '
+      + 'and Follow Mouse are off for this recording');
     Exit;
   end;
 
@@ -2159,7 +2331,7 @@ var
   Error: string;
   DisplayIndex: Integer;
   BorderWindowID: Cardinal;
-  LiveZoom, LiveFollow: Boolean;
+  LiveZoom, LiveFollow, BorderVisible: Boolean;
 begin
   if FState <> asRecording then
     Exit;
@@ -2174,9 +2346,22 @@ begin
     RefreshStatusItem;
     Exit;
   end;
+  // The frame goes up *before* the ScreenCaptureKit query rather than
+  // after it, and the order is the fix for a real failure rather than
+  // tidiness. Its window id is what StartCapture hands to
+  // initWithDisplay:excludingWindows:, and the framework can only give
+  // out an SCWindow for a window it has already seen. Putting the frame
+  // up first means a whole query — tens of milliseconds, and a genuine
+  // round trip through the window server — passes before the snapshot
+  // that has to contain it is taken. ResolvePendingTarget then confirms
+  // that it does.
+  BorderWindowID := ShowBorderForPending;
+  BorderVisible := False;
   if (FPendingDisplayID <> 0)
-    and not ResolveDisplayIndex(FPendingDisplayID, DisplayIndex, Error) then
+    and not ResolvePendingTarget(FPendingDisplayID, BorderWindowID,
+    DisplayIndex, BorderVisible, Error) then
   begin
+    HideBorder;
     Transition(acCaptureFailed);
     RecordError(Error);
     RefreshStatusItem;
@@ -2201,11 +2386,9 @@ begin
   ResolveLiveEffects(Options.TargetKind, Options.HasRegion, FZoomOnClick,
     FFollowMouse, LiveZoom, LiveFollow);
   Options.LiveSourceRect := LiveZoom or LiveFollow;
-  // The border has to exist before the content filter is built: its
-  // window id is what StartCapture hands to
-  // initWithDisplay:excludingWindows:. The frame is stroked outside the
-  // region either way, so a failed exclusion still cannot reach the file.
-  BorderWindowID := ShowBorderForPending;
+  // The frame is stroked outside the region either way, so a failed
+  // exclusion still cannot reach the file while the region stands still;
+  // it is a *moving* region that needs this list to have worked.
   if BorderWindowID <> 0 then
   begin
     SetLength(Options.ExcludedWindowIDs, 1);
@@ -2250,10 +2433,27 @@ begin
   // the first thing worth knowing if a border ever does turn up in a
   // file, and silence would make that unfindable.
   if Length(Options.ExcludedWindowIDs) > FSession.Report.ExcludedWindows then
-    LogMessage(Format('the recording border was not excluded from the '
-      + 'capture (%d of %d windows resolved); the frame is drawn outside '
-      + 'the recorded region, so the file is unaffected',
-      [FSession.Report.ExcludedWindows, Length(Options.ExcludedWindowIDs)]));
+  begin
+    // RecordError, not LogMessage — but only when a live effect asked
+    // for the exclusion: this is the one thing that turns Follow Mouse
+    // off underneath a user who asked for it, and a message the user
+    // cannot see is how that stayed a mystery. For a still recording the
+    // frame is drawn outside the rectangle and nothing is wrong, so the
+    // menu stays quiet and the line goes to the log alone. Never a Fail
+    // either way.
+    if LiveFollow then
+      RecordError(Format('the recording frame was not excluded from the '
+        + 'capture (%d of %d windows resolved%s); the frame is drawn '
+        + 'outside the recorded region, so a still recording is unaffected',
+        [FSession.Report.ExcludedWindows, Length(Options.ExcludedWindowIDs),
+        BorderVisibleNote(BorderVisible)]))
+    else
+      LogMessage(Format('the recording frame was not excluded from the '
+        + 'capture (%d of %d windows resolved%s); the frame is drawn '
+        + 'outside the recorded region, so the file is unaffected',
+        [FSession.Report.ExcludedWindows, Length(Options.ExcludedWindowIDs),
+        BorderVisibleNote(BorderVisible)]));
+  end;
 
   // After the capture is running, because the animator needs the
   // session's own base rectangle and a stream to send updates to.

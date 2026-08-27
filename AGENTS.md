@@ -122,7 +122,11 @@ no `{$IFDEF DARWIN}` at all and are tested on every host.
 - Never commit generated state: `build/`, `.lwpt/tmp/`, `.lwpt/sessions/`,
   `.lwpt/session-roots`, `.lwpt/install.lock`.
 - `record` writes to the path given and replaces an existing file without
-  asking; `probe` writes and deletes `$TMPDIR/knips-probe.mp4`.
+  asking; `probe` writes and deletes `$TMPDIR/knips-probe.mp4`. The
+  menu-bar app appends its diagnostics to `~/Library/Logs/Knips.log`,
+  capped at 1 MB and started over rather than rotated — `NSLog` alone is
+  unreadable from a bundle (see [docs/architecture.md](docs/architecture.md),
+  "Errors").
 - macOS permissions (Screen Recording, and Camera for the menu-bar app's
   camera window) are per-binary; a fresh build re-prompts. A bundle that
   uses the camera must carry `NSCameraUsageDescription` or macOS kills

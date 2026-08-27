@@ -664,6 +664,28 @@ through `SanitizeStoredRegion`, because `defaults write` is a public
 interface and these keys are not private state: a negative origin would
 otherwise land in ScreenCaptureKit's `sourceRect` unexamined.
 
+**Each toggle writes its own key, and only its own.** The three checkbox
+fields are read once, at `Setup`, and never read again, so a procedure
+that wrote `KnipsZoomOnClick` and `KnipsFollowMouse` together — as one
+did — wrote one value the user had just chosen and one that was however
+old the process was. Anything that had changed the other key meanwhile
+was silently reverted by the next toggle of its neighbour: the
+`defaults write` the paragraph above already treats as a public
+interface, or a second Knips, which is not exotic at all — the installed
+bundle and a development build both answer to `org.knips.app`. Measured:
+with the paired write, an external `KnipsFollowMouse=1` is back to `0`
+one *Zoom on Click* click later; with `StoreZoomOnClick` and
+`StoreFollowMouse` separate, it survives. What that looked like from
+outside was a preference that would not stay switched on — and, because
+Follow Mouse then really was off, a region recording that did not pan.
+
+Note what is *not* covered by this, because it is the one setting that
+still needs a clean exit: the camera window's position (below, under
+*The camera window*) is written by `TCameraPreview.Hide`, so it
+survives switching the camera off or quitting from the menu, and is lost
+to a force quit, a log-out or a `kill`. Every other remembered setting is
+written the moment it changes.
+
 **The click.** Idle, the status item has its menu; recording, the menu is
 detached and the button's action is `stopRecording:`, so a single click
 stops — Kap's gesture. An `NSTimer` on `KnipsAppTarget` rewrites the
@@ -762,8 +784,8 @@ is no next turn to defer to.
 `Knips.App` and `Knips.App.Overlay` is wrapped in `try..except`. There
 is no Objective-C frame that could unwind a Pascal exception, and AppKit's
 drawing, event dispatch and run loop all sit above these bodies. What is
-caught becomes a message on the same NSLog + "Last error" path, and the
-method returns normally.
+caught becomes a message on the same NSLog + log file + "Last error"
+path, and the method returns normally.
 
 **The camera window.** *Camera* puts a 240×180 borderless window at
 `kCGFloatingWindowLevel` on screen, its content view hosting an
@@ -844,9 +866,29 @@ scale until it is switched off and on again; tracking it would mean an
 class and another owner ivar — for something one menu click fixes.
 
 **Errors.** A failed capture — a denied Screen Recording grant is the
-common one — goes to `NSLog` and to a disabled `Last error: …` menu item,
-and the app returns to idle. It never retries and never opens a dialog.
-The camera's failures take the same two outputs but *not* the transition:
+common one — goes to `NSLog`, to `~/Library/Logs/Knips.log`, and to a
+disabled `Last error: …` menu item, and the app returns to idle. It never
+retries and never opens a dialog.
+
+The log file is not belt-and-braces; `NSLog` alone reaches nobody here.
+FPC hands `NSLog` a *dynamic* `NSString` as its format string, so the
+call cannot take the compile-time `os_log` path, and the unified log
+stores every one of these lines with its payload redacted — `log show`
+prints `<private>`, literal format strings included (measured on device).
+`NSLog`'s other half, a write to fd 2, does survive a redirect as well as
+a terminal, but a bundle launched from Finder has fd 2 on `/dev/null`,
+and the bundle is how the app is used. `LogMessage` therefore appends to
+`~/Library/Logs/Knips.log` — the conventional place, listed by
+Console.app — and keeps `NSLog` for the terminal. The file is started
+over rather than rotated once it passes 1 MB.
+
+Anything that switches a recording *setting* off for one recording takes
+the same three outputs, and that is a change of policy rather than of
+plumbing: those messages used to go to `NSLog` only. A user who turned
+Follow Mouse on and got a recording that did not pan had no way at all to
+find out why.
+
+The camera's failures take the same three outputs but *not* the transition:
 `HandleCameraError` records and refreshes, where `Fail` would also drive
 `acCaptureFailed` and knock a live recording to idle over a preview layer.
 
@@ -1096,10 +1138,34 @@ timing-dependent.** Proven on device by recording a 200-point pan twice,
 with 138 border moves in lockstep with 41 source-rectangle updates:
 with the exclusion, **0** border-red pixels in all 141 frames; with the
 exclusion deliberately switched off, **665 792** red pixels across the
-run and 2 560 in the worst single frame. That is why Follow Mouse is
-*refused* for a recording whose border did not reach the content filter
-— the app logs why and records with a fixed region rather than a frame
-that keeps sliding into shot.
+run and 2 560 in the worst single frame. Re-measured since, on the app's
+own paths and counting *lines* rather than pixels — a border edge in the
+file is a full-width or full-height red run four pixels deep at 2x, which
+screen content never is: with the exclusion, 0 such lines in the first 30
+frames of a heavily panning region recording (drag path and Record Last
+Region both); with the exclusion off and Follow Mouse forced on anyway,
+22 of the first 30 frames carry them. With the exclusion off and the pan
+refused as it normally is, 0 again — a *still* frame never leaks, which
+is rule 1 doing its job. That is why Follow Mouse is *refused* for a
+recording whose border did not reach the content filter — the app says so
+on the `Last error: …` line and records with a fixed region rather than a
+frame that keeps sliding into shot.
+
+**Getting the border into the content filter is therefore load-bearing,
+and it is on a clock.** `SCShareableContent` hands back a snapshot, and
+the frame is a window created milliseconds earlier: a window the window
+server has not published yet is simply absent, an absent window cannot
+become the `SCWindow` that `initWithDisplay:excludingWindows:` needs, and
+the user loses Follow Mouse for the recording without being told. Two
+things close that. `StartPending` puts the frame up **before** the
+display-resolution query rather than after it, so a whole
+ScreenCaptureKit round trip — 40 to 60 ms, measured — passes before the
+snapshot that has to contain it is taken. And that query,
+`ResolvePendingTarget`, answers both questions at once and retries up to
+`BorderVisibilityAttempts` (three) times while the frame is missing, so a
+first snapshot taken too early is re-asked rather than believed. The
+retry costs nothing in the ordinary case: on this machine the frame is in
+the first snapshot every time, 43 to 64 ms after `orderFrontRegardless`.
 
 "The border was excluded" is read conservatively, and not as a
 count-above-zero: the report says how many of the requested ids resolved,

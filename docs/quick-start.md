@@ -80,7 +80,7 @@ A `◉` appears in the menu bar. Clicking it opens:
 | Follow Mouse (region) | A checkbox. On, a **region** recording pans to keep the pointer inside the middle third of the frame; the red frame moves with it. Whole-display and window recordings ignore it — a display has nowhere to pan. Remembered between launches; not changeable mid-recording. |
 | Record System Audio | A checkbox. On, recordings get an AAC track of the system mix. Remembered between launches; not changeable mid-recording. |
 | Recordings folder | Opens `~/Movies/knips/` in Finder. |
-| Last error: … | Only visible after a failure; the full text is in Console.app. |
+| Last error: … | Only visible after a failure, and after anything that switched a recording setting off for one recording; the full text is in `~/Library/Logs/Knips.log`. |
 | Quit Knips | Stops a running recording first. |
 
 While recording the title reads `⏺ 0:07` and ticks once a second, and the
@@ -118,7 +118,8 @@ that stops the recording, which would otherwise end every full-screen
 capture by zooming into the top corner.
 
 Two things switch the effects off for a single recording rather than
-failing it, both reported on the `Last error: …` line and in Console.app.
+failing it, both reported on the `Last error: …` line and in
+`~/Library/Logs/Knips.log`.
 If the red frame around a region could not be excluded from the capture,
 Follow Mouse is refused rather than record its own frame sliding into
 shot. And if ScreenCaptureKit refuses five source-rectangle changes in a
