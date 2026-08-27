@@ -58,6 +58,7 @@ uses
   Knips.ObjC.Runtime,
   Knips.Options,
   Knips.Recording,
+  Knips.Recording.CursorMath,
   Knips.Recording.LiveMath,
   MacOSAll;
 
@@ -130,6 +131,7 @@ const
   RestoreCameraSelector = 'restoreCamera:';
   ToggleZoomOnClickSelector = 'toggleZoomOnClick:';
   ToggleFollowMouseSelector = 'toggleFollowMouse:';
+  ToggleBigCursorSelector = 'toggleBigCursor:';
   // The live animator's 30 Hz tick while a recording with Zoom on Click
   // or Follow Mouse is running. On the same target as everything else, so
   // the feature adds no runtime-built class of its own.
@@ -207,6 +209,7 @@ const
   LegacySystemAudioKey = LegacySystemAudioDefaultsKey;
   ZoomOnClickKey = ZoomOnClickDefaultsKey;
   FollowMouseKey = FollowMouseDefaultsKey;
+  BigCursorKey = BigCursorDefaultsKey;
   LastRegionDisplayKey = 'KnipsLastRegionDisplay';
   LastRegionLeftKey = 'KnipsLastRegionLeft';
   LastRegionTopKey = 'KnipsLastRegionTop';
@@ -283,6 +286,7 @@ type
     FMicrophoneItem: NSMenuItem;
     FZoomOnClickItem: NSMenuItem;
     FFollowMouseItem: NSMenuItem;
+    FBigCursorItem: NSMenuItem;
     FStopItem: NSMenuItem;
     FCancelItem: NSMenuItem;
     FRevealItem: NSMenuItem;
@@ -337,6 +341,7 @@ type
     FSupportsMicrophone: Boolean;
     FZoomOnClick: Boolean;
     FFollowMouse: Boolean;
+    FBigCursor: Boolean;
     FHasLastRegion: Boolean;
     FLastRegionDisplayID: UInt32;
     FLastRegion: TCaptureRegion;
@@ -359,6 +364,7 @@ type
     procedure StoreMicrophone;
     procedure StoreZoomOnClick;
     procedure StoreFollowMouse;
+    procedure StoreBigCursor;
     procedure StoreLastRegion;
     procedure ClearPending;
     // Starts the live animator and its timer for the recording that has
@@ -435,6 +441,7 @@ type
     procedure CommandToggleMicrophone;
     procedure CommandToggleZoomOnClick;
     procedure CommandToggleFollowMouse;
+    procedure CommandToggleBigCursor;
     procedure CommandStop;
     procedure CommandCancelSelection;
     procedure CommandRevealRecordings;
@@ -730,6 +737,22 @@ begin
   except
     on E: Exception do
       HandleBodyException(Controller, ToggleFollowMouseSelector, E);
+  end;
+end;
+
+procedure TargetToggleBigCursor(ASelf: id; ACommand: SEL;
+  ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandToggleBigCursor;
+  except
+    on E: Exception do
+      HandleBodyException(Controller, ToggleBigCursorSelector, E);
   end;
 end;
 
@@ -1053,6 +1076,8 @@ begin
       @TargetToggleZoomOnClick);
     AddTargetMethod(Builder, ToggleFollowMouseSelector,
       @TargetToggleFollowMouse);
+    AddTargetMethod(Builder, ToggleBigCursorSelector,
+      @TargetToggleBigCursor);
     AddTargetMethod(Builder, LiveTickSelector, @TargetLiveTick);
     AddTargetMethod(Builder, CameraRideSelector, @TargetCameraRideTick);
     AddTargetMethod(Builder, MenuNeedsUpdateSelector, @TargetMenuNeedsUpdate);
@@ -1506,6 +1531,11 @@ begin
     ToggleZoomOnClickSelector);
   FFollowMouseItem := AddMenuItem(FollowMouseMenuTitle,
     ToggleFollowMouseSelector);
+  // Big Cursor belongs with them and is idle-only for a plainer reason:
+  // the drawn pointer replaces ScreenCaptureKit's own, which is part of
+  // the configuration the capture started with.
+  FBigCursorItem := AddMenuItem(BigCursorMenuTitle,
+    ToggleBigCursorSelector);
   // A submenu item carries no action of its own, exactly like Record
   // Window; the two checkboxes inside carry their own selectors.
   FAudioItem := AddMenuItem(AudioMenuTitle, '');
@@ -1758,6 +1788,7 @@ begin
   // that has never been written — no registerDefaults: needed.
   FZoomOnClick := Defaults.boolForKey(PascalToNSString(ZoomOnClickKey));
   FFollowMouse := Defaults.boolForKey(PascalToNSString(FollowMouseKey));
+  FBigCursor := Defaults.boolForKey(PascalToNSString(BigCursorKey));
   FLastRegionDisplayID := UInt32(Defaults.integerForKey(
     PascalToNSString(LastRegionDisplayKey)));
   Stored.Left := Integer(Defaults.integerForKey(
@@ -1822,6 +1853,14 @@ procedure TAppController.StoreFollowMouse;
 begin
   NSUserDefaults.standardUserDefaults.setBool_forKey(ObjCBOOL(FFollowMouse),
     PascalToNSString(FollowMouseKey));
+end;
+
+// Its own key and its own writer, for the third time and for the same
+// incident. Nothing here reads or writes any other preference.
+procedure TAppController.StoreBigCursor;
+begin
+  NSUserDefaults.standardUserDefaults.setBool_forKey(ObjCBOOL(FBigCursor),
+    PascalToNSString(BigCursorKey));
 end;
 
 procedure TAppController.StoreLastRegion;
@@ -2217,6 +2256,8 @@ begin
   FZoomOnClickItem.setState(MenuCheckState(FZoomOnClick));
   FFollowMouseItem.setEnabled(IsCommandEnabled(FState, acToggleFollowMouse));
   FFollowMouseItem.setState(MenuCheckState(FFollowMouse));
+  FBigCursorItem.setEnabled(IsCommandEnabled(FState, acToggleBigCursor));
+  FBigCursorItem.setState(MenuCheckState(FBigCursor));
   FStopItem.setEnabled(IsCommandEnabled(FState, acStopRecording));
   FCancelItem.setEnabled(IsCommandEnabled(FState, acCancelSelection));
 
@@ -2609,6 +2650,19 @@ begin
   RefreshStatusItem;
 end;
 
+// Idle-only too, and for the plainest version of the same reason: the
+// drawn pointer replaces ScreenCaptureKit's own, which is settled in the
+// configuration the capture started with, and its sprite is rendered
+// before the first frame arrives.
+procedure TAppController.CommandToggleBigCursor;
+begin
+  if not Transition(acToggleBigCursor) then
+    Exit;
+  FBigCursor := not FBigCursor;
+  StoreBigCursor;
+  RefreshStatusItem;
+end;
+
 procedure TAppController.CommandExportGif;
 begin
   if FPlayback = nil then
@@ -2899,6 +2953,16 @@ begin
   ResolveLiveEffects(Options.TargetKind, Options.HasRegion, FZoomOnClick,
     FFollowMouse, LiveZoom, LiveFollow);
   Options.LiveSourceRect := LiveZoom or LiveFollow;
+  // Big Cursor, resolved rather than passed straight through: the
+  // preference is global and a window recording cannot have one, and
+  // ValidateRecordingOptions *refuses* that combination rather than
+  // ignoring it — so handing it over unresolved would turn a checkbox
+  // the user left ticked into a recording that will not start.
+  Options.BigCursor := ResolveBigCursor(Options.TargetKind, FBigCursor);
+  if FBigCursor and not Options.BigCursor then
+    LogMessage('Big Cursor is off for this recording: a window capture '
+      + 'has no fixed relationship to the screen the pointer is '
+      + 'measured against');
   // The frame is stroked outside the region either way, so a failed
   // exclusion still cannot reach the file while the region stands still;
   // it is a *moving* region that needs this list to have worked.
@@ -2949,6 +3013,14 @@ begin
     RefreshStatusItem;
     Exit;
   end;
+
+  // A sprite that could not be made costs the user the checkbox they
+  // ticked, so it is said out loud rather than logged: the recording is
+  // running and keeps the ordinary system pointer, which is a good
+  // outcome and an invisible one.
+  if FSession.Report.BigCursorError <> '' then
+    RecordError('Big Cursor is off for this recording: '
+      + FSession.Report.BigCursorError);
 
   // The frame is drawn outside the recorded rectangle either way, so a
   // window ScreenCaptureKit did not resolve is not a failure — but it is

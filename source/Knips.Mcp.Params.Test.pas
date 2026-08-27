@@ -76,6 +76,7 @@ type
     procedure TestRejectsUnknownAudioMode;
     procedure TestScaleAutoAndInteger;
     procedure TestCursorFlag;
+    procedure TestBigCursorFlag;
     procedure TestValidationStillApplies;
     procedure TestRejectsBadOutputExtension;
     procedure TestRejectsNegativeDisplayIndex;
@@ -505,6 +506,7 @@ begin
   Test('an unknown audio mode is refused', TestRejectsUnknownAudioMode);
   Test('scale takes auto or an integer', TestScaleAutoAndInteger);
   Test('the cursor can be turned off', TestCursorFlag);
+  Test('a big cursor can be asked for', TestBigCursorFlag);
   Test('the shared validation still applies',
     TestValidationStillApplies);
   Test('a non-movie out extension is refused',
@@ -647,6 +649,33 @@ var
 begin
   Expect<Boolean>(Build('{"cursor": false}', Recording, Error)).ToBe(True);
   Expect<Boolean>(Recording.ShowsCursor).ToBe(False);
+end;
+
+procedure TRecordingArgumentTests.TestBigCursorFlag;
+var
+  Recording: TRecordingOptions;
+  Error: string;
+begin
+  // Absent means off, and off is what every recording made before this
+  // argument existed got.
+  Expect<Boolean>(Build('{}', Recording, Error)).ToBe(True);
+  Expect<Boolean>(Recording.BigCursor).ToBe(False);
+  Expect<Boolean>(Build('{"big_cursor": true}', Recording, Error)).ToBe(True);
+  Expect<Boolean>(Recording.BigCursor).ToBe(True);
+  Expect<Boolean>(Recording.ShowsCursor).ToBe(True);
+  // The two cursor arguments contradict each other. The builder hands
+  // back the shared message in the CLI's words — Knips.Mcp rewrites it
+  // at the one boundary where every failure becomes an MCP result — so
+  // what is checked here is that the rewrite has both flags to work
+  // from and leaves an agent nothing it has never seen.
+  Expect<Boolean>(Build('{"big_cursor": true, "cursor": false}', Recording,
+    Error)).ToBe(False);
+  Expect<string>(McpArgumentMessage(Error))
+    .ToBe('cursor and big_cursor are mutually exclusive');
+  // A window recording cannot have one; the reason travels unchanged.
+  Expect<Boolean>(Build('{"big_cursor": true, "window": 42}', Recording,
+    Error)).ToBe(False);
+  Expect<Boolean>(Pos('display recordings only', Error) > 0).ToBe(True);
 end;
 
 procedure TRecordingArgumentTests.TestValidationStillApplies;

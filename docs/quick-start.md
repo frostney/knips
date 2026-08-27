@@ -14,6 +14,9 @@
   **Zoom on Click** (a click zooms the recording around it) and **Follow
   Mouse** (a region recording pans with the pointer). Neither changes the
   file's dimensions.
+- **Big Cursor** draws an enlarged pointer into the recording instead of
+  capturing the system one, so it survives into a GIF or an APNG. Also
+  `knips record --big-cursor`.
 - `./build/knips export --in=demo.mp4 --out=demo.gif` turns the
   recording into an animated GIF, optionally trimmed and scaled;
   `--out=demo.apng` writes truecolour APNG instead, and `--out=cut.mp4
@@ -82,6 +85,7 @@ A `◉` appears in the menu bar. Clicking it opens:
 | Circular Camera | A checkbox. On, the camera window is a circle instead of a rounded rectangle. Applies to the window on screen straight away and is remembered between launches. |
 | Zoom on Click | A checkbox. On, a click inside the recorded area zooms the *recording* to 2× around the click, holds for 0.8 s after the last click, and eases back. Nothing on screen moves — only what the file shows. Remembered between launches; not changeable mid-recording. |
 | Follow Mouse (region) | A checkbox. On, a **region** recording pans to keep the pointer inside the middle third of the frame; the red frame moves with it. Whole-display and window recordings ignore it — a display has nowhere to pan. Remembered between launches; not changeable mid-recording. |
+| Big Cursor | A checkbox. On, the pointer is drawn into the recording at two and a half times its size and the system one is left out. Nothing on screen changes — only what the file shows — and because it is part of the picture, a GIF or APNG export keeps it. Window recordings ignore it. Remembered between launches; not changeable mid-recording. |
 | Audio ▸ | Two independent checkboxes, **System Audio** and **Microphone**. Tick either, both, or neither: each ticked source becomes its own AAC track in the file. Remembered between launches; not changeable mid-recording. |
 | Recordings folder | Opens `~/Movies/knips/` in Finder. |
 | Last error: … | Only visible after a failure, and after anything that switched a recording setting off for one recording; the full text is in `~/Library/Logs/Knips.log`. |
@@ -162,6 +166,18 @@ can go. Window recordings get neither. With both on they compose — the
 frame follows the pointer, and a click zooms inside wherever the frame
 has got to.
 
+**Big Cursor.** A third checkbox in the same group, and the only one that
+changes the picture rather than the framing: the system pointer is left
+out of the capture and an enlarged arrow is drawn into every frame in its
+place. The drawn pointer is always the arrow — it does not become an
+I-beam over text or a hand over a link the way the real one does. It is part of the video, so it survives a GIF or APNG export —
+which the system pointer also does, only at its ordinary size. It tracks
+a zoom or a pan (it is placed against whatever rectangle is being
+captured at that instant) but does not grow with one; a window recording
+ignores it, because a window's frames have no fixed relationship to the
+screen the pointer is measured against. Off by default and greyed out
+while a recording runs.
+
 Clicks on the menu bar never zoom — including the one on the Knips icon
 that stops the recording, which would otherwise end every full-screen
 capture by zooming into the top corner.
@@ -212,9 +228,10 @@ defaults do not cover — a different rate, a width, a trim — use
 `knips export` (below).
 
 **Remembered settings.** The two Audio checkboxes, Zoom on Click, Follow
-Mouse and the last region live in `NSUserDefaults` under
+Mouse, Big Cursor and the last region live in `NSUserDefaults` under
 `KnipsAudioSystem`, `KnipsAudioMicrophone`, `KnipsZoomOnClick`,
-`KnipsFollowMouse` and `KnipsLastRegion*`. `KnipsRecordSystemAudio` is
+`KnipsFollowMouse`, `KnipsBigCursor` and `KnipsLastRegion*`.
+`KnipsRecordSystemAudio` is
 the key the single old checkbox used; it is read once, only when
 `KnipsAudioSystem` has never been written, and is never written again.
 The bare binary and `Knips.app` keep separate domains (`knips` versus the
@@ -386,6 +403,8 @@ knips record --out=<file>       .mp4 or .mov (required; replaced if present)
               [--fps=N]          1–120 (default 30)
               [--scale=auto|1|2] pixels per point (default auto)
               [--no-cursor]      hide the pointer
+              [--big-cursor]     draw an enlarged pointer into the frames;
+                                 display targets only, not with --no-cursor
               [--bitrate=N]      average bits/s (default derived from size × fps)
               [--audio=none|system|mic|both]
                                  one AAC track per source (default none)
@@ -429,7 +448,7 @@ the built binary with one argument:
 | --- | --- | --- |
 | `list_displays` | — | index, size in points, backing scale, which is main |
 | `list_windows` | — | window id, size, application, title |
-| `record_start` | `out?`, `overwrite?`, `display?`, `window?`, `left`/`top`/`width`/`height`?, `fps?`, `scale?`, `audio?`, `cursor?`, `bitrate?` | the path, pixel size, and frame rate it started at |
+| `record_start` | `out?`, `overwrite?`, `display?`, `window?`, `left`/`top`/`width`/`height`?, `fps?`, `scale?`, `audio?`, `cursor?`, `big_cursor?`, `bitrate?` | the path, pixel size, and frame rate it started at |
 | `record_stop` | — | the path, duration, frame counters, bytes |
 | `record_status` | — | whether it is recording, elapsed seconds, frames so far |
 | `export_gif` | `in`, `out?`, `fps?`, `width?`, `trim_start?`, `trim_end?`, `dither?` | the path, pixel size, frames, bytes |

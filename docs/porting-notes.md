@@ -105,6 +105,19 @@ anything sends it: an unrecognised selector is an Objective-C exception
 no Pascal handler can catch, and this one would be sent into a live
 recording thirty times a second.
 
+### Two CoreVideo checks for Big Cursor
+
+Big Cursor writes into the frame's `CVPixelBuffer` on the capture queue,
+so it needs the buffer to be what the stream configuration asked for
+rather than assumed to be. `CVPixelBufferGetPixelFormatType` and
+`CVPixelBufferIsPlanar` went into the CoreMedia unit's `knips additions`
+banner beside the lock/base-address/stride calls that were already
+carried; both are plain C functions with the same `CVPixelBufferRef`
+first argument as their neighbours. Nothing else about that unit
+changed. A wrong assumption here is a write into somebody else's memory,
+not a wrong colour, which is why it is checked on every frame rather than
+once (`Knips.Recording.CursorOverlay.DrawInto`).
+
 ### The rename reached the vendored units too
 
 The project shipped its first milestones under the name *opname*, and the

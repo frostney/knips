@@ -160,6 +160,18 @@ type
     // the last NSError code seen — which is process-wide and therefore
     // only meaningful when LiveUpdatesFailed is above zero.
     property LiveUpdatesSent: Int64 read FLiveUpdatesSent;
+    // The rectangle ScreenCaptureKit was last *told* to read, which is
+    // not always the one the caller last asked for: a request inside the
+    // epsilon, or one that arrived while an update was in flight, is
+    // dropped and leaves this alone. Big Cursor places its sprite from
+    // this rather than from the request, so the drawn pointer sits where
+    // the capture actually is (Knips.Recording.CursorOverlay).
+    //
+    // Main-thread only, like every other reader of the update machinery,
+    // and meaningless before the first send: HasSentRect says whether
+    // there has been one.
+    property LastSentRect: CGRect read FLastSentRect;
+    property HasSentRect: Boolean read FHasSentRect;
     function LiveUpdatesCompleted: Int64;
     function LiveUpdatesFailed: Int64;
     function LiveUpdateErrorCode: NSInteger;

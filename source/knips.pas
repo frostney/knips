@@ -5,7 +5,7 @@ program knips;
 //   knips app                   menu-bar app: drag a region, click to stop
 //   knips record --out=demo.mp4 [--display=N | --window=ID] [--rect=x,y,w,h]
 //                 [--fps=30] [--scale=auto|1|2] [--no-cursor] [--bitrate=N]
-//                 [--audio=none|system|mic|both]
+//                 [--audio=none|system|mic|both] [--big-cursor]
 //   knips export --in=demo.mp4 --out=demo.gif|.apng [--fps=20] [--width=N]
 //                 [--trim=start,end] [--no-dither]
 //   knips export --in=demo.mp4 --out=cut.mp4 --trim=1.5,3.5
@@ -48,6 +48,7 @@ uses
   Knips.Export.Pipeline,
   Knips.ObjC.Runtime,
   Knips.Recording,
+  Knips.Recording.CursorOverlay,
   {$ENDIF}
   Knips.Mcp,
   Knips.Options;
@@ -120,6 +121,7 @@ begin
     DefaultFramesPerSecond);
   ARecording.BitRate := IntegerValue(AOptions, 'bitrate', 0);
   ARecording.ShowsCursor := not FlagPresent(AOptions, 'no-cursor');
+  ARecording.BigCursor := FlagPresent(AOptions, 'big-cursor');
 
   Scale := LowerCase(StringValue(AOptions, 'scale', 'auto'));
   if Scale = 'auto' then
@@ -213,6 +215,7 @@ var
   Session: TRecordingSession;
   Error: string;
   Audio: string;
+  Cursor: string;
 begin
   if not BuildRecordingOptions(AOptions, Recording, Error) then
   begin
@@ -244,11 +247,20 @@ begin
         Session.Report.DroppedMicrophoneEarly,
         Session.Report.DroppedMicrophoneStalled,
         Session.Report.FailedMicrophoneAppends]);
-    WriteLn(Format('wrote %s: %dx%d, %.1fs, %d frames (%d dropped, %d failed)%s',
+    // Big Cursor's own totals. "Off frame" is not a fault — the pointer
+    // was somewhere this recording does not show — but a refusal is, so
+    // it is named rather than folded into the frame count.
+    Cursor := '';
+    if Session.Report.BigCursor then
+      Cursor := Format(
+        ', big cursor on %d frames (%d off frame, %d refused)',
+        [Session.Report.CursorFrames, Session.Report.CursorOffFrame,
+        Session.Report.CursorRefused]);
+    WriteLn(Format('wrote %s: %dx%d, %.1fs, %d frames (%d dropped, %d failed)%s%s',
       [Session.Report.OutputPath, Session.Report.PixelWidth,
       Session.Report.PixelHeight, Session.Report.DurationSeconds,
       Session.Report.AppendedFrames, Session.Report.DroppedFrames,
-      Session.Report.FailedAppends, Audio]));
+      Session.Report.FailedAppends, Cursor, Audio]));
     Result := ExitOk;
   finally
     Session.Free;
@@ -523,6 +535,7 @@ var
   Instance: id;
   Content: TShareableContent;
   Writer: TMovieWriter;
+  SpriteWidth, SpriteHeight, HotSpotX, HotSpotY: Integer;
   Error: string;
   Detail: string;
   TempPath: string;
@@ -680,6 +693,19 @@ begin
     WriteLn('live source-rect updates: unavailable (Zoom on Click and '
       + 'Follow Mouse will be off)');
 
+  // Big Cursor's one framework dependency, exercised rather than
+  // assumed: the sprite is made from NSCursor's own image, and without
+  // an NSApplication +arrowCursor answers nil (measured). Rendering it
+  // here is what turns "the pointer did not come out" into a line
+  // printed before anything is recorded. Informational, like the two
+  // above: a recording falls back to the system pointer instead.
+  if ProbeCursorSprite(SpriteWidth, SpriteHeight, HotSpotX, HotSpotY,
+    Error) then
+    WriteLn(Format('big cursor: sprite %dx%d px, hot spot %d,%d',
+      [SpriteWidth, SpriteHeight, HotSpotX, HotSpotY]))
+  else
+    WriteLn('big cursor: unavailable (', Error, ')');
+
   try
     Content := TShareableContent.Create;
     try
@@ -783,7 +809,7 @@ end;
 // Option objects are owned by the registry once the subcommand is added.
 function RecordOptions: TOptionArray;
 begin
-  SetLength(Result, 9);
+  SetLength(Result, 10);
   Result[0] := TStringOption.Create('out',
     'Output file; .mp4 or .mov (required)');
   Result[1] := TIntegerOption.Create('display',
@@ -804,6 +830,8 @@ begin
   Result[8] := TStringOption.Create('audio',
     Format('Record audio: none, system, mic, or both (default %s)',
     [AudioModeName(amNone)]));
+  Result[9] := TFlagOption.Create('big-cursor',
+    'Draw an enlarged pointer into the frames; display targets only');
 end;
 
 function ExportOptions: TOptionArray;

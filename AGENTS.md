@@ -52,6 +52,7 @@ lwpt format --check   # formatter gate (no flag = rewrite in place)
 
 ./build/knips probe                     # toolchain verification (macOS)
 ./build/knips record --out=demo.mp4     # record; Ctrl-C stops
+./build/knips record --out=demo.mp4 --big-cursor   # draw an enlarged pointer
 ./build/knips app                       # menu-bar app; drag a region, click to stop
 ./build/knips mcp                       # MCP server on stdin/stdout; EOF stops
 tools/make-app.sh                        # wrap the built binary in build/Knips.app
@@ -71,6 +72,8 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | `source/Knips.App.Live.pas` | Zoom on Click / Follow Mouse: a main-thread animator on the app's 30 Hz timer that moves the stream's `sourceRect`, the recording border and a docked camera |
 | `source/Knips.App.Hotkey.pas` | The global ⌘⇧2 stop hotkey: Carbon `RegisterEventHotKey` + an application-target event handler, no TCC grant |
 | `source/Knips.Recording.LiveMath.pas` | Platform-neutral live-effect arithmetic: rect clamping, dead zone, smoothstep easing, which effects a target can have (tested) |
+| `source/Knips.Recording.CursorMath.pas` | Platform-neutral Big Cursor arithmetic: screen point → frame pixel under a live sourceRect, clipped sprite placement, the premultiplied BGRA blit, sprite metrics (tested) |
+| `source/Knips.Recording.CursorOverlay.pas` | Big Cursor: the arrow sprite rendered once on the main thread, composited into each frame's own pixels on the capture queue |
 | `source/Knips.App.Border.pas` | The frame around a recorded region; runtime-built `KnipsBorderView` |
 | `source/Knips.App.Playback.pas` | Playback + GIF export window (AVKit); runtime-built `KnipsPlaybackDelegate` |
 | `source/Knips.ObjC.TypeEncoding.pas` | Method type encodings for runtime classes (tested) |
@@ -104,15 +107,18 @@ session `knips export` does) →
 `Knips.Export.Timing`} →
 {`Knips.ObjC.*`, `Knips.Export.Bitmap`, `source/capture/*`}.
 `Knips.App.Hotkey` sits beside the other `Knips.App.*` units and depends
-only on `Knips.App.State` and MacOSAll.
+only on `Knips.App.State` and MacOSAll. `Knips.Recording.CursorOverlay`
+sits beside `Knips.Recording` and consumes `Knips.Recording.CursorMath`
+the way `Knips.App.Live` consumes `Knips.Recording.LiveMath`.
 `Knips.Options` is used by every layer and depends on nothing;
-`Knips.App.State` and `Knips.Recording.LiveMath` depend only on it;
+`Knips.App.State`, `Knips.Recording.LiveMath` and
+`Knips.Recording.CursorMath` depend only on it;
 `Knips.Mcp.Params` sits beside them (on it plus fpjson and
 `Knips.App.State`, whose path helpers it reuses). `Knips.App.Live`
 consumes `Knips.Recording.LiveMath`, the way `Knips.App.Playback`
 consumes `Knips.Export.Pipeline`. The GIF encoder, the APNG encoder, the delay
-planner, the MCP argument mapping and the live-effect maths are
-deliberately below the Darwin line: they have
+planner, the MCP argument mapping, the live-effect maths and the
+big-cursor maths are deliberately below the Darwin line: they have
 no `{$IFDEF DARWIN}` at all and are tested on every host.
 
 ## Testing

@@ -5,9 +5,12 @@ unit Knips.Recording;
 // it until a stop is requested, then finalise the file.
 //
 // The main thread owns everything except HandleSample, which the capture
-// queue calls; it only forwards the buffer to the writer (whose counters
-// are mutex-guarded). Stop arrives through a signal-safe flag set by the
-// program's SIGINT/SIGTERM handler.
+// queue calls; it forwards the buffer to the writer (whose counters are
+// mutex-guarded) and, with Big Cursor on, draws the enlarged pointer into
+// the frame's own pixels first (Knips.Recording.CursorOverlay, whose
+// sprite was made on the main thread before the capture started). Stop
+// arrives through a signal-safe flag set by the program's SIGINT/SIGTERM
+// handler.
 
 {$I Knips.inc}
 
@@ -26,6 +29,8 @@ uses
   Knips.Capture.Stream,
   Knips.Export.MovieWriter,
   Knips.Options,
+  Knips.Recording.CursorMath,
+  Knips.Recording.CursorOverlay,
   MacOSAll;
 
 type
@@ -59,6 +64,21 @@ type
     LiveUpdatesCompleted: Int64;
     LiveUpdatesFailed: Int64;
     LiveUpdateErrorCode: NSInteger;
+    // Big Cursor. Whether the recording drew its own pointer at all, and
+    // then what the capture queue did with it: frames the sprite went
+    // into, frames where the pointer was off the captured rectangle, and
+    // frames refused because the buffer was not what the configuration
+    // asked for. The third is the only one that is ever a problem, and
+    // it is the reason these are counted rather than assumed — the
+    // compositor runs on a thread with nowhere to report anything.
+    BigCursor: Boolean;
+    // Why the drawn pointer was given up on, when it was; '' otherwise.
+    // Never a reason to fail the recording — the file is written with
+    // the ordinary system cursor instead.
+    BigCursorError: string;
+    CursorFrames: Int64;
+    CursorOffFrame: Int64;
+    CursorRefused: Int64;
     DurationSeconds: Double;
   end;
 
@@ -71,6 +91,17 @@ type
     FGeometry: TStreamGeometry;
     FReport: TRecordingReport;
     FCapturing: Boolean;
+    // Big Cursor. Nil unless the recording actually draws its own
+    // pointer; HandleSample checks for that on every frame, which is one
+    // pointer test on the capture queue.
+    FCursorOverlay: TCursorOverlay;
+    // The rectangle the recording was sized from, in the recorded
+    // display's own top-left points — the region, or the whole display
+    // when there is no region. Unlike FGeometry.SourceRect this is filled
+    // in even when the stream was started without a sourceRect, because
+    // it is what the cursor's position is measured against either way.
+    FBaseRect: CGRect;
+    FDisplayID: UInt32;
     procedure HandleSample(ASampleBuffer: CMSampleBufferRef;
       AKind: TSampleKind);
     function ResolveFilter(const AContent: TShareableContent;
@@ -165,7 +196,10 @@ end;
 
 destructor TRecordingSession.Destroy;
 begin
+  // The stream goes first, so the capture queue has stopped calling
+  // HandleSample before the overlay it composites through is freed.
   FreeAndNil(FStream);
+  FreeAndNil(FCursorOverlay);
   FreeAndNil(FWriter);
   ReleaseFilter;
   inherited Destroy;
@@ -191,7 +225,13 @@ begin
   if FWriter = nil then
     Exit;
   if AKind = skVideo then
-    FWriter.AppendVideoSample(ASampleBuffer)
+  begin
+    // Before the append, and only before: the frame's pixels are ours
+    // until AVAssetWriter is handed the buffer, and not afterwards.
+    if FCursorOverlay <> nil then
+      FCursorOverlay.DrawInto(CMSampleBufferGetImageBuffer(ASampleBuffer));
+    FWriter.AppendVideoSample(ASampleBuffer);
+  end
   else if AKind = skAudio then
     FWriter.AppendAudioSample(ASampleBuffer)
   else if AKind = skMicrophone then
@@ -275,6 +315,7 @@ begin
         Scale := FOptions.Scale;
         if Scale = ScaleAuto then
           Scale := DisplayBackingScale(Display.displayID);
+        FDisplayID := Display.displayID;
         if FOptions.HasRegion then
         begin
           PointWidth := FOptions.Region.Width;
@@ -290,11 +331,15 @@ begin
           AGeometry.HasSourceRect := True;
           AGeometry.SourceRect := CGRectMake(FOptions.Region.Left,
             FOptions.Region.Top, PointWidth, PointHeight);
+          FBaseRect := AGeometry.SourceRect;
         end
         else
         begin
           PointWidth := Integer(Display.width);
           PointHeight := Integer(Display.height);
+          // The whole display is the base rectangle whether or not the
+          // stream is given a sourceRect to move.
+          FBaseRect := CGRectMake(0, 0, PointWidth, PointHeight);
           // A whole-display capture normally goes without a sourceRect,
           // which is what "capture everything" means to SCK. The
           // menu-bar app's live effects need a rectangle to move, so it
@@ -327,7 +372,15 @@ begin
   AGeometry.PixelWidth := AlignDimension(PointWidth * Scale);
   AGeometry.PixelHeight := AlignDimension(PointHeight * Scale);
   AGeometry.FramesPerSecond := FOptions.FramesPerSecond;
-  AGeometry.ShowsCursor := FOptions.ShowsCursor;
+  // Big Cursor draws the pointer itself, so ScreenCaptureKit must not
+  // draw it too — two pointers in one frame, one of them the wrong size.
+  // Setting it here rather than at the configuration is deliberate: the
+  // one configuration builder in Knips.Capture.Stream reads the geometry
+  // for the first configuration *and* for every live update, so a zoom
+  // cannot quietly bring the system cursor back mid-recording.
+  FReport.BigCursor := ResolveBigCursor(FOptions.TargetKind,
+    FOptions.BigCursor);
+  AGeometry.ShowsCursor := FOptions.ShowsCursor and not FReport.BigCursor;
   AGeometry.CapturesAudio := AudioModeCapturesSystem(FOptions.AudioMode);
   AGeometry.AudioSampleRate := FOptions.AudioSampleRate;
   AGeometry.AudioChannelCount := FOptions.AudioChannelCount;
@@ -436,6 +489,28 @@ begin
     Exit;
   end;
 
+  // The sprite is made here, on the main thread, before a single frame
+  // can arrive — nothing on the capture queue may ask AppKit for
+  // anything. A failure is not a reason to lose the recording: the file
+  // is written without a drawn pointer and the report says so, which is
+  // the same shape as a refused live update.
+  if FReport.BigCursor then
+  begin
+    FCursorOverlay := TCursorOverlay.Create;
+    if not FCursorOverlay.Prepare(FDisplayID, FGeometry.PixelWidth,
+      FGeometry.PixelHeight, FBaseRect, FReport.BigCursorError) then
+    begin
+      FreeAndNil(FCursorOverlay);
+      FReport.BigCursor := False;
+      // Put the system pointer back. ResolveFilter switched it off for a
+      // drawn one that is not going to exist, and the configuration is
+      // built from this geometry a few lines below — so the choice is
+      // still open, and a recording with the ordinary cursor beats one
+      // with no cursor at all.
+      FGeometry.ShowsCursor := FOptions.ShowsCursor;
+    end;
+  end;
+
   FStream := TScreenStream.Create(FFilter, FGeometry);
   FStream.OnSample := HandleSample;
   if not FStream.Start then
@@ -456,6 +531,17 @@ function TRecordingSession.UpdateSourceRect(const ARect: CGRect): Boolean;
 begin
   Result := FCapturing and (FStream <> nil)
     and FStream.UpdateSourceRect(ARect);
+  // From the stream's own record of what it sent, not from ARect: an
+  // update inside the epsilon, or one dropped because another was still
+  // in flight, never reached ScreenCaptureKit, and placing the drawn
+  // pointer by a rectangle the capture is not reading would put it a few
+  // pixels off for as long as the animation ran. Gated on Result: after
+  // a refusal the stream's record is a rectangle it never adopted, and
+  // the epsilon/coalesce paths return True with the record unchanged,
+  // so the gate loses nothing.
+  if Result and (FCursorOverlay <> nil) and (FStream <> nil)
+    and FStream.HasSentRect then
+    FCursorOverlay.SetSourceRect(FStream.LastSentRect);
 end;
 
 function TRecordingSession.SupportsLiveUpdate: Boolean;
@@ -514,6 +600,15 @@ begin
     FReport.LiveUpdateErrorCode := FStream.LiveUpdateErrorCode;
   end;
 
+  // The compositor's own totals, read after the stream has stopped so
+  // the capture queue is no longer incrementing them.
+  if FCursorOverlay <> nil then
+  begin
+    FReport.CursorFrames := FCursorOverlay.CompositedFrames;
+    FReport.CursorOffFrame := FCursorOverlay.OffFrameFrames;
+    FReport.CursorRefused := FCursorOverlay.RefusedFrames;
+  end;
+
   Statistics := FWriter.Statistics;
   FReport.AppendedFrames := Statistics.AppendedFrames;
   FReport.DroppedFrames := Statistics.DroppedFrames;
@@ -547,6 +642,13 @@ begin
   Result := False;
   if not StartCapture(AError) then
     Exit;
+
+  if FReport.BigCursorError <> '' then
+  begin
+    WriteLn('big cursor: ', FReport.BigCursorError,
+      ' — recording the system pointer instead');
+    Flush(Output);
+  end;
 
   if FGeometry.CapturesAudio or FGeometry.CapturesMicrophone then
     AudioNote := Format(' + %s audio (AAC %d kHz, %d ch)',

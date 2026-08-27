@@ -4,13 +4,13 @@
 
 - **The neutral core already runs on Linux.** `tools/linux-ci.sh` builds
   a Debian bookworm container with FPC 3.2.2 and the real lwpt 0.7.0
-  Linux binary, and runs all nine `*.Test.pas` suites plus `lwpt build`
+  Linux binary, and runs all ten `*.Test.pas` suites plus `lwpt build`
   plus `lwpt format --check` — green on `linux/arm64` and `linux/amd64`.
   The Linux binary is a working `knips` that serves MCP and refuses
   capture with exit 3.
 - **The whole program cross-compiles for 64-bit Windows.**
   `tools/win64-cross.sh` bootstraps an FPC 3.2.2 `x86_64-win64` cross
-  compiler inside a container and links `knips.exe` plus all nine
+  compiler inside a container and links `knips.exe` plus all ten
   suites as PE32+ binaries. Compile-and-link is the gate; nothing about
   Windows *behaviour* is proven.
 - **A port is a parallel backend, not an abstraction**
@@ -411,11 +411,11 @@ Two facts worth knowing before touching `tools/ci/Dockerfile.win64`:
 | Claim | Provable here? | How |
 | --- | --- | --- |
 | Neutral core compiles on Linux | **yes** | `tools/linux-ci.sh`, both architectures |
-| Neutral suites pass on Linux | **yes** | 9/9 green in-container |
+| Neutral suites pass on Linux | **yes** | 10/10 green in-container |
 | `knips` builds and runs on Linux | **yes** | `lwpt build`, `--version`, `record` → exit 3 |
 | Formatter agrees on Linux | **yes** | `lwpt format --check` in-container |
 | Everything compiles and links for win64 | **yes** | `tools/win64-cross.sh`, PE32+ verified |
-| Neutral suites behave Windows-shaped | **partly** | `tools/wine-smoke.sh` — 9/9 green under Wine; Wine is not Windows, but see below |
+| Neutral suites behave Windows-shaped | **partly** | `tools/wine-smoke.sh` — 10/10 green under Wine; Wine is not Windows, but see below |
 | XSHM capture grabs a frame | **yes — done** | `source/capture-linux/`, Xvfb, in the gate |
 | GIF written from a real Linux capture | **yes — done** | the spike encodes its frame with `Knips.Export.Gif` |
 | Anything about Wayland, portals, PipeWire | **no** | needs a real session |
@@ -425,7 +425,7 @@ Two facts worth knowing before touching `tools/ci/Dockerfile.win64`:
 ### The one thing Wine already found
 
 *Fixed in milestone 2; kept here because what it found is the argument
-for keeping the smoke. As of that milestone all nine suites are green
+for keeping the smoke. As of that milestone every suite is green
 under Wine, 0 failing tests.*
 
 `tools/wine-smoke.sh` runs the cross-built suites under Wine 8.0 in an
@@ -553,7 +553,7 @@ checked off.
    `{$IFDEF DARWIN}` and `Videos` elsewhere — the unit's one conditional,
    a constant selected by target rather than a second code path. The path
    helpers themselves already used `PathDelim` and needed no change.
-   Verified: all nine suites green under `tools/wine-smoke.sh` (0 failing
+   Verified: every suite green under `tools/wine-smoke.sh` (0 failing
    tests, was 8), `tools/linux-ci.sh` green on arm64, and `lwpt build` /
    `lwpt test` / `lwpt format --check` green on macOS.
 3. **Linux headless recorder.** `source/capture-linux/` XSHM bindings,
