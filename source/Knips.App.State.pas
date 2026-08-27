@@ -119,7 +119,7 @@ const
 
   // The two live recording effects. Both off by default, both
   // remembered, both checkmarks rather than verbs — the same shape as
-  // Record System Audio and Camera.
+  // the Audio sources and Camera.
   //
   // "Follow Mouse (region)" carries its qualifier in the title because
   // the state machine cannot express it: whether a recording is a region
@@ -131,6 +131,60 @@ const
   FollowMouseMenuTitle = 'Follow Mouse (region)';
   ZoomOnClickDefaultsKey = 'KnipsZoomOnClick';
   FollowMouseDefaultsKey = 'KnipsFollowMouse';
+
+  // The Audio submenu: two independent checkboxes, System Audio and
+  // Microphone, in the same shape Record System Audio always had and the
+  // same shape as Zoom on Click and Follow Mouse. They live behind one
+  // *Audio* item rather than loose in the root menu because between them
+  // they are one setting — what the recording listens to — and a submenu
+  // says that where two adjacent lines in a list of nine do not.
+  //
+  // One checkbox was a regression in experience rather than a bug: the
+  // recorder has captured the microphone since the CLI grew --audio=mic,
+  // and the app offered exactly one of the four modes — so a user who
+  // spoke into a take got silence and reasonably concluded that "it
+  // doesn't record audio". Two checkboxes offer all four: neither ticked
+  // is none, one is that one, both is both. There is nothing to pick in a
+  // radio group that these two do not say more plainly.
+  AudioMenuTitle = 'Audio';
+  SystemAudioMenuTitle = 'System Audio';
+  MicrophoneMenuTitle = 'Microphone';
+  // Appended to the microphone item where this macOS has no
+  // SCStreamConfiguration.captureMicrophone (it is macOS 15+, and the
+  // project floor is 13). A disabled item that does not say why is a
+  // support question.
+  NoMicrophoneSuffix = ' — needs macOS 15';
+  // One key per checkbox, and never one procedure writing both — the
+  // reason is the cross-write incident recorded under "Each toggle writes
+  // its own key" in docs/architecture.md.
+  //
+  // Migration is one-way and consults the old key only where the new one
+  // is absent, so an upgrade keeps the box the user had ticked. The old
+  // key is left where it is rather than deleted: `defaults` is a public
+  // interface and a downgrade should still find it.
+  SystemAudioDefaultsKey = 'KnipsAudioSystem';
+  MicrophoneDefaultsKey = 'KnipsAudioMicrophone';
+  LegacySystemAudioDefaultsKey = 'KnipsRecordSystemAudio';
+
+  // The global stop hotkey, ⌘⇧2 (Knips.App.Hotkey registers it with
+  // Carbon; this is only what the Stop Recording item *shows*). The key
+  // equivalent has to be the lowercase character AppKit draws, and the
+  // Shift in the modifier mask is what makes it read as ⌘⇧2.
+  StopHotKeyKeyEquivalent = '2';
+  // Carbon's own virtual key code and modifier bits for the same chord,
+  // kept beside the display string so the two can never drift apart.
+  // Verified against FPC 3.2.2's univint: kVK_ANSI_2 = 19, cmdKey = 256,
+  // shiftKey = 512 (Events.pas / MacTypes; read back at run time by the
+  // hotkey unit's own probe line).
+  StopHotKeyVirtualCode = 19;
+  StopHotKeyCarbonModifiers = 256 or 512;
+  // What the menu, the log and the docs call it.
+  StopHotKeyDisplay = '⌘⇧2';
+
+  // Points. Below this the docked camera is already where the rectangle
+  // it rides wants it, and moving a window is a trip to the window
+  // server — the same reasoning as the border's BorderMoveEpsilon.
+  CameraRideEpsilon = 0.5;
 
 type
   // A window origin in AppKit's screen coordinates: bottom-left origin,
@@ -175,10 +229,12 @@ type
     // requires a region to be on file; the table only says when the
     // command could ever be legal.
     acRecordLastRegion,
-    // idle -> idle: the Record System Audio checkbox. It changes no
-    // state, but it must not be reachable mid-recording — the stream
-    // configuration is fixed once the capture has started.
+    // idle -> idle: the two checkboxes in the Audio submenu. Neither
+    // changes any state, but neither must be reachable mid-recording —
+    // the stream configuration is fixed once the capture has started, so
+    // an audio source switched on mid-take would silently do nothing.
     acToggleSystemAudio,
+    acToggleMicrophone,
     // idle -> idle: the two live-effect checkboxes (Zoom on Click and
     // Follow Mouse). Idle-only for the same reason as the audio
     // checkbox, though not quite the same mechanism: the effects move
@@ -243,6 +299,29 @@ function CameraMenuState(AVisible: Boolean): Integer;
 
 // The Circular Camera item's checkmark.
 function CameraShapeMenuState(AShape: TCameraShape): Integer;
+
+{ The Audio submenu: two checkboxes, and the TAudioMode they compose to. }
+
+// The microphone item's title. AAvailable is False on a macOS with no
+// ScreenCaptureKit microphone capture; the reason then rides in the
+// title, because a greyed-out line with no explanation is the thing
+// users file bugs about. (The same reason also goes on the item's
+// tooltip, which is Knips.App's business.)
+function MicrophoneMenuItemTitle(AAvailable: Boolean): string;
+
+// The two checkboxes as the one mode the recorder takes. This is the
+// whole mapping, and it is the natural product: neither is none, one is
+// that one, both is both.
+function AudioModeFromToggles(ASystem, AMicrophone: Boolean): TAudioMode;
+
+// The one-way migration off the old Record System Audio checkbox: when
+// KnipsAudioSystem has never been written, KnipsRecordSystemAudio
+// decides — so an upgrade keeps the box the user had ticked. Once the
+// new key exists it is the only answer, including when it says False,
+// which is why the caller passes "has the key" separately.
+function MigratedSystemAudio(AHasStoredValue, AStoredValue,
+  ALegacySystemAudio: Boolean): Boolean;
+
 
 // Constructors, so callers can write a rectangle or a size inline instead
 // of filling four fields a statement at a time.
@@ -330,6 +409,41 @@ function IsCameraDragMovement(const AFrom, ATo: TCameraOrigin): Boolean;
 // the recording layer, and it is four operations.
 function CameraSnapOrigin(const AFrom, ATo: TCameraOrigin; AStep,
   ASteps: Integer): TCameraOrigin;
+
+{ Riding: a docked camera following the rectangle it was docked into
+  while that rectangle travels. Two things move a recorded rectangle
+  under a running capture — Follow Mouse panning a region, and the user
+  dragging a recorded window — and both drive the same arithmetic. }
+
+// The origin the docked camera takes when the rectangle it rides has
+// moved from AFrom to ATo: the origin the dock landed on, displaced by
+// exactly the rectangle's displacement.
+//
+// Deliberately *not* "the nearest corner of the new rectangle". That
+// would make the picture-in-picture jump from one corner to another the
+// moment the rectangle's midline crossed it, which is a teleport in the
+// middle of a take; riding keeps the corner the dock chose for as long as
+// the recording lasts. A rectangle that also changed *size* (a window
+// resized mid-recording) is followed by its origin alone for the same
+// reason — the camera keeps its offset rather than re-deciding a corner.
+function CameraRideOrigin(const ADockedOrigin: TCameraOrigin;
+  const AFrom, ATo: TCameraRect): TCameraOrigin;
+
+// Whether the rectangle has moved far enough to be worth a setFrame:.
+function IsCameraRideMovement(const AFrom, ATo: TCameraRect): Boolean;
+
+// A CGWindowListCopyWindowInfo bounds rectangle as AppKit's global,
+// bottom-left screen points. Window bounds arrive in Quartz's global
+// space: points with the origin at the *top* left of the primary display
+// and y growing downwards. APrimaryHeight is that display's height —
+// NSMaxY of NSScreen.screens[0].frame, which is the screen whose origin
+// is (0, 0) and therefore the one both spaces are anchored to.
+//
+// The same flip the overlay, the border and RegionScreenRect all do, one
+// more time and in the one space this app had not needed yet.
+function WindowBoundsScreenRect(AX, AY, AWidth, AHeight,
+  APrimaryHeight: Double): TCameraRect;
+
 // The GIF a recording exports to: same directory, same stem, .gif.
 function GifPathForRecording(const ARecordingPath: string): string;
 
@@ -417,7 +531,8 @@ begin
         acRecordRegion: ANext := asSelecting;
         acRecordDisplay, acRecordWindow, acRecordLastRegion:
           ANext := asRecording;
-        acToggleSystemAudio, acToggleZoomOnClick, acToggleFollowMouse:
+        acToggleSystemAudio, acToggleMicrophone, acToggleZoomOnClick,
+          acToggleFollowMouse:
           ANext := asIdle;
       else
         Result := False;
@@ -743,6 +858,37 @@ begin
   Result := MenuCheckState(AShape = csCircle);
 end;
 
+{ The Audio submenu. }
+
+function MicrophoneMenuItemTitle(AAvailable: Boolean): string;
+begin
+  Result := MicrophoneMenuTitle;
+  if not AAvailable then
+    Result := Result + NoMicrophoneSuffix;
+end;
+
+function AudioModeFromToggles(ASystem, AMicrophone: Boolean): TAudioMode;
+begin
+  if ASystem and AMicrophone then
+    Result := amBoth
+  else if AMicrophone then
+    Result := amMicrophone
+  else if ASystem then
+    Result := amSystem
+  else
+    Result := amNone;
+end;
+
+function MigratedSystemAudio(AHasStoredValue, AStoredValue,
+  ALegacySystemAudio: Boolean): Boolean;
+begin
+  if AHasStoredValue then
+    Result := AStoredValue
+  else
+    Result := ALegacySystemAudio;
+end;
+
+
 function CameraSize(AWidth, AHeight: Double): TCameraSize;
 begin
   Result.Width := AWidth;
@@ -953,6 +1099,25 @@ begin
   Eased := Time * Time * (3 - 2 * Time);
   Result.X := AFrom.X + (ATo.X - AFrom.X) * Eased;
   Result.Y := AFrom.Y + (ATo.Y - AFrom.Y) * Eased;
+end;
+
+function CameraRideOrigin(const ADockedOrigin: TCameraOrigin;
+  const AFrom, ATo: TCameraRect): TCameraOrigin;
+begin
+  Result.X := ADockedOrigin.X + (ATo.X - AFrom.X);
+  Result.Y := ADockedOrigin.Y + (ATo.Y - AFrom.Y);
+end;
+
+function IsCameraRideMovement(const AFrom, ATo: TCameraRect): Boolean;
+begin
+  Result := (Abs(ATo.X - AFrom.X) >= CameraRideEpsilon)
+    or (Abs(ATo.Y - AFrom.Y) >= CameraRideEpsilon);
+end;
+
+function WindowBoundsScreenRect(AX, AY, AWidth, AHeight,
+  APrimaryHeight: Double): TCameraRect;
+begin
+  Result := CameraRect(AX, APrimaryHeight - AY - AHeight, AWidth, AHeight);
 end;
 
 end.

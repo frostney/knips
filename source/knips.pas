@@ -38,6 +38,7 @@ uses
   Knips.App,
   Knips.App.Border,
   Knips.App.Camera,
+  Knips.App.Hotkey,
   Knips.App.Overlay,
   Knips.App.Playback,
   Knips.Capture.ShareableContent,
@@ -442,14 +443,15 @@ const
   // Every action AppKit will dispatch on the target: the menu items, the
   // status-item button, the deferred one-shots, the playback window's
   // buttons, and the Record Window submenu's delegate callback.
-  TargetSelectors: array[0..21] of string = (
+  TargetSelectors: array[0..23] of string = (
     'recordRegion:', 'recordDisplay:', 'recordWindow:', 'recordLastRegion:',
-    'toggleSystemAudio:', 'stopRecording:', 'cancelSelection:',
+    'toggleSystemAudio:', 'toggleMicrophone:', 'stopRecording:',
+    'cancelSelection:',
     'revealRecordings:', 'quitKnips:', 'timerFired:', 'startPending:',
     'stopPending:', 'menuNeedsUpdate:', 'exportGif:', 'revealRecording:',
     'closePlayback:', 'toggleCamera:', 'toggleCameraShape:',
     'restoreCamera:', 'toggleZoomOnClick:', 'toggleFollowMouse:',
-    'liveTick:');
+    'liveTick:', 'cameraRideTick:');
   // The camera window's own drag, and the snap ease's timer callback.
   // Without the three mouse methods the window still appears and still
   // shows a picture — it simply cannot be moved at all, because
@@ -603,6 +605,43 @@ begin
       end;
     end;
 
+  // The global stop hotkey: register the chord with Carbon, read the key
+  // code and modifier constants back out of the headers, and hand it
+  // back. A gate, unlike the two informational lines below, because
+  // every one of these calls answers an OSStatus that is easy to ignore
+  // and a hotkey that silently did not register is indistinguishable
+  // from one the user simply has not pressed.
+  //
+  // What this CANNOT prove is delivery. RegisterEventHotKey answers
+  // noErr even for a chord the system already owns (measured: ⌘⇧3, the
+  // screenshot shortcut, registers just as cleanly as ⌘⇧2), and the only
+  // way to see an event arrive is to press the keys — which this
+  // project's test tooling is forbidden to synthesise. Pressing ⌘⇧2
+  // during a recording is on the human checklist in
+  // docs/quick-start.md.
+  //
+  // Skipped, not failed, without a window server — the same rule the Dock
+  // check above follows and for the same reason: HIToolbox is as
+  // window-server-bound as AppKit is, and the rest of the probe is still
+  // worth running over SSH or under launchd.
+  if not HasWindowServer then
+    WriteLn('global stop hotkey: skipped (no window server)')
+  else
+    try
+      if not CheckStopHotKey(Detail, Error) then
+      begin
+        WriteLn('global stop hotkey: ', Error);
+        Exit;
+      end;
+      WriteLn('global stop hotkey: ', Detail);
+    except
+      on E: Exception do
+      begin
+        WriteLn('global stop hotkey: ', E.Message);
+        Exit;
+      end;
+    end;
+
   // Informational, not a gate: microphone capture is macOS 15+, the
   // project floor is 13. record --audio=mic refuses cleanly where this
   // prints unavailable.
@@ -610,6 +649,26 @@ begin
     WriteLn('microphone capture: supported')
   else
     WriteLn('microphone capture: unavailable (needs macOS 15+)');
+
+  // Also informational, and per binary: TCC grants the microphone to
+  // this executable, not to Knips in the abstract, so a fresh build
+  // starts undecided and the first `--audio=mic` recording prompts.
+  //
+  // Informational is all it can be. Measured on this machine,
+  // ScreenCaptureKit captured the microphone while this status read
+  // *undecided*, so it is not the gate SCK goes through: the menu-bar app
+  // warns on a denied grant when the box is ticked and lets the recording
+  // run, and what actually catches a silent track is the microphone
+  // sample count in the finished recording's report.
+  case MicrophoneAccess of
+    maAuthorized: WriteLn('microphone access: granted');
+    maDenied: WriteLn('microphone access: denied — ',
+      'System Settings › Privacy & Security › Microphone');
+    maRestricted: WriteLn('microphone access: restricted');
+  else
+    WriteLn('microphone access: not yet asked (the first mic recording ',
+      'will prompt)');
+  end;
 
   // Likewise informational. The header puts updateConfiguration: at
   // macOS 12.3, below the project floor, so this should always say

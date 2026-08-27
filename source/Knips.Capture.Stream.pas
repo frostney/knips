@@ -32,6 +32,7 @@ unit Knips.Capture.Stream;
 {$IFDEF DARWIN}
 {$modeswitch objectivec2}
 {$modeswitch cblocks}
+{$modeswitch cvar}
 {$ENDIF}
 
 interface
@@ -47,8 +48,16 @@ uses
   Knips.ObjC.Runtime,
   MacOSAll;
 
+// The Microphone TCC grant is asked of AVFoundation, which is where the
+// answer lives whatever framework then uses the device.
+{$linkframework AVFoundation}
+
 type
   TSampleKind = (skVideo, skAudio, skMicrophone);
+
+  // The Microphone privacy grant for THIS binary — TCC is per binary,
+  // exactly like Screen Recording and the Camera.
+  TMicrophoneAccess = (maAuthorized, maDenied, maRestricted, maUndecided);
 
   TSampleHandler = procedure(ASampleBuffer: CMSampleBufferRef;
     AKind: TSampleKind) of object;
@@ -167,6 +176,33 @@ function StreamOutputClassName: string;
 // cleanly without it.
 function StreamSupportsMicrophone: Boolean;
 
+// AVFoundation's Microphone privacy status for this binary — TCC is per
+// binary, exactly like Screen Recording and the Camera.
+//
+// Read this as *advice*, not as a gate, and the distinction is measured
+// rather than assumed. On macOS 26 a signed bundle whose status read
+// maUndecided recorded 421 760 microphone samples through
+// ScreenCaptureKit at −39 dB, with no prompt answered, and the status
+// still read maUndecided afterwards. ScreenCaptureKit's
+// captureMicrophone therefore does not go through the gate this API
+// reports, so a caller that *refused* on maDenied could refuse a
+// recording that would have worked — a worse failure than the one it
+// would be preventing.
+//
+// What it is good for is telling the user, before they record, that
+// something about the microphone looks wrong. What actually proves a
+// microphone worked is the sample count in the recording's report. A
+// source that delivers nothing is invisible from inside the stream —
+// setCaptureMicrophone: takes, startCapture succeeds, and the output
+// simply never produces a sample, the same shape the camera's own denied
+// grant takes (docs/spikes/0001, "Camera") — so counting what arrived is
+// the one check that does not depend on knowing which gate said no.
+function MicrophoneAccess: TMicrophoneAccess;
+
+// The one-line warning a doubtful microphone grant is worth, or '' when
+// there is nothing to say.
+function MicrophoneAccessMessage(AAccess: TMicrophoneAccess): string;
+
 // True when SCStream carries updateConfiguration:completionHandler:, which
 // Zoom on Click and Follow Mouse are built on. The header puts it at
 // macOS 12.3, the same version as SCStream itself, so this should never be
@@ -185,7 +221,32 @@ implementation
 uses
   Knips.ObjC.TypeEncoding;
 
+type
+  // An external binding, not a class of ours (ADR-0002 allows exactly
+  // this) — and only the one class method the grant check needs.
+  // Knips.App.Camera declares the same class for the *video* grant; the
+  // two are deliberately separate, because a unit that must not depend on
+  // the camera window should not have to.
+  AVCaptureDevice = objcclass external (NSObject)
+    class function AuthorizationStatusForMediaType(
+      AMediaType: NSString): NSInteger;
+      message 'authorizationStatusForMediaType:';
+  end;
+
+var
+  // AVMediaTypeAudio, and it is the audio one on purpose: the microphone
+  // grant is 'soun' (read back and checked on device), where the camera's
+  // is 'vide'.
+  AVMediaTypeAudio: NSString; cvar; external;
+
 const
+  // AVAuthorizationStatus (AVCaptureDevice.h), the same four values
+  // Knips.App.Camera spells out for the camera grant.
+  AVAuthorizationStatusNotDetermined = 0;
+  AVAuthorizationStatusRestricted = 1;
+  AVAuthorizationStatusDenied = 2;
+  AVAuthorizationStatusAuthorized = 3;
+
   OutputClassName = 'KnipsStreamOutput';
   OutputSuperclassName = 'NSObject';
   OutputProtocolName = 'SCStreamOutput';
@@ -362,6 +423,32 @@ begin
     Exit(False);
   Result := RespondsToSelector(id(Configuration), 'setCaptureMicrophone:');
   Configuration.release;
+end;
+
+function MicrophoneAccess: TMicrophoneAccess;
+begin
+  case AVCaptureDevice.authorizationStatusForMediaType(AVMediaTypeAudio) of
+    AVAuthorizationStatusAuthorized: Result := maAuthorized;
+    AVAuthorizationStatusDenied: Result := maDenied;
+    AVAuthorizationStatusRestricted: Result := maRestricted;
+  else
+    Result := maUndecided;
+  end;
+end;
+
+function MicrophoneAccessMessage(AAccess: TMicrophoneAccess): string;
+begin
+  case AAccess of
+    maDenied:
+      Result := 'microphone access is denied — if this recording has a '
+        + 'silent microphone track, allow Knips in System Settings › '
+        + 'Privacy & Security › Microphone';
+    maRestricted:
+      Result := 'microphone access is restricted on this Mac — this '
+        + 'recording may end up with a silent microphone track';
+  else
+    Result := '';
+  end;
 end;
 
 // Asked of the class rather than of an instance: SCStream's -init is
@@ -635,6 +722,15 @@ begin
   Result := FHasSentRect and (GUpdatesFailed <> FFailuresAtLastSend);
 end;
 
+// Main-thread only, like every other reader of the update machinery.
+// The completion handler runs on a framework queue and may only touch
+// plain globals; this side reads GUpdatePending (one update in flight,
+// coalesce the rest) and, via LastSendWasRefused above, GUpdatesFailed
+// (a refusal breaks the epsilon dedupe so the next rect resends).
+// Measured: updateConfiguration takes effect when ISSUED — the
+// completion is a later acknowledgement, not the compositor switching —
+// so followers positioned from the send timeline are already in step
+// with the content, to 0.7pt on device.
 function TScreenStream.UpdateSourceRect(const ARect: CGRect): Boolean;
 var
   Configuration: SCStreamConfiguration;
