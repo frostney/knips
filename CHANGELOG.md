@@ -34,6 +34,35 @@ conventional commits by git-cliff (`cliff.toml`).
   *Record Last Region*, and a *Record System Audio* checkbox. The checkbox
   and the last region are remembered between launches in `NSUserDefaults`;
   the stored region is range-checked on the way back in.
+- `app`: **Zoom on Click** and **Follow Mouse**, two remembered menu
+  checkboxes that change what a recording *shows* while it runs. A click
+  inside the recorded area zooms the recording to 2× around the click,
+  holds 0.8 s after the last click and eases back; Follow Mouse pans a
+  region recording so the pointer stays inside the middle third, and the
+  red frame moves with it. Neither changes the file's dimensions —
+  `AVAssetWriter` fixes those at the first frame. Both animate the
+  stream's `sourceRect` through
+  `SCStream.updateConfiguration:completionHandler:` instead, so a smaller
+  rectangle is a zoom and a sliding one is a pan. They compose: zoom crops
+  inside wherever the pan has got to. Zoom works for a region or a whole
+  display, Follow for a region only (a display has nowhere to pan), and
+  window recordings get neither — a window's `sourceRect` is in a space
+  that moves and resizes under us. Both are off by default and remembered
+  in `NSUserDefaults` under `KnipsZoomOnClick` and `KnipsFollowMouse`;
+  like Record System Audio they are idle-only. Clicks are found by polling
+  `NSEvent.pressedMouseButtons` at the animator's 30 Hz tick rather than
+  by an event monitor, so no permission beyond Screen Recording is
+  involved. Measured on device: a 2× zoom magnifies content by exactly
+  2.000× with the file still 1024×768 and no dropped frames, a 200-point
+  pan moves the picture by exactly 400 px, and the moving frame stays out
+  of the file — 0 border pixels in every frame with the exclusion in
+  place against 665 792 without it. Clicks on the menu bar are ignored,
+  so the click that stops a full-screen recording does not zoom into the
+  corner on the way out. If ScreenCaptureKit refuses five rectangle
+  changes in a row the effects switch off for the rest of that recording
+  and say so on the `Last error:` line rather than retrying twenty times
+  a second in silence — reproduced on device with an out-of-range
+  rectangle (`-3812`, `SCStreamErrorInvalidParameter`). CLI unchanged.
 - `record`: `TRecordingOptions.ExcludedWindowIDs` keeps named windows out
   of a display capture.
 - `record --audio=system`: system audio through ScreenCaptureKit into an

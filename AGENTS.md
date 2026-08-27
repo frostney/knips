@@ -64,12 +64,14 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | `source/Knips.App.pas` | Menu-bar app: status item, menu, preferences, runtime-built `KnipsAppTarget` |
 | `source/Knips.App.Overlay.pas` | Region selection overlay; runtime-built `KnipsOverlayView`/`KnipsOverlayWindow` |
 | `source/Knips.App.Camera.pas` | Camera picture-in-picture window: AVCaptureSession + preview layer in a floating, draggable NSWindow |
+| `source/Knips.App.Live.pas` | Zoom on Click / Follow Mouse: a main-thread animator on the app's 30 Hz timer that moves the stream's `sourceRect` |
+| `source/Knips.Recording.LiveMath.pas` | Platform-neutral live-effect arithmetic: rect clamping, dead zone, smoothstep easing, which effects a target can have (tested) |
 | `source/Knips.App.Border.pas` | The frame around a recorded region; runtime-built `KnipsBorderView` |
 | `source/Knips.App.Playback.pas` | Playback + GIF export window (AVKit); runtime-built `KnipsPlaybackDelegate` |
 | `source/Knips.ObjC.TypeEncoding.pas` | Method type encodings for runtime classes (tested) |
 | `source/Knips.ObjC.Runtime.pas` | Runtime-built ObjC classes (the ADR-0002 primitive) |
 | `source/Knips.Capture.ShareableContent.pas` | Display/window enumeration via SCShareableContent |
-| `source/Knips.Capture.Stream.pas` | SCStream wrapper; runtime-built SCStreamOutput; frame-status filter |
+| `source/Knips.Capture.Stream.pas` | SCStream wrapper; runtime-built SCStreamOutput; frame-status filter; live `sourceRect` updates |
 | `source/Knips.Export.MovieWriter.pas` | AVAssetWriter bindings + the movie sink |
 | `source/Knips.Export.MovieReader.pas` | AVAssetReader bindings; BGRA frames + presentation stamps, with a trim range |
 | `source/Knips.Export.Bitmap.pas` | Platform-neutral BGRA buffer + box/bilinear resampling (tested) |
@@ -91,7 +93,9 @@ Layering: `knips.pas` → {`Knips.App`, `Knips.Recording`,
 `Knips.Export.Timing`} →
 {`Knips.ObjC.*`, `Knips.Export.Bitmap`, `source/capture/*`}.
 `Knips.Options` is used by every layer and depends on nothing;
-`Knips.App.State` depends only on it. The GIF encoder, the APNG encoder
+`Knips.App.State` and `Knips.Recording.LiveMath` depend only on it
+(`Knips.App.Live` consumes the latter, the way `Knips.App.Playback`
+consumes `Knips.Export.Pipeline`). The GIF encoder, the APNG encoder
 and the delay planner are deliberately below the Darwin line: they have
 no `{$IFDEF DARWIN}` at all and are tested on every host.
 

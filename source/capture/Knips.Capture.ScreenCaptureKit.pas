@@ -17,6 +17,9 @@ unit Knips.Capture.ScreenCaptureKit;
   - Added: SCStreamOutputTypeMicrophone and
     SCStreamConfiguration.setCaptureMicrophone:/
     setMicrophoneCaptureDeviceID: (macOS 15).
+  - Added: SCStream.updateConfiguration:completionHandler:, which is what
+    makes Zoom on Click and Follow Mouse possible without touching the
+    writer's dimensions.
   - The block types and async completion pattern are unchanged.
 
   Everything else is carried verbatim, including formatting. }
@@ -168,6 +171,20 @@ type
       message 'startCaptureWithCompletionHandler:';
     procedure stopCaptureWithCompletionHandler(handler: TSCErrorBlock);
       message 'stopCaptureWithCompletionHandler:';
+    { knips addition: live reconfiguration of a running stream. Verified
+      against SCStream.h in the MacOSX.sdk of Xcode's current toolchain —
+      the declaration sits inside @interface SCStream, which is annotated
+      API_AVAILABLE(macos(12.3)) with no availability of its own, so it is
+      as old as SCStream itself. The completion handler is nullable and
+      takes NSError*, exactly like the two above, so it takes the same
+      block type and the same global cdecl procedure shape.
+
+      This is what Zoom on Click and Follow Mouse are built on: the output
+      width and height are fixed by AVAssetWriter and never change, and
+      only sourceRect moves. }
+    procedure updateConfiguration_completionHandler(
+      configuration: SCStreamConfiguration; handler: TSCErrorBlock);
+      message 'updateConfiguration:completionHandler:';
   end;
 
 {$ENDIF}
