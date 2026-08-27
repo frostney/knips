@@ -43,9 +43,14 @@ const
   // both enormous and, at 256 colours, no sharper for it.
   AppGifFramesPerSecond = 20;
   // How much of the export's progress the palette pass is worth. It
-  // reads every frame but only resamples every Nth, so it is the cheaper
-  // of the two passes over the movie.
-  PaletteProgressPercent = 25;
+  // reads every frame but only resamples every Nth
+  // (PaletteSampleFrames), so it is decode-bound while the encode pass
+  // is per-pixel — measured on real recordings (release build) the
+  // palette pass takes 1.9-5.8% of the export's wall time, and the gap
+  // widens with canvas size. The old weight of 25 made the bar rocket
+  // through its first quarter in a few percent of the time and then
+  // crawl, which users read as "the export gets slow after 40%".
+  PaletteProgressPercent = 5;
   // "Application — Window title", elided to keep the menu narrow.
   WindowMenuSeparator = ' — ';
   MaxWindowMenuTitleLength = 60;
