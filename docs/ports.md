@@ -30,8 +30,16 @@
 
 ## Where the line already is
 
-Nothing in this list contains a single `{$IFDEF DARWIN}`, and every one
-of them is compiled and run by `lwpt test` on Linux today:
+Every one of these is compiled and run by `lwpt test` on Linux today, and
+none of them branches on the platform — with one deliberate exception,
+added in milestone 2: `Knips.App.State`'s `MoviesFolderName` is `Movies`
+under `{$IFDEF DARWIN}` and `Videos` elsewhere. That is a *constant
+selected by target*, the same shape `Knips.ObjC.TypeEncoding` already
+uses for its per-CPU encodings, not a second code path: there is one
+`RecordingsDirectory`, one test, and nothing to run twice. It is here
+because the host differs, not the code — macOS's home movie folder is
+`~/Movies`, the Windows shell's is `Videos` (`FOLDERID_Videos`), and
+XDG's default for `XDG_VIDEOS_DIR` is `~/Videos`.
 
 | Unit | What is already portable |
 | --- | --- |
@@ -407,7 +415,7 @@ Two facts worth knowing before touching `tools/ci/Dockerfile.win64`:
 | `knips` builds and runs on Linux | **yes** | `lwpt build`, `--version`, `record` → exit 3 |
 | Formatter agrees on Linux | **yes** | `lwpt format --check` in-container |
 | Everything compiles and links for win64 | **yes** | `tools/win64-cross.sh`, PE32+ verified |
-| Neutral suites behave Windows-shaped | **partly** | `tools/wine-smoke.sh` — Wine is not Windows, but see below |
+| Neutral suites behave Windows-shaped | **partly** | `tools/wine-smoke.sh` — 9/9 green under Wine; Wine is not Windows, but see below |
 | XSHM capture grabs a frame | **yes — done** | `source/capture-linux/`, Xvfb, in the gate |
 | GIF written from a real Linux capture | **yes — done** | the spike encodes its frame with `Knips.Export.Gif` |
 | Anything about Wayland, portals, PipeWire | **no** | needs a real session |
@@ -416,11 +424,16 @@ Two facts worth knowing before touching `tools/ci/Dockerfile.win64`:
 
 ### The one thing Wine already found
 
+*Fixed in milestone 2; kept here because what it found is the argument
+for keeping the smoke. As of that milestone all nine suites are green
+under Wine, 0 failing tests.*
+
 `tools/wine-smoke.sh` runs the cross-built suites under Wine 8.0 in an
-amd64 container. Eight of 315 assertions fail, all of them in one file:
-`source/Knips.Mcp.Params.Test.pas`. **None of the eight is a bug in the
-production neutral core** — every one is a defect in the test file, and
-tracing them is what turned up the single real portability item.
+amd64 container. On its first run eight of 323 tests failed, all of them
+in one file: `source/Knips.Mcp.Params.Test.pas`. **None of the eight was
+a bug in the production neutral core** — every one was a defect in the
+test file, and tracing them is what turned up the single real
+portability item.
 
 ```text
 default paths › a recording defaults into ~/Movies/knips/
@@ -447,12 +460,36 @@ path starts with a drive letter, so that check fails by construction —
 and no production code performs it. `Knips.Mcp.Params` calls
 `ExpandFileName` and trusts the RTL, which is right.
 
-So the tally is **six stale test literals plus two wrong test predicates**,
-and one genuine production item that only surfaced because the suite was
-run: `MoviesFolderName = 'Movies'` (`Knips.App.State.pas:29`). A Windows
-recording belongs in `Videos`, and so does a Linux one — that is a
-product decision, not a separator bug, and it is the only line of shipped
-code the Wine run indicts.
+So the tally was **six stale test literals plus two wrong test
+predicates**, and one genuine production item that only surfaced because
+the suite was run: `MoviesFolderName = 'Movies'`
+(`Knips.App.State.pas:29`). A Windows recording belongs in `Videos`, and
+so does a Linux one — that is a product decision, not a separator bug,
+and it was the only line of shipped code the Wine run indicted. (One
+kindred line escaped only because no test asserts tool-description
+prose: `record_start`'s schema text in `Knips.Mcp.pas` still says
+`~/Movies/knips/` — deferred to the milestone that makes the MCP
+surface platform-honest as a whole.)
+
+**How they were fixed.** The six literals became expectations built the
+way the production code builds the value: `PathDelim` and
+`MoviesFolderName` for the default recording path, and
+`ExpandFileName('/tmp/…')` wherever a builder returns an expanded path,
+because *which* path was chosen is the claim and the expansion is
+incidental to it. Several of them gained a structural assertion beside
+the string — a GIF default now also asserts that it shares its input's
+directory and stem, which is what "beside its input" actually means and
+what a literal only implied. The two predicates became one local
+`IsRootedPath` helper in the test file, accepting a leading `/`, a
+`\\server\share` UNC, and an `X:\` or `X:/` drive root; FPC 3.2.2 has no
+portable predicate for this, no production code needs one, and the helper
+has its own test so the two assertions that lean on it cannot go vacuous.
+
+One toolchain hazard found on the way, worth knowing before editing any
+suite: **a comment inside a `uses` clause makes `lwpt format` rewrite the
+file into garbage** rather than refusing it. `lwpt format --check` only
+reports "needs formatting", so the damage appears at the rewrite. Keep
+unit-list commentary in the header comment above `uses`.
 
 That is a smaller finding than it first looked, and worth stating plainly:
 the neutral core's path handling was already portable. What the Wine smoke
@@ -503,16 +540,22 @@ checked off.
    cross-compile gate; the Wine smoke; the X11/MIT-SHM capture spike; this
    document and [ADR-0005](adr/0005-windows-linux-ports.md). No backend
    code beyond the spike, and the spike is not a backend.
-2. **Make the neutral suite portable, and settle Movies-vs-Videos.**
-   Two small pieces. In `Knips.Mcp.Params.Test.pas`: replace the six stale
-   POSIX literals with expectations built from `PathDelim`, and replace
-   the two `OutputPath[1] = PathDelim` predicates (`:624`, `:898`) with a
-   real absolute-path check — they are asserting something no production
-   code does. In `Knips.App.State.pas:29`: decide what
-   `MoviesFolderName` should be off macOS (`Videos` on both Windows and
-   Linux) and give it the one conditional it needs. The helpers
-   themselves already use `PathDelim` and need no change. Entirely
-   neutral, entirely testable, and it unblocks every later platform.
+2. **Make the neutral suite portable, and settle Movies-vs-Videos.
+   Done.** In `Knips.Mcp.Params.Test.pas` the six stale POSIX literals
+   became expectations built the way the production code builds the
+   value — `PathDelim` and `MoviesFolderName` for the default recording
+   path, `ExpandFileName` of the same literal wherever a builder returns
+   an expanded path — with structural assertions (same directory, same
+   stem) added where a literal had only implied the claim; and the two
+   `OutputPath[1] = PathDelim` predicates became a local `IsRootedPath`
+   helper that accepts both families' roots and carries its own test.
+   `MoviesFolderName` (`Knips.App.State.pas:29`) is now `Movies` under
+   `{$IFDEF DARWIN}` and `Videos` elsewhere — the unit's one conditional,
+   a constant selected by target rather than a second code path. The path
+   helpers themselves already used `PathDelim` and needed no change.
+   Verified: all nine suites green under `tools/wine-smoke.sh` (0 failing
+   tests, was 8), `tools/linux-ci.sh` green on arm64, and `lwpt build` /
+   `lwpt test` / `lwpt format --check` green on macOS.
 3. **Linux headless recorder.** `source/capture-linux/` XSHM bindings,
    `Knips.Recording.Linux`, `knips record --out=demo.apng` and
    `demo.gif` working against Xvfb in CI, `knips probe` growing a Linux
