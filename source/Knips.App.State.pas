@@ -44,7 +44,7 @@ const
   AppGifFramesPerSecond = 20;
   // How much of the export's progress the palette pass is worth. It
   // reads every frame but only resamples every Nth
-  // (PaletteSampleFrames), so it is decode-bound while the encode pass
+  // (TGifPaletteSampler), so it is decode-bound while the encode pass
   // is per-pixel — measured on real recordings (release build) the
   // palette pass takes 1.9-5.8% of the export's wall time, and the gap
   // widens with canvas size. The old weight of 25 made the bar rocket

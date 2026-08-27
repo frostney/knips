@@ -248,12 +248,15 @@ Five decisions carry most of the weight:
   between frames — very visible on a screen recording's flat UI — and
   costs 768 bytes of colour table per frame. The histogram counts
   *exact* colours: an open-addressed table of packed 24-bit keys, capped
-  at 2^20 distinct colours so its 16 MB never grows with the movie, with
-  the old fixed 4 MB array of 64³ cells kept as the fallback for a source
+  at 2^20 distinct colours so its 24 MB never grows with the movie, with
+  the old fixed 8 MB array of 64³ cells kept as the fallback for a source
   that exceeds the cap (`knips export` says so in its last line when it
-  happens). Median cut then splits the box holding the most *squared
-  error*, along the channel holding most of it, and every palette entry
-  is the count-weighted mean of the real colours in its box.
+  happens). Every counter in both is 64-bit, which is what lets the
+  quantiser take an unbounded number of sampled pixels — see "which
+  frames the palette is built from" below. Median cut then splits the
+  box holding the most *squared error*, along the channel holding most
+  of it, and every palette entry is the count-weighted mean of the real
+  colours in its box.
 
   Measured on a 14 s, 800×520 ScreenCaptureKit recording, 281 frames,
   PSNR against the same source that every encoder read, with ffmpeg's
@@ -383,8 +386,9 @@ kinds of number depending on when it is asked.
 After the palette pass it is a *count*: that pass walks the whole movie
 through the same decimator the encode pass will use, so the frames it
 emitted are the frames the encode pass will emit. Before it there is
-nothing to count, so it is a bound, and the whole design turns on it
-being a bound and not a guess.
+nothing to count, so it is a bound — the tightest honest upper bound
+available, which is what makes it a good seed for the palette pass and an
+honest denominator for a progress bar.
 
 The obvious bound — the range times the requested rate, which is the
 number of grid slots the decimator can fill — is far too loose for the
@@ -421,16 +425,60 @@ stretch of the same length. Spreading the samples over the clock instead
 the 220 s capture and cost 0.45 dB.
 
 A stride does need the count in advance, which is exactly what the pass
-does not have, and it is the *direction* of the error that matters. Too
-large a stride costs samples. Too small a one is worse than that: the
-quantiser's sampled-pixel budget (`GifMaxSampledPixels`) is precisely
-`PaletteSampleFrames` frames' worth, and past it `SampleFrame` returns
-without doing anything — so a stride that runs long leaves the tail of
-the movie out of the palette entirely, silently. That is why the bound
-above is built to run high and never low.
+does not have — so the stride is not fixed up front. `TGifPaletteSampler`
+(in `Knips.Export.Gif`, below the Darwin line and unit-tested there for
+the same reason `TFrameDelayPlanner` is) seeds itself from the bound and
+then closes the loop:
+
+- The seed is `Ceil(estimate / GifPaletteSampleFrames)`, **capped** at
+  `GifPaletteMaxSeedStride` (64). Without the cap, an estimate that runs
+  high — a container whose duration metadata lies, or a `--trim` past the
+  end of one — gives a stride longer than the movie and a palette built
+  from a single frame. With it, any movie past 64 frames is sampled at
+  more than one point however large the estimate was.
+- Every `GifPaletteSampleFrames` samples, the stride **doubles**. A movie
+  far longer than its estimate is thinned while it is read rather than
+  truncated: *n* phases of 32 samples cover `32 * seed * (2^n - 1)`
+  frames, so the sample count grows with the log of the length. Seeded at
+  one, a 10 000-frame stream takes 263 samples and the last of them sits
+  within 256 frames of the end.
+
+The cap has a price, and it is paid by long movies whose estimates are
+*honest*: above `32 * 64 = 2048` estimated frames the estimate stops
+influencing the schedule at all, so the seed starts too small and the
+doubling only bounds the extra work logarithmically — a 4 400-frame
+capture takes 50 sample frames where the single stride took 32, a
+20-minute one takes ~114, and the extra samples sit in the front half.
+That is more scale+sample work (~1.5–4×, growing with length), and
+mostly denser sampling — though not uniformly so: a movie only just
+past the threshold can see one stretch after a phase boundary sampled
+up to ~2× more sparsely than the single honest stride would have (at
+2 113 frames the schedule doubles to a gap of 128 against an old
+stride of 67). What the doubling guarantees is that the sample *count*
+grows with the log of the length, never the length itself. The trade
+is deliberate — a bounded cost on long honest movies buys surviving an
+estimate that lies high, which the old scheme answered with a
+one-frame palette.
+
+Before this the stride was computed once and never revisited, and the
+error had a *direction* that mattered: too small a stride overran the
+quantiser's global sampled-pixel budget (`GifMaxSampledPixels`, 8 M —
+precisely 32 frames' worth), past which `SampleFrame` returned without
+doing anything at all, so the tail of the movie was left out of the
+palette entirely, silently. Both halves of that are gone. The
+budget existed only to keep 32-bit channel sums from wrapping; the
+counters are 64-bit now and there is no budget, so the estimate is a seed
+and a progress denominator rather than a correctness invariant. What it
+still buys is samples spread at the right density on the first try, which
+is why it is still built to run high and never low. The verbose note when
+the movie holds more frames than its header promised is observability
+now: it says the header lied and how many sample frames the schedule
+ended up taking, not that anything was lost.
 
 Measured against the same clip exported as an APNG, which quantises
-nothing and so is exactly the pixels the scaler produced:
+nothing and so is exactly the pixels the scaler produced — a measurement
+of the *bound* change (loose slot count → honest two-bound minimum),
+taken under the previous single-stride scheme:
 
 | recording | sample frames | PSNR |
 | --- | --- | --- |
@@ -439,7 +487,10 @@ nothing and so is exactly the pixels the scaler produced:
 | 32 s 1160×860, 20 fps | 24 → 24 | 36.42 dB, byte-identical |
 
 The third row is the point as much as the first two: where the slot
-count was already the tighter bound, nothing changes at all.
+count was already the tighter bound, nothing changes at all. On the
+first row's clip the shipped sampler seeds at the 64 cap (the estimate,
+2 428, is past 2 048) and schedules 27 sample frames — denser than
+either column, so the table's PSNR floor still holds.
 
 The other half of an honest bar is the *weight* of the two passes. The
 palette pass reads every frame but resamples only every Nth, so it is

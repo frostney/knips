@@ -10,10 +10,10 @@ unit Knips.Export.Pipeline;
 // differs, so the two formats cannot drift apart on timing or on which
 // frames they pick. A GIF needs two passes over the movie, because the
 // palette has to be known before the first frame is written and
-// AVAssetReader cannot rewind: the first pass samples up to
-// PaletteSampleFrames frames spread across the range and feeds their
-// colours to the quantiser, the second encodes. APNG has nothing to
-// learn first, so it makes one pass.
+// AVAssetReader cannot rewind: the first pass walks the range, hands a
+// spread of its frames to the quantiser on a schedule that thins itself
+// as it goes (TGifPaletteSampler), and the second encodes. APNG has
+// nothing to learn first, so it makes one pass.
 //
 // Only one decoded frame and one pending scaled frame are ever in
 // memory, whichever format is being written.
@@ -48,9 +48,6 @@ uses
   MacOSAll;
 
 const
-  // Enough spread to catch a palette change halfway through a clip
-  // without making the first pass expensive.
-  PaletteSampleFrames = 32;
   ProgressEveryFrames = 100;
   // How often the per-frame autorelease pool is drained. AVFoundation
   // autoreleases temporaries per decoded frame and this program has no
@@ -455,13 +452,16 @@ end;
 // estimate, the encode pass's total gave a bar that crawled at a third
 // of its true rate and then stopped at 54%.
 //
-// Before that pass there is nothing to count, so it is a *bound*, and
-// everything below turns on it being a bound and not a guess: too large
-// a stride costs the palette samples, but too small a one would overrun
-// the quantiser's sampled-pixel budget, and SampleFrame then ignores
-// everything past the cap — leaving the tail of the movie out of the
-// palette entirely, and silently. Two bounds are available and the
-// answer is the smaller.
+// Before that pass there is nothing to count, so it is a *bound*: the
+// tightest honest upper bound available, which is what makes it a good
+// seed for the palette pass's stride and an honest ceiling for a
+// progress bar. It is no longer load-bearing for correctness. The
+// palette schedule (TGifPaletteSampler) caps the stride it seeds from
+// this and doubles it as the walk goes on, so an estimate that runs high
+// cannot collapse the sample to one frame and an estimate that runs low
+// cannot leave the tail of the movie out — the quantiser's counters are
+// 64-bit and it has no sampling budget to run out of. Two bounds are
+// available and the answer is the smaller.
 //
 // The range times the requested rate is the number of grid slots, and
 // the decimator emits at most one frame a slot. On its own it is far too
@@ -483,8 +483,8 @@ end;
 // and not a guess. A --trim over a busy stretch of an otherwise idle
 // recording holds frames far denser than the movie's average, so the
 // range times the average rate would sit below what that stretch really
-// emits — and an estimate that runs low is the one thing the palette's
-// stride cannot survive.
+// emits, and a seed that runs low costs the schedule a phase of thinning
+// it did not need.
 function TExportSession.ExpectedFrameCount: Integer;
 var
   Seconds, Slots, SourceFrames: Double;
@@ -501,9 +501,8 @@ begin
     if SourceFrames < Slots then
       Slots := SourceFrames;
   end;
-  // Ceil, never Round: the invariant above is "never runs low", and a
-  // 32.4 rounded down to 32 against 33 emitted frames is exactly the
-  // one-lost-sample breach the whole design exists to prevent.
+  // Ceil, never Round: this is a bound, and rounding a 32.4 down to 32
+  // against 33 emitted frames would make it a guess.
   Result := Math.Ceil(Slots);
   if Result < 1 then
     Result := 1;
@@ -530,10 +529,9 @@ end;
 
 // Which frames the palette is built from.
 //
-// The pass wants PaletteSampleFrames frames spread evenly across the
-// movie, and it takes them with a stride over the frame index rather
-// than over the clock. That weighting is deliberate: every frame the
-// encoder writes counts the same towards how the result looks, so a busy
+// The samples are spread over the frame *index* rather than over the
+// clock, and that weighting is deliberate: every frame the encoder
+// writes counts the same towards how the result looks, so a busy
 // stretch, which produces more frames, has earned more of the palette
 // than an idle stretch of the same length. Spreading the samples over
 // *time* instead was tried and measured on a 220 s capture: 21 samples
@@ -541,35 +539,37 @@ end;
 // clip exported as an APNG, which quantises nothing and so is exactly
 // the pixels the scaler produced).
 //
-// A stride needs the frame count in advance, which is the one number
-// this pass does not have; what it uses instead, and why that number has
-// to be an upper bound, is ExpectedFrameCount's business.
+// Spacing them needs a frame count in advance, which is the one number
+// this pass does not have. All that lives here is the plumbing —
+// ExpectedFrameCount for the seed, and one "sample or skip?" question
+// per emitted frame; the schedule that answers it, and the closed loop
+// that keeps a wrong seed from mattering, is TGifPaletteSampler in
+// Knips.Export.Gif, where it can be unit-tested off a Mac.
 function TExportSession.CollectPalette(out APalette: TGifPalette;
   out AError: string): Boolean;
 var
   Quantizer: TGifQuantizer;
+  Sampler: TGifPaletteSampler;
   Frame: TMovieReaderFrame;
   Pool: NSAutoreleasePool;
-  Index, Stride, EstimatedBeforePass: Integer;
+  Index, EstimatedBeforePass: Integer;
 begin
   Result := False;
   APalette := Default(TGifPalette);
   if not FReader.StartPass(FStartSeconds, FRangeSeconds, AError) then
     Exit;
   EstimatedBeforePass := ExpectedFrameCount;
-  Stride := (EstimatedBeforePass + PaletteSampleFrames - 1)
-    div PaletteSampleFrames;
-  if Stride < 1 then
-    Stride := 1;
 
+  Sampler := nil;
   Quantizer := TGifQuantizer.Create;
   try
+    Sampler := TGifPaletteSampler.Create(EstimatedBeforePass);
     Index := 0;
     Pool := NSAutoreleasePool(NSAutoreleasePool.alloc.init);
     try
       while NextEmittedFrame(Frame) do
       begin
-        if Index mod Stride = 0 then
+        if Sampler.TakeFrame(Index) then
         begin
           EnsureTargetSize(Integer(CVPixelBufferGetWidth(Frame.PixelBuffer)),
             Integer(CVPixelBufferGetHeight(Frame.PixelBuffer)));
@@ -577,7 +577,6 @@ begin
             Exit;
           Quantizer.SampleFrame(@FScaled.Pixels[0], FScaled.BytesPerRow,
             FScaled.Width, FScaled.Height);
-          Inc(FReport.SampledFrames);
         end;
         Inc(Index);
         Progress(gesPalette, Index);
@@ -590,6 +589,7 @@ begin
     finally
       Pool.release;
     end;
+    FReport.SampledFrames := Integer(Sampler.SampledFrames);
     FReader.StopPass;
     if FReader.LastError <> '' then
     begin
@@ -602,21 +602,21 @@ begin
       Exit;
     end;
     FReport.ExactPalette := Quantizer.IsExactHistogram;
-    // The source-frame bound is an empirical property of this recorder's
-    // own output; a foreign movie whose header under-reports its real
-    // average rate makes the estimate run low, the stride run short, and
-    // the tail of the movie contribute nothing to the palette — with no
-    // signal from the quantiser when its pixel budget runs out early.
-    // The evidence is the emitted count itself.
-    if (FEmitted > EstimatedBeforePass) and (EstimatedBeforePass > 0) then
+    // Observability only: the source-frame bound is an empirical
+    // property of this recorder's own output, and a foreign movie whose
+    // header under-reports its real average rate makes the seed run low.
+    // The schedule absorbs that by doubling its stride as it goes, so
+    // the palette still spans the whole movie — it just took more
+    // samples than the target to get there. Worth saying, because it
+    // means the header lied; not worth failing over.
+    if FVerbose and (FEmitted > EstimatedBeforePass)
+      and (EstimatedBeforePass > 0) then
     begin
-      if FVerbose then
-      begin
-        WriteLn(Format('  note: the movie held more frames than its '
-          + 'header promised (%d vs %d); the palette was sampled from '
-          + 'the first part only', [FEmitted, EstimatedBeforePass]));
-        Flush(Output);
-      end;
+      WriteLn(Format('  note: the movie held more frames than its '
+        + 'header promised (%d vs %d); the palette schedule thinned '
+        + 'itself to span it (%d sample frames)',
+        [FEmitted, EstimatedBeforePass, FReport.SampledFrames]));
+      Flush(Output);
     end;
     // Only now, after the pass has finished and its own progress has
     // been reported against the estimate: changing the total mid-pass
@@ -626,6 +626,7 @@ begin
     // frame", so the palette is built one colour short of the maximum.
     APalette := Quantizer.BuildPalette(GifMaxOpaqueColors);
   finally
+    Sampler.Free;
     Quantizer.Free;
   end;
   FReport.PaletteColors := APalette.Count;
@@ -765,9 +766,13 @@ begin
   if FVerbose then
   begin
     if FOptions.Format = efGif then
-      WriteLn(Format('exporting %dx%d at up to %d fps (%d colours) to %s',
+      // The sample count is worth printing now that it is decided while
+      // the movie is walked rather than fixed in advance: it is the one
+      // number that says how widely the palette actually looked.
+      WriteLn(Format('exporting %dx%d at up to %d fps '
+        + '(%d colours from %d sample frames) to %s',
         [FReport.PixelWidth, FReport.PixelHeight, FOptions.FramesPerSecond,
-        FReport.PaletteColors, FOptions.OutputPath]))
+        FReport.PaletteColors, FReport.SampledFrames, FOptions.OutputPath]))
     else
       WriteLn(Format('exporting %dx%d at up to %d fps (truecolour) to %s',
         [FReport.PixelWidth, FReport.PixelHeight, FOptions.FramesPerSecond,
