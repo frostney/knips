@@ -49,6 +49,8 @@ VERSION=$(sed -n "s/^ *KnipsVersion = '\\(.*\\)';.*/\\1/p" \
   "$ROOT/source/Knips.Options.pas" | head -n 1)
 [ -n "$VERSION" ] || VERSION=0.0.0
 
+ICON_SOURCE=$ROOT/assets/knips-icon-1024.png
+
 rm -rf "$APP"
 mkdir -p "$MACOS"
 cp "$BINARY" "$MACOS/$RECORDER"
@@ -76,6 +78,8 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <string>$VERSION</string>
   <key>CFBundleVersion</key>
   <string>$VERSION</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>
@@ -91,6 +95,24 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 PLIST
 
 printf 'APPL????' > "$CONTENTS/PkgInfo"
+
+# The app icon: generated from the one committed 1024px source at build
+# time (sips + iconutil are stock macOS), so the repo carries a single
+# PNG rather than ten derived sizes.
+if [ -f "$ICON_SOURCE" ]; then
+  RESOURCES=$CONTENTS/Resources
+  ICONSET=$(mktemp -d)/AppIcon.iconset
+  mkdir -p "$RESOURCES" "$ICONSET"
+  for SIZE in 16 32 128 256 512; do
+    sips -z "$SIZE" "$SIZE" "$ICON_SOURCE" \
+      --out "$ICONSET/icon_${SIZE}x${SIZE}.png" > /dev/null
+    DOUBLE=$((SIZE * 2))
+    sips -z "$DOUBLE" "$DOUBLE" "$ICON_SOURCE" \
+      --out "$ICONSET/icon_${SIZE}x${SIZE}@2x.png" > /dev/null
+  done
+  iconutil -c icns "$ICONSET" -o "$RESOURCES/AppIcon.icns"
+  rm -rf "$(dirname "$ICONSET")"
+fi
 
 # Ad-hoc sign the finished bundle. An UNSIGNED bundle gets a limbo TCC
 # identity: requestAccessForMediaType for the camera is silently dropped
