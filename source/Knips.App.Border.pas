@@ -110,6 +110,17 @@ procedure EnsureBorderClasses;
 function ScreenFrameForDisplayID(ADisplayID: UInt32;
   out AFrame: NSRect): Boolean;
 
+// The other direction: which display holds a rectangle, by its centre.
+// The composited window recording needs it — a window recording becomes
+// a *display* recording with a source rectangle, and the display has to
+// be the one the window is actually on rather than the main one. The
+// centre rather than the origin, so a window straddling two displays is
+// captured from the one showing most of it, which is also the one
+// NSWindow.screen would answer. False when no attached display holds the
+// centre; the caller then leaves the recording as it was.
+function DisplayIDForScreenRect(const ARect: NSRect;
+  out ADisplayID: UInt32; out AFrame: NSRect): Boolean;
+
 function BorderViewClassName: string;
 
 {$ENDIF}
@@ -229,6 +240,46 @@ begin
   Result := Screen <> nil;
   if Result then
     AFrame := Screen.frame;
+end;
+
+function DisplayIDForScreenRect(const ARect: NSRect;
+  out ADisplayID: UInt32; out AFrame: NSRect): Boolean;
+var
+  Screens: NSArray;
+  Screen: NSScreen;
+  Frame: NSRect;
+  Number: NSNumber;
+  CentreX, CentreY: Double;
+  I: Integer;
+begin
+  ADisplayID := 0;
+  AFrame := NSMakeRect(0, 0, 0, 0);
+  Result := False;
+  Screens := NSScreen.screens;
+  if (Screens = nil) or (Screens.count = 0) then
+    Exit;
+  CentreX := ARect.origin.x + ARect.size.width / 2;
+  CentreY := ARect.origin.y + ARect.size.height / 2;
+  for I := 0 to Screens.count - 1 do
+  begin
+    Screen := NSScreen(Screens.objectAtIndex(I));
+    Frame := Screen.frame;
+    if (CentreX < Frame.origin.x)
+      or (CentreX >= Frame.origin.x + Frame.size.width)
+      or (CentreY < Frame.origin.y)
+      or (CentreY >= Frame.origin.y + Frame.size.height) then
+      Continue;
+    // The same lookup the overlay does for a selection: NSScreenNumber
+    // is the CGDirectDisplayID, and a screen without one is a screen the
+    // recorder cannot name.
+    Number := NSNumber(Screen.deviceDescription.objectForKey(
+      NSSTR(ScreenNumberKey)));
+    if Number = nil then
+      Exit;
+    ADisplayID := UInt32(Number.unsignedIntValue);
+    AFrame := Frame;
+    Exit(True);
+  end;
 end;
 
 { TRecordingBorder }

@@ -8,15 +8,17 @@
 - `./build/knips app` is the menu-bar version: click the icon, drag a
   rectangle, click again to stop. A red frame marks the region while it
   records, the finished clip opens in a playback window with a one-click
-  GIF export, and **Camera** adds a draggable floating camera window
-  that gets recorded along with everything else.
-- Two menu checkboxes change what a recording shows while it runs —
-  **Zoom on Click** (a click zooms the recording around it) and **Follow
-  Mouse** (a region recording pans with the pointer). Neither changes the
+  GIF export, and **Camera ▸ Show Camera** adds a draggable floating
+  camera window that gets recorded along with everything else —
+  optionally with **Camera ▸ Blur Background**, which keeps you sharp and
+  blurs the room behind you.
+- **Behaviour ▸** holds three checkboxes that change what a recording
+  shows while it runs — **Zoom on Click** (a click zooms the recording
+  around it), **Follow Mouse** (a region recording pans with the pointer)
+  and **Big Cursor** (an enlarged pointer drawn into the recording
+  instead of the captured system one, so it survives into a GIF or an
+  APNG; also `knips record --big-cursor`). None of them changes the
   file's dimensions.
-- **Big Cursor** draws an enlarged pointer into the recording instead of
-  capturing the system one, so it survives into a GIF or an APNG. Also
-  `knips record --big-cursor`.
 - `./build/knips export --in=demo.mp4 --out=demo.gif` turns the
   recording into an animated GIF, optionally trimmed and scaled;
   `--out=demo.apng` writes truecolour APNG instead, and `--out=cut.mp4
@@ -81,11 +83,8 @@ A `◉` appears in the menu bar. Clicking it opens:
 | Record Last Region | Repeats the last region recording — same display, same rectangle. Survives a relaunch. |
 | Stop Recording | Enabled only while recording, and shows **⌘⇧2** — the system-wide shortcut below. |
 | Cancel selection | Enabled only while selecting. The overlay covers the menu bar, so this only matters if the overlay failed to open. |
-| Camera | Floating camera window; checked while it is up. Available in every state, recording included. |
-| Circular Camera | A checkbox. On, the camera window is a circle instead of a rounded rectangle. Applies to the window on screen straight away and is remembered between launches. |
-| Zoom on Click | A checkbox. On, a click inside the recorded area zooms the *recording* to 2× around the click, holds for 0.8 s after the last click, and eases back. Nothing on screen moves — only what the file shows. Remembered between launches; not changeable mid-recording. |
-| Follow Mouse (region) | A checkbox. On, a **region** recording pans to keep the pointer inside the middle third of the frame; the red frame moves with it. Whole-display and window recordings ignore it — a display has nowhere to pan. Remembered between launches; not changeable mid-recording. |
-| Big Cursor | A checkbox. On, the pointer is drawn into the recording at two and a half times its size and the system one is left out. Nothing on screen changes — only what the file shows — and because it is part of the picture, a GIF or APNG export keeps it. Window recordings ignore it. Remembered between launches; not changeable mid-recording. |
+| Camera ▸ | Three checkboxes about the picture-in-picture window, all available in every state, recording included. **Show Camera** puts it on screen. **Circular Camera** makes it a circle instead of a rounded rectangle. **Blur Background** blurs the room behind you and leaves you sharp. All three apply straight away and are remembered between launches. |
+| Behaviour ▸ | Three checkboxes that change what a recording *shows* while it runs, none of them changeable mid-recording and all remembered between launches. **Zoom on Click**: a click inside the recorded area zooms the *recording* to 2× around the click, holds for 0.8 s after the last click, and eases back — nothing on screen moves, only what the file shows. **Follow Mouse (region)**: a **region** recording pans to keep the pointer inside the middle third of the frame and the red frame moves with it; whole-display and window recordings ignore it, since a display has nowhere to pan. **Big Cursor**: the pointer is drawn into the recording at two and a half times its size and the system one is left out, so a GIF or APNG export keeps it; window recordings ignore it. |
 | Audio ▸ | Two independent checkboxes, **System Audio** and **Microphone**. Tick either, both, or neither: each ticked source becomes its own AAC track in the file. Remembered between launches; not changeable mid-recording. |
 | Recordings folder | Opens `~/Movies/knips/` in Finder. |
 | Last error: … | Only visible after a failure, and after anything that switched a recording setting off for one recording; the full text is in `~/Library/Logs/Knips.log`. |
@@ -228,11 +227,12 @@ button's
 defaults do not cover — a different rate, a width, a trim — use
 `knips export` (below).
 
-**Remembered settings.** The two Audio checkboxes, Zoom on Click, Follow
-Mouse, Big Cursor and the last region live in `NSUserDefaults` under
-`KnipsAudioSystem`, `KnipsAudioMicrophone`, `KnipsZoomOnClick`,
-`KnipsFollowMouse`, `KnipsBigCursor` and `KnipsLastRegion*`.
-`KnipsRecordSystemAudio` is
+**Remembered settings.** The two Audio checkboxes, the three Behaviour
+checkboxes, the camera's three and the last region live in
+`NSUserDefaults` under `KnipsAudioSystem`, `KnipsAudioMicrophone`,
+`KnipsZoomOnClick`, `KnipsFollowMouse`, `KnipsBigCursor`,
+`KnipsCameraVisible`, `KnipsCameraShape`, `KnipsCameraBlur`,
+`KnipsCameraOriginX`/`Y` and `KnipsLastRegion*`. `KnipsRecordSystemAudio` is
 the key the single old checkbox used; it is read once, only when
 `KnipsAudioSystem` has never been written, and is never written again.
 The bare binary and `Knips.app` keep separate domains (`knips` versus the
@@ -250,9 +250,9 @@ Settings › Privacy & Security › Screen Recording and click again.
 
 ## The camera window
 
-**Camera** puts a small rounded window with your camera in it at the
-bottom right of the main screen; the item carries a checkmark while it is
-up. Knips does no compositing — the camera is simply a window, and
+**Camera ▸ Show Camera** puts a small rounded window with your camera in
+it at the bottom right of the main screen; the item carries a checkmark
+while it is up. Knips does no compositing — the camera is simply a window, and
 ScreenCaptureKit records it like any other. It floats above ordinary
 windows, follows you across Spaces, and stays up across recordings until
 you switch it off or quit.
@@ -273,7 +273,7 @@ before letting go moves it anywhere, so clicking the picture never throws
 it into a corner. Grabbing it again while it is still gliding takes it
 from wherever it has got to.
 
-**Circular Camera** makes it a circle. The window becomes square and the
+**Camera ▸ Circular Camera** makes it a circle. The window becomes square and the
 picture is cropped to a disc about the middle of the frame; the switch
 happens live, about the window's own centre, and the choice is
 remembered.
@@ -292,10 +292,16 @@ happens for a display recording — that already contains the camera
 wherever it stands — or if the camera is off.
 
 For a **region**, that puts the camera in the file: Kap's
-picture-in-picture, without any compositing. For a **window** it does
-not — a window recording captures that one window and nothing drawn on
-top of it — so docking there is about the screen: the picture sits beside
-the thing you are demonstrating instead of somewhere behind it.
+picture-in-picture, without any compositing.
+
+For a **window**, the plain window capture would not — ScreenCaptureKit
+composits that one window and nothing drawn on top of it, measured. So
+when the camera is up, a window recording is captured from the *display*
+instead, through a rectangle sitting exactly on the window and following
+it as you drag it. The camera really is in the file, and the price is
+that anything else in front of the window — a notification, a menu pulled
+down over it, another app dragged across — is in the file too. Switch the
+camera off and the recording goes back to capturing the window alone.
 
 And it **stays inside** the rectangle while the rectangle moves. With
 *Follow Mouse* on, a region pans across the display and the camera pans
@@ -314,8 +320,24 @@ the Dock has since covered, is discarded rather than restored somewhere
 you cannot reach. If access has *not* been granted, launch does nothing
 at all: Knips will not open a permission prompt seconds after login.
 
-The first time you switch it on, macOS asks for the **Camera**
-permission. Answer the prompt, then choose *Camera* again — Knips refuses
+**Camera ▸ Blur Background** keeps you sharp and blurs everything behind
+you — the portrait effect, done by Knips rather than by macOS. (macOS has
+one of its own in Control Center, but AVFoundation only lets an app
+*read* whether it is on, so Knips cannot switch it on for you and it
+would apply to every app at once if you did.) Switching it on or off
+takes effect immediately with no camera warm-up, and the choice is
+remembered.
+
+It costs a Vision person-segmentation pass and a CoreImage composite on
+every frame. `./build/knips probe` prints what that costs on your Mac —
+about 8 ms a frame at 640×480 on an M-series machine, against the 33 ms
+a 30 fps preview has to spend — and says so plainly if your Mac is
+slower than the preview. The mask is Vision's *fast* quality level, which
+is the one meant for a live stream; the picture is mirrored on this path
+exactly as it is without the blur.
+
+The first time you switch the camera on, macOS asks for the **Camera**
+permission. Answer the prompt, then choose *Show Camera* again — Knips refuses
 that first attempt on purpose rather than showing you a black rectangle
 while it waits, and it never retries by itself. A denied grant reads as
 `Last error: camera access is denied …`; fix it in System Settings ›

@@ -81,7 +81,9 @@ type
     procedure SetupTests; override;
     procedure TestTheCameraTravelsWithTheRectangle;
     procedure TestARectangleThatDidNotMoveIsNotWorthAFrame;
-    procedure TestAResizeMovesNothingByItself;
+    procedure TestAResizeKeepsTheCameraInItsCorner;
+    procedure TestAResizeTooSmallReclampsTheCamera;
+    procedure TestACameraDroppedOutsideKeepsFollowingFromThere;
     procedure TestRidingIsMeasuredFromTheDockNotTheLastTick;
     procedure TestWindowBoundsFlipIntoAppKitSpace;
   end;
@@ -132,6 +134,8 @@ type
     procedure SetupTests; override;
     procedure TestARegionFlipsIntoScreenSpace;
     procedure TestARegionOnASecondScreenFlipsToo;
+    procedure TestAWindowRectFlipsBackIntoARegion;
+    procedure TestACompositedRegionKeepsItsSizeAndStaysOnTheDisplay;
     procedure TestTheDockCornerIsInsideTheRegion;
     procedure TestATinyRegionDocksAsFarInAsItFits;
     procedure TestTheInsetMatchesTheSnapCorner;
@@ -1113,6 +1117,10 @@ begin
     TestARegionFlipsIntoScreenSpace);
   Test('a region on a screen with a non-zero origin flips too',
     TestARegionOnASecondScreenFlipsToo);
+  Test('a window rectangle flips back into a top-left display region',
+    TestAWindowRectFlipsBackIntoARegion);
+  Test('a composited region keeps its size and stays on the display',
+    TestACompositedRegionKeepsItsSizeAndStaysOnTheDisplay);
   Test('the dock corner is inside the region, not on the screen',
     TestTheDockCornerIsInsideTheRegion);
   Test('a region smaller than the camera docks as far in as it fits',
@@ -1154,6 +1162,69 @@ begin
   Rect := RegionScreenRect(Region, CameraRect(1440, -1080, 1920, 1080));
   Expect<Double>(Rect.X).ToBe(1450);
   Expect<Double>(Rect.Y).ToBe(-1080 + 1080 - 310);
+end;
+
+// ScreenRectRegion is RegionScreenRect run backwards, and the composited
+// window recording needs it: it captures a *display* with a source
+// rectangle riding a window's AppKit frame, and ScreenCaptureKit wants
+// that rectangle in the display's own top-left points.
+procedure TCameraDockTests.TestAWindowRectFlipsBackIntoARegion;
+var
+  Region: TCaptureRegion;
+  Screen, Rect, Back: TCameraRect;
+begin
+  Screen := CameraRect(-573, 982, 2560, 1440);
+  Region.Left := 400;
+  Region.Top := 300;
+  Region.Width := 800;
+  Region.Height := 600;
+  // Out and back on a display with a negative x origin and a positive y
+  // one — the external display this was measured against.
+  Rect := RegionScreenRect(Region, Screen);
+  Back := ScreenRectRegion(Rect, Screen, Region.Width, Region.Height);
+  Expect<Double>(Back.X).ToBe(400);
+  Expect<Double>(Back.Y).ToBe(300);
+  Expect<Double>(Back.Width).ToBe(800);
+  Expect<Double>(Back.Height).ToBe(600);
+end;
+
+// Two things the composited path depends on. The size is the one passed
+// in and never the window's, because AVAssetWriter fixed the file's
+// dimensions at the first frame and a window the user resizes mid-take
+// must not move them. And the origin is clamped onto the display,
+// because a window dragged half off the screen would otherwise ask
+// ScreenCaptureKit for a rectangle that is partly not there.
+procedure TCameraDockTests.TestACompositedRegionKeepsItsSizeAndStaysOnTheDisplay;
+var
+  Screen, Back: TCameraRect;
+begin
+  Screen := CameraRect(0, 0, 1512, 982);
+  // The window has been resized larger; the region keeps the base size
+  // and stays anchored to the window's top-left corner.
+  Back := ScreenRectRegion(CameraRect(100, 82, 1200, 800), Screen, 800, 600);
+  Expect<Double>(Back.X).ToBe(100);
+  // 982 - (82 + 800) = 100: the window's top edge, from the display's.
+  Expect<Double>(Back.Y).ToBe(100);
+  Expect<Double>(Back.Width).ToBe(800);
+  Expect<Double>(Back.Height).ToBe(600);
+
+  // Dragged off the right and bottom edges: the rectangle slides back on
+  // rather than hanging over them.
+  Back := ScreenRectRegion(CameraRect(1400, -300, 800, 600), Screen, 800, 600);
+  Expect<Double>(Back.X).ToBe(1512 - 800);
+  Expect<Double>(Back.Y).ToBe(982 - 600);
+
+  // Dragged off the left and top edges: the same, at the near edge.
+  Back := ScreenRectRegion(CameraRect(-200, 700, 800, 600), Screen, 800, 600);
+  Expect<Double>(Back.X).ToBe(0);
+  Expect<Double>(Back.Y).ToBe(0);
+
+  // A window bigger than the display in both axes lands at the origin,
+  // not at a negative one.
+  Back := ScreenRectRegion(CameraRect(-50, -50, 2000, 1200), Screen,
+    2000, 1200);
+  Expect<Double>(Back.X).ToBe(0);
+  Expect<Double>(Back.Y).ToBe(0);
 end;
 
 // The whole point of docking: the picture-in-picture ends up composited
@@ -1563,8 +1634,12 @@ begin
     TestTheCameraTravelsWithTheRectangle);
   Test('a rectangle that did not move is not worth a frame',
     TestARectangleThatDidNotMoveIsNotWorthAFrame);
-  Test('a rectangle that only resized moves the camera nowhere',
-    TestAResizeMovesNothingByItself);
+  Test('a resized rectangle keeps the camera in the corner it docked to',
+    TestAResizeKeepsTheCameraInItsCorner);
+  Test('a rectangle resized below the camera re-clamps it inside',
+    TestAResizeTooSmallReclampsTheCamera);
+  Test('a camera anchored outside the rectangle is not teleported inside',
+    TestACameraDroppedOutsideKeepsFollowingFromThere);
   Test('riding is measured from the dock, not from the last tick',
     TestRidingIsMeasuredFromTheDockNotTheLastTick);
   Test('window bounds flip into AppKit''s screen space',
@@ -1577,17 +1652,24 @@ end;
 // corner to another the moment the rectangle's midline crossed it.
 procedure TCameraRideTests.TestTheCameraTravelsWithTheRectangle;
 var
-  Docked, Ridden: TCameraOrigin;
+  Anchor: TCameraRideAnchor;
+  Ridden: TCameraOrigin;
+  Size: TCameraSize;
+  Docked: TCameraOrigin;
 begin
+  Size := CameraSize(240, 180);
+  // Bottom-left of an 800x600 rectangle at (100, 60): the anchor is the
+  // left and bottom edges, 20 points in on each.
   Docked.X := 120;
   Docked.Y := 80;
-  Ridden := CameraRideOrigin(Docked, CameraRect(100, 60, 800, 600),
-    CameraRect(340, 210, 800, 600));
+  Anchor := CameraRideAnchorFor(Docked, Size, CameraRect(100, 60, 800, 600));
+  Expect<Boolean>(Anchor.FromRight).ToBe(False);
+  Expect<Boolean>(Anchor.FromTop).ToBe(False);
+  Ridden := CameraRideOrigin(Anchor, Size, CameraRect(340, 210, 800, 600));
   Expect<Double>(Ridden.X).ToBe(360);
   Expect<Double>(Ridden.Y).ToBe(230);
   // And backwards, which is what a pan to the left is.
-  Ridden := CameraRideOrigin(Docked, CameraRect(100, 60, 800, 600),
-    CameraRect(40, 10, 800, 600));
+  Ridden := CameraRideOrigin(Anchor, Size, CameraRect(40, 10, 800, 600));
   Expect<Double>(Ridden.X).ToBe(60);
   Expect<Double>(Ridden.Y).ToBe(30);
 end;
@@ -1608,22 +1690,103 @@ begin
     CameraRect(100, 60.6, 800, 600))).ToBe(True);
 end;
 
-// A recorded window that is resized rather than moved keeps its origin,
-// and the camera keeps its offset from that origin. Re-deciding a corner
-// on every resize would make the picture hop about while the user drags
-// a window edge.
-procedure TCameraRideTests.TestAResizeMovesNothingByItself;
+// A recorded window that is resized rather than moved keeps the CORNER
+// the dock chose, not the rectangle's origin. In AppKit's bottom-left
+// space those are different things the moment a window is resized by any
+// edge but the bottom-left one, and following the origin is what dragged
+// the camera about on a bottom-edge resize and left it straddling the
+// top edge on a top-edge one.
+procedure TCameraRideTests.TestAResizeKeepsTheCameraInItsCorner;
 var
-  Docked, Ridden: TCameraOrigin;
+  Anchor: TCameraRideAnchor;
+  Ridden: TCameraOrigin;
+  Size: TCameraSize;
+  Docked: TCameraOrigin;
 begin
-  Docked.X := 120;
-  Docked.Y := 80;
-  Ridden := CameraRideOrigin(Docked, CameraRect(100, 60, 800, 600),
-    CameraRect(100, 60, 400, 300));
-  Expect<Double>(Ridden.X).ToBe(120);
-  Expect<Double>(Ridden.Y).ToBe(80);
+  Size := CameraSize(240, 180);
+  // Top-right corner of (100, 60, 800, 600), 16 points in on each axis:
+  // x = 100 + 800 - 240 - 16, y = 60 + 600 - 180 - 16.
+  Docked.X := 644;
+  Docked.Y := 464;
+  Anchor := CameraRideAnchorFor(Docked, Size, CameraRect(100, 60, 800, 600));
+  Expect<Boolean>(Anchor.FromRight).ToBe(True);
+  Expect<Boolean>(Anchor.FromTop).ToBe(True);
+  Expect<Double>(Anchor.OffsetX).ToBe(16);
+  Expect<Double>(Anchor.OffsetY).ToBe(16);
+
+  // The BOTTOM edge dragged down 50 points: the origin drops, the top
+  // right corner does not move, and neither does the camera. Following
+  // the origin would have pulled it 50 points down out of its corner.
+  Ridden := CameraRideOrigin(Anchor, Size, CameraRect(100, 10, 800, 650));
+  Expect<Double>(Ridden.X).ToBe(644);
+  Expect<Double>(Ridden.Y).ToBe(464);
+
+  // The TOP edge dragged down 200 points: the origin does not move at
+  // all, so the old arithmetic left the camera exactly where it was —
+  // hanging 100 points out of the top of a rectangle that now ends at
+  // 460. The corner anchor brings it with the edge.
+  Ridden := CameraRideOrigin(Anchor, Size, CameraRect(100, 60, 800, 400));
+  Expect<Double>(Ridden.X).ToBe(644);
+  Expect<Double>(Ridden.Y).ToBe(264);
+  // Inside, which is the whole point.
+  Expect<Boolean>(Ridden.Y + Size.Height <= 60 + 400).ToBe(True);
+
+  // The LEFT edge dragged left 120 points: same story on the other axis.
+  Ridden := CameraRideOrigin(Anchor, Size, CameraRect(-20, 60, 920, 600));
+  Expect<Double>(Ridden.X).ToBe(644);
+  Expect<Double>(Ridden.Y).ToBe(464);
+
+  // And a resize is now worth a frame, where an origin-only comparison
+  // said nothing had happened.
   Expect<Boolean>(IsCameraRideMovement(CameraRect(100, 60, 800, 600),
-    CameraRect(100, 60, 400, 300))).ToBe(False);
+    CameraRect(100, 60, 800, 400))).ToBe(True);
+end;
+
+// A window resized smaller than the camera has no corner to hold the
+// picture inside; the clamp puts it at the rectangle's own origin rather
+// than leaving it hanging off two edges at once.
+procedure TCameraRideTests.TestAResizeTooSmallReclampsTheCamera;
+var
+  Anchor: TCameraRideAnchor;
+  Ridden: TCameraOrigin;
+  Size: TCameraSize;
+  Docked: TCameraOrigin;
+begin
+  Size := CameraSize(240, 180);
+  Docked.X := 644;
+  Docked.Y := 464;
+  Anchor := CameraRideAnchorFor(Docked, Size, CameraRect(100, 60, 800, 600));
+  Ridden := CameraRideOrigin(Anchor, Size, CameraRect(100, 60, 120, 90));
+  Expect<Double>(Ridden.X).ToBe(100);
+  Expect<Double>(Ridden.Y).ToBe(60);
+end;
+
+// The ride re-anchors on wherever something else left the window — a
+// drag, the snap after one, a shape change — and then follows from
+// there. If it clamped every tick, a picture that is legitimately
+// outside the recorded rectangle would be yanked inside a thirtieth of a
+// second after the user let go of it, which is exactly the teleport the
+// re-anchor exists to prevent. Placement is NearestCameraCorner's job
+// and the corner snap's; the ride only translates.
+procedure TCameraRideTests.TestACameraDroppedOutsideKeepsFollowingFromThere;
+var
+  Anchor: TCameraRideAnchor;
+  Ridden: TCameraOrigin;
+  Size: TCameraSize;
+  Outside: TCameraOrigin;
+begin
+  Size := CameraSize(240, 180);
+  // 60 points clear of the rectangle's left edge, and below its bottom.
+  Outside.X := -140;
+  Outside.Y := -100;
+  Anchor := CameraRideAnchorFor(Outside, Size, CameraRect(0, 0, 800, 600));
+  Ridden := CameraRideOrigin(Anchor, Size, CameraRect(0, 0, 800, 600));
+  Expect<Double>(Ridden.X).ToBe(-140);
+  Expect<Double>(Ridden.Y).ToBe(-100);
+  // And it travels with the rectangle from there, keeping the offset.
+  Ridden := CameraRideOrigin(Anchor, Size, CameraRect(300, 200, 800, 600));
+  Expect<Double>(Ridden.X).ToBe(160);
+  Expect<Double>(Ridden.Y).ToBe(100);
 end;
 
 // Thirty ticks a second for ten minutes is eighteen thousand additions.
@@ -1632,27 +1795,35 @@ end;
 // the anchor for every position, however many ticks have passed.
 procedure TCameraRideTests.TestRidingIsMeasuredFromTheDockNotTheLastTick;
 var
-  Docked, Stepwise, Direct: TCameraOrigin;
+  Anchor, Stepwise: TCameraRideAnchor;
+  Size: TCameraSize;
+  Docked, Walked, Direct: TCameraOrigin;
   Rect: TCameraRect;
   I: Integer;
 begin
+  Size := CameraSize(240, 180);
   Docked.X := 120;
   Docked.Y := 80;
   Rect := CameraRect(100, 60, 800, 600);
-  // The stepwise arm re-anchors on ITS OWN last answer and the previous
-  // tick's rect — the accumulating shape the implementation must not
-  // have. Only an anchored implementation makes both arms agree after a
-  // thousand fractional steps; an accumulator drifts by the sum of the
-  // rounding errors and fails the exact comparison.
-  Stepwise := Docked;
+  Anchor := CameraRideAnchorFor(Docked, Size, Rect);
+  // The stepwise arm re-anchors on ITS OWN last answer at every tick —
+  // the accumulating shape the implementation must not have. Only an
+  // anchored implementation makes both arms agree after a thousand
+  // fractional steps; an accumulator drifts by the sum of the rounding
+  // errors and fails the comparison.
+  Walked := Docked;
+  Stepwise := Anchor;
   for I := 1 to 1000 do
-    Stepwise := CameraRideOrigin(Stepwise,
-      CameraRect(100 + (I - 1) / 3, 60 + (I - 1) / 7, 800, 600),
+  begin
+    Stepwise := CameraRideAnchorFor(Walked, Size,
+      CameraRect(100 + (I - 1) / 3, 60 + (I - 1) / 7, 800, 600));
+    Walked := CameraRideOrigin(Stepwise, Size,
       CameraRect(100 + I / 3, 60 + I / 7, 800, 600));
-  Direct := CameraRideOrigin(Docked, Rect,
+  end;
+  Direct := CameraRideOrigin(Anchor, Size,
     CameraRect(100 + 1000 / 3, 60 + 1000 / 7, 800, 600));
-  Expect<Boolean>(Abs(Stepwise.X - Direct.X) < 0.001).ToBe(True);
-  Expect<Boolean>(Abs(Stepwise.Y - Direct.Y) < 0.001).ToBe(True);
+  Expect<Boolean>(Abs(Walked.X - Direct.X) < 0.001).ToBe(True);
+  Expect<Boolean>(Abs(Walked.Y - Direct.Y) < 0.001).ToBe(True);
 end;
 
 // CGWindowListCopyWindowInfo answers in Quartz's global space: origin at

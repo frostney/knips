@@ -69,6 +69,7 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | `source/Knips.App.pas` | Menu-bar app: status item, menu, preferences, runtime-built `KnipsAppTarget` |
 | `source/Knips.App.Overlay.pas` | Region selection overlay; runtime-built `KnipsOverlayView`/`KnipsOverlayWindow` |
 | `source/Knips.App.Camera.pas` | Camera picture-in-picture window: mirrored AVCaptureSession + preview layer in a floating NSWindow that drags itself, snaps to the nearest corner, switches between rectangle and circle, and docks into — and rides along with — the recorded rectangle |
+| `source/Knips.App.Camera.Blur.pas` | Portrait-style background blur for that window: an AVCaptureVideoDataOutput on the same session, Vision person segmentation and a CoreImage composite on a serial GCD queue, into the window's own layer; runtime-built `KnipsCameraOutput` |
 | `source/Knips.App.Live.pas` | Zoom on Click / Follow Mouse: a main-thread animator on the app's 30 Hz timer that moves the stream's `sourceRect`, the recording border and a docked camera |
 | `source/Knips.App.Hotkey.pas` | The global ⌘⇧2 stop hotkey: Carbon `RegisterEventHotKey` + an application-target event handler, no TCC grant |
 | `source/Knips.Recording.LiveMath.pas` | Platform-neutral live-effect arithmetic: rect clamping, dead zone, smoothstep easing, which effects a target can have (tested) |
