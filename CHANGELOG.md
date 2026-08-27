@@ -29,6 +29,34 @@ conventional commits by git-cliff (`cliff.toml`).
   scale-1 recording keeps an 800 px cap, and an oversized result is
   called out on the app's own "Last error" line, since a bundle has no
   stderr.
+- `app`: the playback window puts Knips **in the Dock and in ⌘-Tab** for
+  as long as it is open, with a menu bar of its own — *About Knips*,
+  *Quit Knips* ⌘Q, and a Window menu with *Close* ⌘W and *Minimize* ⌘M.
+  Closing the window, by any route, drops the process back to being
+  menu-bar-only. The rest of the app stays an Accessory process: a
+  recorder has no business owning the Dock while it records. ⌘Q is the
+  same guarded quit the menu offers — it finalises an open recording and
+  refuses during a GIF export — and the status item is unaffected by the
+  switch. Starting a recording closes the playback window first, so the
+  Dock tile and the menu bar are never in the frame. `knips probe` now
+  gates the promotion and the menu's shape, and skips that one check
+  (rather than dying) where there is no window server; `knips app` refuses
+  there with a message instead of aborting.
+
+### Fixes
+
+- `app`: a close asked for by the user — the titlebar's button or ⌘W —
+  is now refused while a GIF export is running (`windowShouldClose:`),
+  rather than taking the window down and leaving the export to write
+  through nil-checks. The *Close* button and every internal path were
+  already refused.
+- `app`: ⌘Q during an export no longer re-attaches the status item's
+  menu. `CommandExportGif` detaches it so that a click cannot open menu
+  tracking inside the export's event drain, and every refresh during an
+  export now leaves it detached.
+- `app`: a stop click during an export no longer queues a deferred
+  `FinishRecording` that re-enters the run loop from under the export.
+  `CommandStop` reads the transition's answer before scheduling anything.
 - `app`: *Record Window* submenu (on-screen application windows, refreshed
   at most once every five seconds and never listing Knips's own windows),
   *Record Last Region*, and a *Record System Audio* checkbox. The checkbox

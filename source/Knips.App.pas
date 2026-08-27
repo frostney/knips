@@ -4,7 +4,9 @@ unit Knips.App;
 // decides what each click means. `knips app` sets the activation policy
 // to Accessory (no Dock tile, no main menu) and hands the process to
 // NSApp's run loop; everything below happens inside it, on the main
-// thread.
+// thread. The one departure from Accessory is the playback window, which
+// promotes the process to Regular for as long as it is open — see
+// PromoteForPlayback.
 //
 //   asIdle  --Record Region…-->  asSelecting  --mouse up-->  asRecording
 //      |                              |                          |
@@ -62,6 +64,22 @@ function RunMenuBarApp(out AError: string): Boolean;
 procedure EnsureAppClasses;
 
 function AppTargetClassName: string;
+
+// True when this process can reach the window server. Nothing that
+// touches NSApplication may be called without it — AppKit aborts rather
+// than failing — so `knips probe` and `knips app` both ask first.
+function HasWindowServer: Boolean;
+
+// `knips probe`'s gate for the Dock promotion the playback window
+// performs: builds the main menu, switches the process to the Regular
+// policy, reads the policy back, switches it to Accessory and reads it
+// back again, and restores the policy the process started with. ADetail
+// is one line for the probe to print. False with a reason when a step did
+// not take, which is the failure worth catching — setActivationPolicy:
+// returns a BOOL and AppKit is free to decline. Requires
+// HasWindowServer.
+function CheckDockPromotion(out ADetail: string;
+  out AError: string): Boolean;
 
 {$ENDIF}
 
@@ -123,6 +141,28 @@ const
     'window list unavailable — check Screen Recording permission';
   IdleToolTip = 'Knips — click for the menu';
   RecordingToolTip = 'Knips — click to stop recording';
+
+  // The main menu, which only a Regular app shows. macOS takes the first
+  // item's submenu as the application menu and titles it with the running
+  // application's name, so MainAppMenuTitle is never actually drawn; the
+  // Dock tile and the switcher take the same name (CFBundleName under
+  // Knips.app, the executable's name from the shell).
+  MainMenuTitle = 'MainMenu';
+  MainAppMenuTitle = 'Knips';
+  AboutTitle = 'About Knips';
+  // Implemented by NSApplication, so it is reached through the responder
+  // chain with no target of ours — the item is left untargeted.
+  AboutSelector = 'orderFrontStandardAboutPanel:';
+  MainWindowMenuTitle = 'Window';
+  CloseWindowTitle = 'Close';
+  CloseWindowSelector = 'performClose:';
+  MinimizeWindowTitle = 'Minimize';
+  MinimizeWindowSelector = 'performMiniaturize:';
+  // Cmd is a menu item's default modifier, so none of the three sets a
+  // keyEquivalentModifierMask (measured: 1 << 20, NSCommandKeyMask).
+  QuitKeyEquivalent = 'q';
+  CloseWindowKeyEquivalent = 'w';
+  MinimizeWindowKeyEquivalent = 'm';
 
   // The status item's autosave name, and the AppKit-owned defaults key
   // derived from it. AppKit stores the item's distance from the RIGHT
@@ -195,6 +235,9 @@ type
     FCameraItem: NSMenuItem;
     FErrorItem: NSMenuItem;
     FQuitItem: NSMenuItem;
+    // The menu bar the process shows while it is a Regular app. Built on
+    // the first promotion and kept — see PromoteForPlayback.
+    FMainMenu: NSMenu;
     FTimer: NSTimer;
     FOverlay: TSelectionOverlay;
     FCamera: TCameraPreview;
@@ -243,6 +286,11 @@ type
     procedure ShowPlayback(const APath: string; APixelWidth,
       APixelHeight, AScale: Integer);
     procedure HandlePlaybackError(const AMessage: string);
+    // The playback window is the only thing in this app that puts the
+    // process in the Dock; these two are the whole of it.
+    procedure PromoteForPlayback;
+    procedure HandlePlaybackClosed;
+    procedure ClosePlaybackForRecording;
     function Transition(ACommand: TAppCommand): Boolean;
     function ResolveDisplayIndex(ADisplayID: UInt32; out AIndex: Integer;
       out AError: string): Boolean;
@@ -697,6 +745,221 @@ begin
   end;
 end;
 
+{ The menu bar of a Regular app, and the policy switch that makes the
+  process one. `knips app` is an Accessory process — no Dock tile, no
+  menu bar — for everything it does with the screen: the status item, the
+  selection overlay, the recording frame, the camera window. The playback
+  window is the exception. It is an ordinary titled window and a user is
+  entitled to treat it as one: find it in the Dock, ⌘-Tab to it, close it
+  with ⌘W. That needs the Regular policy, and the Regular policy needs a
+  main menu, because a Regular app with none shows an empty menu bar. }
+
+procedure AddSubmenu(AMenu, ASubmenu: NSMenu; const ATitle: string);
+var
+  Item: NSMenuItem;
+begin
+  // A submenu hangs off an item that carries no action of its own — the
+  // same shape as the Record Window item in the status menu.
+  Item := NSMenuItem(NSMenuItem.alloc.initWithTitle_action_keyEquivalent(
+    PascalToNSString(ATitle), nil, PascalToNSString('')));
+  Item.setSubmenu(ASubmenu);
+  AMenu.addItem(Item);
+  Item.release;
+end;
+
+// Two menus, five items, and only one of them is ours. Quit is targeted at
+// KnipsAppTarget's quitKnips: — the very selector the status item's own
+// Quit uses — so ⌘Q inherits the export lockout and the finalisation of an
+// open recording instead of becoming a second, unguarded way out. The
+// other three are left untargeted on purpose: AppKit sends an untargeted
+// action down the responder chain, which is what puts performClose: and
+// performMiniaturize: on whichever window is key and
+// orderFrontStandardAboutPanel: on NSApp. A new NSMenu autoenables its
+// items — unlike the status menu, which switches that off because the
+// controller decides what is legal — and that is exactly what is wanted
+// here: the two Window items grey themselves out when no window can
+// answer them.
+//
+// There is deliberately no Edit menu (nothing here takes text) and no
+// setWindowsMenu: (AppKit would then keep a window list in it, and the
+// windows this app has besides the playback one are a borderless overlay,
+// a frame and a camera preview, none of which belong in a menu).
+function BuildMainMenu(ATarget: id): NSMenu;
+var
+  AppMenu, WindowMenu: NSMenu;
+  QuitItem: NSMenuItem;
+begin
+  Result := NSMenu(NSMenu.alloc.initWithTitle(
+    PascalToNSString(MainMenuTitle)));
+
+  AppMenu := NSMenu(NSMenu.alloc.initWithTitle(
+    PascalToNSString(MainAppMenuTitle)));
+  AppMenu.addItemWithTitle_action_keyEquivalent(PascalToNSString(AboutTitle),
+    SelectorNamed(AboutSelector), PascalToNSString(''));
+  AppMenu.addItem(NSMenuItem.separatorItem);
+  QuitItem := AppMenu.addItemWithTitle_action_keyEquivalent(
+    PascalToNSString(QuitTitle), SelectorNamed(QuitSelector),
+    PascalToNSString(QuitKeyEquivalent));
+  if QuitItem <> nil then
+    QuitItem.setTarget(ATarget);
+  AddSubmenu(Result, AppMenu, MainAppMenuTitle);
+  AppMenu.release;
+
+  WindowMenu := NSMenu(NSMenu.alloc.initWithTitle(
+    PascalToNSString(MainWindowMenuTitle)));
+  WindowMenu.addItemWithTitle_action_keyEquivalent(
+    PascalToNSString(CloseWindowTitle), SelectorNamed(CloseWindowSelector),
+    PascalToNSString(CloseWindowKeyEquivalent));
+  WindowMenu.addItemWithTitle_action_keyEquivalent(
+    PascalToNSString(MinimizeWindowTitle),
+    SelectorNamed(MinimizeWindowSelector),
+    PascalToNSString(MinimizeWindowKeyEquivalent));
+  AddSubmenu(Result, WindowMenu, MainWindowMenuTitle);
+  WindowMenu.release;
+end;
+
+function InRegularPolicy: Boolean;
+begin
+  Result := NSApplication.sharedApplication.activationPolicy
+    = NSApplicationActivationPolicyRegular;
+end;
+
+// The menu goes in first and the policy second, so the menu bar the system
+// adopts on the switch is already populated rather than briefly empty.
+//
+// AActivate is the nudge a policy switch made mid-run needs. Promoting
+// changes what the process *is*; it does not put it in front, and a Dock
+// tile whose menu bar only turns up after the user clicks away and back is
+// worse than no promotion. This is a complete operation on purpose — a
+// caller should not have to know that. `knips probe` is the one caller
+// that passes False: it has no run loop and no window, so activating would
+// mean nothing except taking focus off the terminal.
+//
+// Measured on device, this order followed by the window's own
+// makeKeyAndOrderFront:: `lsappinfo` reports the process as Foreground and
+// as the front application while the window is up, and back to UIElement
+// once it closes.
+procedure EnterRegularPolicy(AMainMenu: NSMenu; AActivate: Boolean);
+var
+  App: NSApplication;
+begin
+  App := NSApplication.sharedApplication;
+  if AMainMenu <> nil then
+    App.setMainMenu(AMainMenu);
+  if InRegularPolicy then
+    Exit;
+  App.setActivationPolicy(NSApplicationActivationPolicyRegular);
+  if AActivate then
+    App.activateIgnoringOtherApps(True);
+end;
+
+// The main menu is left in place. Nothing draws it under the Accessory
+// policy, and clearing it would mean handing AppKit nil from inside the
+// windowWillClose: that a ⌘Q or ⌘W out of that very menu just dispatched.
+// The cost is that the two key equivalents stay live between playback
+// windows, and both are already safe: ⌘W needs a window that can close,
+// and ⌘Q is the same guarded quitKnips: the status item offers.
+procedure LeaveRegularPolicy;
+begin
+  if not InRegularPolicy then
+    Exit;
+  NSApplication.sharedApplication.setActivationPolicy(
+    NSApplicationActivationPolicyAccessory);
+end;
+
+function HasWindowServer: Boolean;
+var
+  Session: CFDictionaryRef;
+begin
+  // Everything below NSApplication.sharedApplication needs a connection to
+  // the window server, and without one AppKit does not fail — it kills the
+  // process ("FAILED TO establish the default connection to the
+  // WindowServer"). Over SSH, from launchd, or in a build container there
+  // is none. CGSessionCopyCurrentDictionary answers NULL outside a
+  // graphical login session, which is the documented way to ask before
+  // touching AppKit at all.
+  Session := CGSessionCopyCurrentDictionary;
+  Result := Session <> nil;
+  if Result then
+    CFRelease(Session);
+end;
+
+function CheckDockPromotion(out ADetail: string;
+  out AError: string): Boolean;
+var
+  Target: id;
+  Menu: NSMenu;
+  AppItems, WindowItems: Integer;
+  EntryPolicy: NSInteger;
+begin
+  Result := False;
+  ADetail := '';
+  AError := '';
+  EnsureAppClasses;
+  Target := InstantiateClass(GTargetClass);
+  if Target = nil then
+  begin
+    AError := 'could not instantiate ' + TargetClassName;
+    Exit;
+  end;
+  // Whatever the process was before this ran is what it goes back to, on
+  // every path out. Not "Accessory": a bare CLI binary starts Prohibited,
+  // and a check has no business converting the process it is checking.
+  EntryPolicy := NSApplication.sharedApplication.activationPolicy;
+  Menu := nil;
+  try
+    Menu := BuildMainMenu(Target);
+    if Menu.numberOfItems <> 2 then
+    begin
+      AError := Format('the main menu has %d top-level menus, expected 2',
+        [Menu.numberOfItems]);
+      Exit;
+    end;
+    AppItems := Menu.itemAtIndex(0).submenu.numberOfItems;
+    WindowItems := Menu.itemAtIndex(1).submenu.numberOfItems;
+    if (AppItems <> 3) or (WindowItems <> 2) then
+    begin
+      AError := Format('the main menu has %d application items and %d '
+        + 'window items, expected 3 and 2', [AppItems, WindowItems]);
+      Exit;
+    end;
+    // The round trip in this very process. setActivationPolicy: answers a
+    // BOOL, but what matters is what the policy reads back as.
+    EnterRegularPolicy(Menu, False);
+    if not InRegularPolicy then
+    begin
+      AError := 'the process did not take the Regular activation policy';
+      Exit;
+    end;
+    if NSApplication.sharedApplication.mainMenu = nil then
+    begin
+      AError := 'the main menu was not installed';
+      Exit;
+    end;
+    LeaveRegularPolicy;
+    if InRegularPolicy then
+    begin
+      AError := 'the process did not go back to the Accessory policy';
+      Exit;
+    end;
+    ADetail := Format('regular and accessory both taken, entry policy %d '
+      + 'restored; main menu %s(%d), %s(%d)', [EntryPolicy, MainAppMenuTitle,
+      AppItems, MainWindowMenuTitle, WindowItems]);
+    Result := True;
+  finally
+    // Order matters. The menu holds an item whose target is the
+    // KnipsAppTarget released two lines down, so NSApp has to let go of
+    // the menu first or it is left holding one that points at freed
+    // memory. Then the policy, so a failure on any branch above still
+    // leaves the process as it was found rather than stranded Regular.
+    NSApplication.sharedApplication.setMainMenu(nil);
+    NSApplication.sharedApplication.setActivationPolicy(EntryPolicy);
+    if Menu <> nil then
+      Menu.release;
+    ReleaseInstance(Target);
+  end;
+end;
+
 { TAppController }
 
 constructor TAppController.Create;
@@ -713,6 +976,12 @@ begin
   FreeAndNil(FOverlay);
   FreeAndNil(FCamera);
   FreeAndNil(FBorder);
+  // Freeing the window closes it, which fires OnClosed; putting the
+  // process back to Accessory from inside the controller's own destructor
+  // would be reaching into an object that is half gone, for a process that
+  // is leaving anyway.
+  if FPlayback <> nil then
+    FPlayback.OnClosed := nil;
   FreeAndNil(FPlayback);
   FreeAndNil(FSession);
   if FStatusItem <> nil then
@@ -733,6 +1002,12 @@ begin
   begin
     FMenu.release;
     FMenu := nil;
+  end;
+  if FMainMenu <> nil then
+  begin
+    // NSApp retained it in setMainMenu:; this only balances the alloc.
+    FMainMenu.release;
+    FMainMenu := nil;
   end;
   if FTarget <> nil then
   begin
@@ -1097,19 +1372,54 @@ end;
 
 procedure TAppController.ShowPlayback(const APath: string; APixelWidth,
   APixelHeight, AScale: Integer);
+var
+  Shown: Boolean;
 begin
   if FPlayback = nil then
   begin
     FPlayback := TPlaybackWindow.Create;
     FPlayback.OnError := HandlePlaybackError;
+    FPlayback.OnClosed := HandlePlaybackClosed;
   end;
-  // One window per recording: Show closes whatever was open first, so a
-  // second clip replaces the first rather than stacking players that all
-  // hold their files open.
-  if not FPlayback.Show(FTarget, APath, APixelWidth, APixelHeight,
-    AScale) then
-    // Falling back to the old behaviour is better than a finished
-    // recording that never says so.
+  // A stop click that arrived while a GIF export owned the main thread
+  // can reach this far: the Busy lockout refuses the transition, but the
+  // deferred one-shot it queued still fires, and the export's own run-loop
+  // slices are where it fires. Taking the window down under a running
+  // export is what CommandClose already refuses; building a second one —
+  // and switching the activation policy around it — is worse. The
+  // recording is finished and on disk either way, so say so the way a
+  // window that could not be made says it.
+  if FPlayback.Exporting then
+  begin
+    Reveal(APath);
+    Exit;
+  end;
+  // One window per recording, and the old one goes *here* rather than
+  // inside Show: its teardown fires OnClosed, which demotes the process,
+  // and a demotion landing after the promotion below would leave the new
+  // window's Dock tile behind.
+  FPlayback.CommandClose;
+  // Before Show, not after. Show activates the app and makes the window
+  // key, and the policy has to be Regular by then for the menu bar to
+  // come with it.
+  PromoteForPlayback;
+  Shown := False;
+  try
+    Shown := FPlayback.Show(FTarget, APath, APixelWidth, APixelHeight,
+      AScale);
+  finally
+    // False *or* a raise — Show can throw EObjCRuntime out of
+    // EnsurePlaybackClasses — and either way there is no window. A
+    // process left Regular with nothing on screen is the worst of both:
+    // a Dock tile that does nothing, a menu bar whose Close is dead, and
+    // no windowWillClose: ever coming to put it right, because there was
+    // never a window to close.
+    if not Shown then
+      HandlePlaybackClosed;
+  end;
+  // Falling back to the old behaviour is better than a finished recording
+  // that never says so.
+  if not Shown then
     Reveal(APath);
 end;
 
@@ -1117,6 +1427,55 @@ procedure TAppController.HandlePlaybackError(const AMessage: string);
 begin
   RecordError(AMessage);
   RefreshStatusItem;
+end;
+
+// A Regular process has a Dock tile, a place in ⌘-Tab, and a menu bar; an
+// Accessory one has none of the three. Knips is Accessory for everything
+// it does with the screen — a recorder that owned the Dock and the menu
+// bar while it recorded would be recording itself — and Regular for
+// exactly as long as the playback window is up, because that window is an
+// ordinary document window and users look for those in the Dock.
+//
+// The main menu is built once and kept, rather than rebuilt per
+// promotion: it holds no state, and AppKit is happier keeping a menu than
+// being handed a new one under a live menu bar.
+procedure TAppController.PromoteForPlayback;
+begin
+  if FMainMenu = nil then
+    FMainMenu := BuildMainMenu(FTarget);
+  EnterRegularPolicy(FMainMenu, True);
+end;
+
+// Every way the window can go — the Close button, the titlebar, ⌘W, a new
+// recording replacing it, Quit — ends in the window's windowWillClose:,
+// and so here.
+procedure TAppController.HandlePlaybackClosed;
+begin
+  LeaveRegularPolicy;
+end;
+
+
+// Every Record command calls this before it starts anything. A recording
+// with the playback window still up would capture the app's own Dock tile
+// and menu bar — the app would be recording itself, which is the whole
+// reason the process is Accessory in the first place — and for a display
+// or region capture the window itself would be in the frame.
+//
+// The close is synchronous all the way down, which is what makes it safe
+// to do here: TPlaybackWindow.CommandClose uses -close, which posts
+// windowWillClose: on the spot rather than deferring it, so
+// HandleWindowWillClose, OnClosed, HandlePlaybackClosed and the switch
+// back to Accessory have all run by the time this returns. That is one
+// full run-loop turn before startPending: builds the content filter, so
+// the window is gone and the Dock is back down before ScreenCaptureKit is
+// asked what to capture.
+//
+// An export cannot be running here: Transition refuses every command
+// while Busy, and each caller checks it before getting this far.
+procedure TAppController.ClosePlaybackForRecording;
+begin
+  if (FPlayback <> nil) and FPlayback.Visible then
+    FPlayback.CommandClose;
 end;
 
 function TAppController.ElapsedSeconds: Int64;
@@ -1188,7 +1547,18 @@ begin
       Button.setAction(nil);
       Button.setToolTip(PascalToNSString(IdleToolTip));
     end;
-    FStatusItem.setMenu(FMenu);
+    // Not while a GIF export owns the main thread. CommandExportGif
+    // detaches the menu on purpose: opening an NSMenu starts a tracking
+    // loop inside sendEvent that does not return until the menu is
+    // dismissed, and the export drains events, so an attached menu stalls
+    // it indefinitely. Every path that refreshes mid-export has to leave
+    // it detached — ⌘Q's refusal, a camera error, the elapsed timer — and
+    // the reattach is CommandExportGif's own, one line after the export
+    // returns and Busy has gone false.
+    if Busy then
+      FStatusItem.setMenu(nil)
+    else
+      FStatusItem.setMenu(FMenu);
   end;
 end;
 
@@ -1332,6 +1702,10 @@ begin
   if not Transition(acRecordRegion) then
     Exit;
   FLastError := '';
+  // Before the overlay, not just before the capture: the selection dims
+  // every screen, and the playback window has no business sitting under
+  // the rectangle the user is about to draw.
+  ClosePlaybackForRecording;
   // The window id of a previous Record Window would otherwise still be
   // sitting there when the drag commits, and StartPending would record
   // that window instead of the rectangle just drawn.
@@ -1358,6 +1732,7 @@ begin
   if not Transition(acRecordDisplay) then
     Exit;
   FLastError := '';
+  ClosePlaybackForRecording;
   ClearPending;
   RefreshStatusItem;
   ScheduleOneShot(StartPendingSelector);
@@ -1370,6 +1745,7 @@ begin
   if not Transition(acRecordWindow) then
     Exit;
   FLastError := '';
+  ClosePlaybackForRecording;
   ClearPending;
   FPendingWindowID := AWindowID;
   RefreshStatusItem;
@@ -1383,6 +1759,7 @@ begin
   if not Transition(acRecordLastRegion) then
     Exit;
   FLastError := '';
+  ClosePlaybackForRecording;
   ClearPending;
   FPendingDisplayID := FLastRegionDisplayID;
   FPendingHasRegion := True;
@@ -1580,8 +1957,15 @@ procedure TAppController.CommandStop;
 begin
   if FState <> asRecording then
     Exit;
+  // Transition refuses everything while a GIF export owns the main
+  // thread. Without asking, the stop would queue stopPending: anyway —
+  // and that one-shot fires inside the export's own run-loop slices,
+  // re-entering a FinishRecording that pumps the run loop from under an
+  // export that is already pumping it. The recording keeps running; one
+  // more click once the export is done stops it.
+  if not Transition(acStopRecording) then
+    Exit;
   StopElapsedTimer;
-  Transition(acStopRecording);
   RefreshStatusItem;
   ScheduleOneShot(StopPendingSelector);
 end;
@@ -1743,11 +2127,23 @@ var
 begin
   Result := False;
   AError := '';
+  // Before the first AppKit call, not after: sharedApplication kills the
+  // process outright when there is no window server to connect to, and
+  // `knips app` over SSH is a plausible mistake. A message and exit 2 is
+  // the same answer every other set-up failure gets.
+  if not HasWindowServer then
+  begin
+    AError := 'no window server — the menu-bar app needs a graphical '
+      + 'login session';
+    Exit;
+  end;
   Pool := NSAutoreleasePool(NSAutoreleasePool.alloc.init);
   try
     Application := NSApplication.sharedApplication;
     // Accessory: a menu-bar-only process — no Dock tile, no main menu,
-    // and windows can still become key (the overlay needs that).
+    // and windows can still become key (the overlay needs that). This is
+    // where the app lives; only the playback window promotes it, and only
+    // for as long as it is open.
     Application.setActivationPolicy(NSApplicationActivationPolicyAccessory);
     // A status item created before the app has finished launching gets a
     // window the menu bar never adopts (height 0, never visible — seen

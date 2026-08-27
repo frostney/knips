@@ -20,7 +20,10 @@
   A region recording is framed by a passthrough window that is both drawn
   outside the recorded rectangle and excluded from the content filter;
   the finished clip opens in an `AVPlayerView` window with a one-click
-  GIF export. See [Menu bar app](#menu-bar-app).
+  GIF export. That window is the app's one ordinary document window, and
+  for as long as it is open the process switches to the `Regular` policy
+  — a Dock tile, a place in ⌘-Tab, and a menu bar with ⌘W and ⌘Q. See
+  [Menu bar app](#menu-bar-app).
 - Timing is taken from each sample buffer's presentation stamp; the
   writer's session starts at the first appended frame. This is what makes
   SCK's change-driven frame delivery record at real speed.
@@ -443,7 +446,11 @@ rejects.
 
 `knips app` sets the activation policy to `Accessory` — a process with a
 menu-bar item and no Dock tile — installs one `NSStatusItem`, and hands
-the thread to `NSApplication.run`. There is one state machine:
+the thread to `NSApplication.run`. It stays `Accessory` for everything it
+does with the screen; the one exception is the playback window, which
+promotes it to `Regular` for as long as it is open
+([Dock and the main menu](#dock-and-the-main-menu)). There is one state
+machine:
 
 ```text
          Record Region…                 mouse up (usable drag)
@@ -477,7 +484,7 @@ an `objcclass`:
 | `KnipsOverlayWindow` | `NSWindow` | `canBecomeKeyWindow` (a borderless window answers NO, and then Esc never reaches the view) |
 | `KnipsCameraView` | `NSView` | `acceptsFirstMouse:` (Knips is an Accessory app, so without it the first click on the camera window is eaten as the activating click and dragging takes two) |
 | `KnipsBorderView` | `NSView` | `drawRect:` — the frame drawn around a region while it records |
-| `KnipsPlaybackDelegate` | `NSObject` | `windowWillClose:` — the one teardown path for the playback window |
+| `KnipsPlaybackDelegate` | `NSObject` | `windowWillClose:` — the one teardown path for the playback window; `windowShouldClose:` — NO while a GIF export is running |
 
 `KnipsCameraView` is the exception to what follows: it has no ivar and no
 `try..except`, because its one body returns a constant and never calls
@@ -538,11 +545,25 @@ buttons whose target is the same `KnipsAppTarget`. *Export as GIF…* runs
 nested run loop, so the window is unresponsive while it works and the
 title carries the progress instead (`Exporting… 42%`, from the pipeline's
 new per-frame `OnProgress`). The buttons are disabled first, which is
-what makes re-entry impossible; `CommandClose` refuses while an export is
-running for the same reason. The window is `activateIgnoringOtherApps`'d
-into the foreground, exactly as the overlay is — an Accessory process's
-titled window can become key on its own, which is why this one needs no
+what makes re-entry impossible. Closing is refused for the same reason,
+in two places that between them cover every route: `CommandClose` — the
+Close button, Quit, a recording about to start, `Show` replacing the
+window — checks the flag itself, and `windowShouldClose:` answers NO to
+the closes AppKit drives on the user's behalf, which are the titlebar's
+button and ⌘W. `CommandClose` uses `-close`, which deliberately does
+*not* consult the delegate: `Show` must be able to replace the previous
+window, and a delegate that could veto that would strand it. The window is `activateIgnoringOtherApps`'d
+into the foreground, exactly as the overlay is — a titled window can
+become key even under the Accessory policy, which is why this one needs no
 runtime class for it.
+
+Opening it also promotes the process ([below](#dock-and-the-main-menu)),
+and closing it puts the process back. `Knips.App.Playback` does not do
+that itself: it fires an `OnClosed` event at the end of
+`HandleWindowWillClose`, once every field is already nil, and
+`TAppController` owns what a window on screen means for the process. The
+window unit knows about `NSWindow`; the activation policy is the app's
+business.
 
 **Remembered settings.** Two, both in `NSUserDefaults`:
 `KnipsRecordSystemAudio` (the checkbox) and `KnipsLastRegion*` (the
@@ -559,8 +580,12 @@ stops — Kap's gesture. An `NSTimer` on `KnipsAppTarget` rewrites the
 title once a second while recording (`⏺ 0:07`).
 
 That gesture costs the menu while recording, so **Quit is deliberately
-unreachable until the recording stops** — one click stops it, and Quit
-finalises any session still open before calling `terminate:` anyway.
+unreachable from the status item until the recording stops** — one click
+stops it, and Quit finalises any session still open before calling
+`terminate:` anyway. ⌘Q is the exception, and only once a playback window
+has installed the main menu ([below](#dock-and-the-main-menu)): it runs
+the same `quitKnips:`, with the same finalisation and the same refusal
+mid-export.
 
 **Getting out of a selection.** Inside the overlay, Esc or a click without
 a drag cancel. The overlay sits above the menu bar, so the status item is
@@ -629,6 +654,19 @@ is no next turn to defer to.
   an export is running, the playback buttons are already disabled, and
   Quit refuses with a `Last error: …` note rather than terminating over a
   half-written GIF.
+
+  Three details make that lockout actually hold, and each of them was a
+  hole first. **`Transition`'s answer has to be read.** `CommandStop`
+  used to call it and queue `stopPending:` regardless — and that one-shot
+  fires inside the export's *own* run-loop slices, re-entering a
+  `FinishRecording` that pumps the run loop from under an export that is
+  already pumping it. It now returns when the transition is refused; the
+  recording keeps running and one more click stops it once the export is
+  done. **`RefreshStatusItem` has to keep the menu detached** while
+  `Busy`, or the refusal path puts back the very menu
+  `CommandExportGif` removed to keep menu tracking out of the export.
+  **The user's own close has to be refused too**, which is
+  `windowShouldClose:` rather than a chain of nil-checks.
 
 **Exceptions never cross the boundary.** Every `cdecl` method body in
 `Knips.App` and `Knips.App.Overlay` is wrapped in `try..except`. There
@@ -721,6 +759,122 @@ and the app returns to idle. It never retries and never opens a dialog.
 The camera's failures take the same two outputs but *not* the transition:
 `HandleCameraError` records and refreshes, where `Fail` would also drive
 `acCaptureFailed` and knock a live recording to idle over a preview layer.
+
+### Dock and the main menu
+
+Everything the app puts on the screen while it records — the status item,
+the selection overlay, the recording frame, the camera preview — is either
+menu-bar furniture or a borderless window, and none of it wants a Dock
+tile. A recorder that owned the Dock and the menu bar while it recorded
+would be recording itself. So the process is `Accessory`.
+
+The playback window is the exception, and the reason is simply that it is
+an ordinary titled document window: it has a titlebar, a close button and
+a filename, and a user who has one on screen expects to find it in the
+Dock, ⌘-Tab to it, and close it with ⌘W. `TAppController.ShowPlayback`
+therefore switches the process to `NSApplicationActivationPolicyRegular`
+around it, and `HandlePlaybackClosed` — reached from the window's
+`OnClosed`, and so from *every* way the window can go: the Close button,
+the titlebar, ⌘W, a second recording replacing it, Quit — switches it
+back.
+
+Three things about that are not obvious:
+
+- **The order is policy, then activation, then the window.** Switching
+  the policy changes what the process *is*; it does not put it in front,
+  and a Dock tile whose menu bar only appears after the user clicks away
+  and back is worse than no promotion. `EnterRegularPolicy` therefore
+  installs the main menu, switches the policy, and calls
+  `activateIgnoringOtherApps:` — and only then does `TPlaybackWindow.Show`
+  run, with its own activation and `makeKeyAndOrderFront:`. The promotion
+  also has to happen *before* `Show`, and the previous window has to be
+  closed before *that*: closing it fires `OnClosed`, and a demotion
+  landing after the promotion would leave the new window without its tile.
+- **A `Regular` app needs a main menu**, or it shows an empty menu bar.
+  `BuildMainMenu` makes the smallest one that is not a lie: an application
+  menu with *About Knips* and *Quit Knips* ⌘Q, and a Window menu with
+  *Close* ⌘W and *Minimize* ⌘M. Only Quit is targeted — at the same
+  `quitKnips:` the status item's own Quit uses, so ⌘Q inherits the export
+  lockout and the finalisation of an open recording rather than becoming a
+  second, unguarded way out. The other three are untargeted and travel the
+  responder chain, which is also what greys the Window items out when
+  there is nothing to close. There is no Edit menu (nothing takes text)
+  and no `setWindowsMenu:` (AppKit would keep a window list in it, and the
+  app's other windows are an overlay, a frame and a camera preview). The
+  menu is built once and left installed: nothing draws it under
+  `Accessory`, and clearing it would mean handing AppKit nil from inside
+  the `windowWillClose:` a ⌘W out of that very menu just dispatched. The
+  price is that ⌘Q stays live between playback windows, so the "Quit is
+  unreachable while recording" property below now holds only for the
+  *status item*; ⌘Q is still the guarded path, and still finalises the
+  file.
+- **No new runtime-built class.** The menu items either target
+  `KnipsAppTarget`, which already exists, or nothing at all.
+
+Nothing else changes across the switch. Measured on device with the
+playback window driven from an instrumented build:
+
+| | before | window open | after close |
+| --- | --- | --- | --- |
+| `NSApp.activationPolicy` | 1 (accessory) | 0 (regular) | 1 (accessory) |
+| `lsappinfo` ApplicationType | UIElement | Foreground | UIElement |
+| `lsappinfo front` | — | knips | — |
+| `NSApp.mainMenu` items | none | 2 | 2 (kept) |
+| status item has a window | yes | yes | yes |
+| status item title / menu | `◉` / attached | `◉` / attached | `◉` / attached |
+
+**Three things the promotion must not break**, all three measured in the
+same instrumented run:
+
+- **⌘W during an export is refused, not survived.** `performClose:` was
+  sent to the window 1.5 s into a 16.8 s export, from the run loop,
+  exactly as the key equivalent does. `windowShouldClose:` answered NO,
+  the window stayed up, and the export finished — a `.gif` byte-for-byte
+  the same size as one produced with nothing interfering. Before
+  `windowShouldClose:` existed this path was *permitted*: the window went,
+  the export carried on writing through nil-checks, and the demotion
+  fired from inside `windowWillClose:` with the export still holding the
+  main thread. It worked, and it was one nil-guard away from not
+  working. The veto makes the guard `CommandClose` already applies
+  authoritative for the closes the user can ask for.
+- **⌘Q during an export leaves the status menu detached.** `quitKnips:`
+  fired at +3.0 s, `CommandQuit` refused with *"a GIF export is running;
+  quit once it has finished"*, and the `RefreshStatusItem` that follows
+  the refusal left the menu off — because `RefreshStatusItem` asks `Busy`
+  before it re-attaches. It has to: `CommandExportGif` detaches the menu
+  precisely so that a click on the status item dispatches nothing, since
+  opening an `NSMenu` starts a tracking loop inside `sendEvent` that does
+  not return until the menu is dismissed, and the export is draining
+  events. Re-attaching mid-export would stall the export on the first
+  click. The re-attach is `CommandExportGif`'s own, one line after the
+  export returns.
+- **A recording never captures the Dock tile.** Every *Record* command
+  calls `ClosePlaybackForRecording` immediately after its transition is
+  accepted and before anything else. `-close` posts `windowWillClose:`
+  synchronously, so the window, the tile and the menu bar are all gone by
+  the time the command returns — a full run-loop turn before
+  `startPending:` builds the content filter. Measured: policy 0 and a
+  visible window before `CommandRecordDisplay`, policy 1 and no window
+  after it and before the deferred start. Without this, recording with a
+  playback window open would put the app's own Dock tile and menu bar in
+  the file, which is the exact thing the Accessory policy exists to
+  prevent.
+
+`knips probe` gates the two primitives in the shipped binary: it builds
+the main menu, checks its shape (2 menus, 3 + 2 items), promotes, reads
+the policy back, demotes, reads it back again, and puts the process back
+to the policy it started with — which for a bare CLI binary is
+`Prohibited`, not `Accessory`; a check has no business converting the
+process it checks. It does *not* exercise the activation nudge — with no
+run loop that would mean nothing except taking focus off the terminal.
+
+That check is also the only thing in the probe that touches
+`NSApplication`, and AppKit *kills* a process that reaches for it with no
+window server rather than failing. Over SSH or under launchd the probe
+therefore prints `Dock promotion: skipped (no window server)` and carries
+on with the rest, and `knips app` refuses with a message and exit 2
+instead of aborting. `CGSessionCopyCurrentDictionary` returning NULL is
+the question being asked.
 
 ## Timing and the writer session
 

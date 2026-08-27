@@ -6,19 +6,26 @@ unit Knips.App.Playback;
 //
 // Standard chrome on purpose. The titlebar is AppKit's, the close button
 // is AppKit's, the transport controls are AVKit's; the only thing this
-// unit draws is a row of NSButtons. `knips app` stays an Accessory
-// process, so the window is brought forward with
+// unit draws is a row of NSButtons. The window is brought forward with
 // activateIgnoringOtherApps: the same way the selection overlay is — a
-// titled window can become key under that policy, a borderless one
-// cannot, which is why the overlay needed a runtime class for it and this
-// does not.
+// titled window can become key even under the Accessory policy, a
+// borderless one cannot, which is why the overlay needed a runtime class
+// for it and this does not.
+//
+// This is also the one window that puts Knips in the Dock: the controller
+// switches the process to the Regular policy around it, so it gets a Dock
+// tile, a place in the app switcher and a menu bar. None of that is done
+// here — Show and the close path only say what happened (OnClosed), and
+// Knips.App owns the policy.
 //
 // The buttons' target is the app's own KnipsAppTarget (the selectors are
 // declared below and registered by Knips.App), so there is exactly one
-// runtime-built class in this unit: KnipsPlaybackDelegate, whose only
-// method is windowWillClose:. That is where the player is paused and let
-// go — the user closing the window is the only teardown path that does
-// not come through this class's own API.
+// runtime-built class in this unit: KnipsPlaybackDelegate, with two
+// methods. windowWillClose: is where the player is paused and let go —
+// the user closing the window is the only teardown path that does not
+// come through this class's own API. windowShouldClose: is the veto that
+// keeps a close the user asks for from landing in the middle of an
+// export.
 //
 // The GIF export runs inline on the main thread. It has to: TMovieReader
 // and the encoder are synchronous, and nothing here may pump a nested
@@ -62,6 +69,12 @@ type
   // app puts it on the same NSLog + "Last error" path as everything else.
   TPlaybackErrorEvent = procedure(const AMessage: string) of object;
 
+  // Fired once the window is really gone, whichever path took it down.
+  // This unit never touches the activation policy itself — the controller
+  // owns what having a window on screen means for the process, and this
+  // is how it hears about it.
+  TPlaybackClosedEvent = procedure of object;
+
   TPlaybackWindow = class
   private
     FWindow: NSWindow;
@@ -80,6 +93,7 @@ type
     FExporting: Boolean;
     FLastPercent: Integer;
     FOnError: TPlaybackErrorEvent;
+    FOnClosed: TPlaybackClosedEvent;
     function AddButton(AContent: NSView; const ATitle, ASelector: string;
       ATarget: id; var ARight: Double): NSButton;
     procedure SetButtonsEnabled(AEnabled: Boolean);
@@ -108,6 +122,7 @@ type
     property Path: string read FPath;
     property Exporting: Boolean read FExporting;
     property OnError: TPlaybackErrorEvent read FOnError write FOnError;
+    property OnClosed: TPlaybackClosedEvent read FOnClosed write FOnClosed;
   end;
 
 // Registers KnipsPlaybackDelegate once per process. Exposed so
@@ -133,6 +148,7 @@ const
   DelegateSuperclassName = 'NSObject';
   OwnerIvarName = 'knipsOwner';
   WindowWillCloseSelector = 'windowWillClose:';
+  WindowShouldCloseSelector = 'windowShouldClose:';
 
   ExportGifTitle = 'Export as GIF…';
   RevealTitle = 'Reveal in Finder';
@@ -207,6 +223,42 @@ begin
   end;
 end;
 
+{ NSWindowDelegate's veto. AppKit asks before it closes a window on the
+  user's behalf: the titlebar's close button, performClose: and so ⌘W all
+  come through here. -close does *not*, which is exactly right — that is
+  what CommandClose uses, and Show's replace-the-previous-window path must
+  not be something a delegate can refuse.
+
+  So this makes the export guard authoritative for every close the *user*
+  can ask for, rather than leaving the export's nil-checks to cope with a
+  window that vanished underneath it. The window stays up, the title keeps
+  counting, and the click is simply ignored — the same answer the three
+  buttons give while they are disabled. }
+
+function PlaybackWindowShouldClose(ASelf: id; ACommand: SEL;
+  ASender: id): ObjCBOOL; cdecl;
+var
+  Owner: TPlaybackWindow;
+begin
+  // A window with no owner is one this object has already let go of;
+  // refusing to close that would be a window nobody can get rid of.
+  Result := ObjCBOOL(True);
+  Owner := nil;
+  try
+    Owner := OwnerOf(ASelf);
+    if (Owner <> nil) and Owner.Exporting then
+      Result := ObjCBOOL(False);
+  except
+    on E: Exception do
+      try
+        if Owner <> nil then
+          Owner.ReportError(WindowShouldCloseSelector + ': ' + E.Message);
+      except
+        // Nothing left to try; swallowing beats unwinding into AppKit.
+      end;
+  end;
+end;
+
 procedure EnsurePlaybackClasses;
 var
   Builder: TRuntimeClassBuilder;
@@ -225,6 +277,10 @@ begin
       @PlaybackWindowWillClose, MethodTypeEncoding(otVoid, [otObject])) then
       raise EObjCRuntime.Create('class_addMethod failed for '
         + WindowWillCloseSelector);
+    if not Builder.AddMethod(WindowShouldCloseSelector,
+      @PlaybackWindowShouldClose, MethodTypeEncoding(otBool, [otObject])) then
+      raise EObjCRuntime.Create('class_addMethod failed for '
+        + WindowShouldCloseSelector);
     // AppKit only ever asks respondsToSelector:, so a missing protocol is
     // not an error; claiming it when the runtime has one is tidier.
     Builder.AddProtocol('NSWindowDelegate');
@@ -390,9 +446,12 @@ procedure TPlaybackWindow.CommandClose;
 begin
   if FWindow = nil then
     Exit;
-  // Never mid-export: the buttons are disabled, but the titlebar's close
-  // button is AppKit's and stays live. Closing under a running export
-  // would free the window the progress callback is still writing to.
+  // Never mid-export: closing under a running export would free the
+  // window the progress callback is still writing to. This is the guard
+  // for the paths that come through here — the Close button, a recording
+  // about to start, Quit, Show replacing the window. The paths AppKit
+  // drives on the user's behalf (the titlebar's button, ⌘W) never reach
+  // this method at all, and are refused in windowShouldClose: instead.
   if FExporting then
     Exit;
   // -close, not -performClose:. Both end in windowWillClose: and so in
@@ -407,32 +466,45 @@ end;
 // and Destroy all arrive here.
 procedure TPlaybackWindow.HandleWindowWillClose;
 begin
-  if FPlayerView <> nil then
-  begin
-    AVPlayerView(FPlayerView).SetPlayer(nil);
-    FPlayerView := nil;
-  end;
-  ReleasePlayer;
-  FExportButton := nil;
-  FRevealButton := nil;
-  FCloseButton := nil;
-  if FWindow <> nil then
-  begin
-    FWindow.setDelegate(nil);
-    // Runs from inside AppKit's own close dispatch; the last release has
-    // to wait for the pool, exactly as the overlay's windows do.
-    FWindow.autorelease;
-    FWindow := nil;
-  end;
-  if FDelegate <> nil then
-  begin
-    SetPointerIvar(FDelegate, OwnerIvarName, nil);
-    // This runs *on* FDelegate, inside NSNotificationCenter's dispatch of
-    // windowWillClose:. A plain release would free the receiver while the
-    // frame below is still executing on it — the pool has to take it, the
-    // same way the window two lines up is autoreleased.
-    AutoreleaseInstance(FDelegate);
-    FDelegate := nil;
+  try
+    if FPlayerView <> nil then
+    begin
+      AVPlayerView(FPlayerView).SetPlayer(nil);
+      FPlayerView := nil;
+    end;
+    ReleasePlayer;
+    FExportButton := nil;
+    FRevealButton := nil;
+    FCloseButton := nil;
+    if FWindow <> nil then
+    begin
+      FWindow.setDelegate(nil);
+      // Runs from inside AppKit's own close dispatch; the last release has
+      // to wait for the pool, exactly as the overlay's windows do.
+      FWindow.autorelease;
+      FWindow := nil;
+    end;
+    if FDelegate <> nil then
+    begin
+      SetPointerIvar(FDelegate, OwnerIvarName, nil);
+      // This runs *on* FDelegate, inside NSNotificationCenter's dispatch
+      // of windowWillClose:. A plain release would free the receiver while
+      // the frame below is still executing on it — the pool has to take
+      // it, the same way the window two lines up is autoreleased.
+      AutoreleaseInstance(FDelegate);
+      FDelegate := nil;
+    end;
+  finally
+    // In the finally, and last, so that a raise anywhere in the teardown
+    // cannot skip it: the window is going either way, and the
+    // process-level consequences of that — the Dock tile, the menu bar —
+    // are the controller's to undo. It is also the only place they can be
+    // undone from, so leaving them standing is the worse leak. By now
+    // every field is nil, so the handler is free to ask Visible. Whatever
+    // it raises is caught by the cdecl body above and reported like any
+    // other failure.
+    if Assigned(FOnClosed) then
+      FOnClosed;
   end;
 end;
 

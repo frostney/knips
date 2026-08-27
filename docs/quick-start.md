@@ -36,9 +36,13 @@ lwpt build         # build/knips
 ```
 
 `probe` must print `probe: ok`. It registers the runtime-built stream
-output class, asks ScreenCaptureKit for displays and windows (this is
-where the **Screen Recording** prompt appears), and opens then cancels an
-AVAssetWriter on a temp file. If any line fails, read
+output class, checks the app's Dock promotion and main menu, asks
+ScreenCaptureKit for displays and windows (this is where the **Screen
+Recording** prompt appears), and opens then cancels an AVAssetWriter on a
+temp file. Over SSH the Dock line reads `skipped (no window server)`
+rather than failing — that one check is the only part that talks to
+AppKit, and `knips app` refuses outright there for the same reason. If
+any other line fails, read
 [docs/spikes/0001-runtime-objc-class.md](spikes/0001-runtime-objc-class.md)
 before touching code.
 
@@ -75,8 +79,10 @@ A `◉` appears in the menu bar. Clicking it opens:
 
 While recording the title reads `⏺ 0:07` and ticks once a second, and the
 menu is detached so **one click on the icon stops** — Kap's gesture. The
-price of that gesture is that Quit is unreachable until you stop; one
-click does it. The finished file lands in
+price of that gesture is that Quit is unreachable from the icon until you
+stop; one click does it. (⌘Q works if a playback window has put the app's
+menu bar up; it stops and finalises the recording first, exactly as the
+menu's Quit does.) The finished file lands in
 `~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4`.
 
 **The recording frame.** A region recording puts a red frame around the
@@ -89,7 +95,18 @@ draws it into the stream at all. Display and window recordings get no
 frame.
 
 **The playback window.** When a recording finishes, it opens in a normal
-window with AVKit's transport controls and three buttons:
+window with AVKit's transport controls and three buttons. It is the one
+window Knips has that behaves like a document window: while it is open the
+app appears **in the Dock and in ⌘-Tab**, with a menu bar of its own —
+*Knips ▸ About Knips, Quit Knips ⌘Q* and *Window ▸ Close ⌘W, Minimize
+⌘M*. Close the window, by any route, and the app drops back out of the
+Dock to being menu-bar-only. The `◉` in the menu bar works exactly the
+same either way. (The generic application icon in the Dock is expected —
+the bundle has no `.icns` yet.)
+
+Starting any recording closes the playback window first, so the app's own
+Dock tile and menu bar are never in the frame — the whole reason Knips is
+a menu-bar-only process the rest of the time.
 
 | Button | What it does |
 | --- | --- |
@@ -99,9 +116,12 @@ window with AVKit's transport controls and three buttons:
 
 The export runs on the main thread, so nothing responds while it is
 going: the title counts up (`Exporting… 42%`), the buttons are disabled,
-every menu item is a no-op, and **Quit is refused** until it finishes
-(it says so under `Last error: …`). The buttons come back when it is
-done and the `.gif` is revealed in Finder. For anything the button's
+every menu item is a no-op, and **Quit is refused** until it finishes —
+⌘Q included (it says so under `Last error: …`). Closing the window is
+refused too, by every route: the buttons, the titlebar's close button and
+⌘W all simply do nothing until the export is done. The buttons come back
+when it is done and the `.gif` is revealed in Finder. For anything the
+button's
 defaults do not cover — a different rate, a width, a trim — use
 `knips export` (below).
 

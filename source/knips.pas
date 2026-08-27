@@ -466,6 +466,10 @@ begin
     Exit;
   if not HasMethod(PlaybackDelegateClassName, 'windowWillClose:') then
     Exit;
+  // Without it a titlebar close or ⌘W lands in the middle of a GIF export
+  // — the one close AppKit drives that CommandClose's guard never sees.
+  if not HasMethod(PlaybackDelegateClassName, 'windowShouldClose:') then
+    Exit;
   Instance := InstantiateClass(LookUpClass(AppTargetClassName));
   if Instance = nil then
   begin
@@ -501,6 +505,7 @@ var
   Content: TShareableContent;
   Writer: TMovieWriter;
   Error: string;
+  Detail: string;
   TempPath: string;
 begin
   Result := ExitFailure;
@@ -549,6 +554,37 @@ begin
       Exit;
     end;
   end;
+
+  // The playback window puts the process in the Dock and gives it a menu
+  // bar, and puts it back afterwards. Both halves are one AppKit call that
+  // can decline, so the gate is the policy read back rather than the call
+  // made — and the menu is checked for shape, because an app that promotes
+  // with no ⌘Q is worse than one that never promotes. The activation nudge
+  // is deliberately not exercised here: with no run loop it would mean
+  // nothing, and it would take focus off the terminal.
+  //
+  // Skipped, not failed, without a window server. This is the only check
+  // in the probe that touches NSApplication, and AppKit kills a process
+  // that reaches for it over SSH or under launchd — where the rest of the
+  // probe (runtime classes, encodings, and the type-check the cross
+  // compiler does) is still worth running.
+  if not HasWindowServer then
+    WriteLn('Dock promotion: skipped (no window server)')
+  else
+    try
+      if not CheckDockPromotion(Detail, Error) then
+      begin
+        WriteLn('Dock promotion: ', Error);
+        Exit;
+      end;
+      WriteLn('Dock promotion: ', Detail);
+    except
+      on E: Exception do
+      begin
+        WriteLn('Dock promotion: ', E.Message);
+        Exit;
+      end;
+    end;
 
   // Informational, not a gate: microphone capture is macOS 15+, the
   // project floor is 13. record --audio=mic refuses cleanly where this
