@@ -14,9 +14,10 @@ unit Knips.Recording.CursorMath;
 // Knips.Recording.LiveMath has — this is the only part of the feature
 // that can be checked off-device, so it is the part that carries the
 // tests. The second is stricter: the blit runs on ScreenCaptureKit's
-// capture queue, where the Darwin build has no cthreads (ADR-0005: the
-// other platforms do) and an exception
-// would take the process down (docs/architecture.md, "Threading model").
+// capture queue, where the Darwin build has no cthreads (ADR-0005: a
+// Darwin-only rule; Linux uses cthreads, Windows the RTL's native
+// manager) and an exception would take the process down
+// (docs/architecture.md, "Threading model").
 // Nothing here raises, allocates, or touches a managed type; the clipping
 // is done in PlanCursorBlit, so BlitPremultipliedBgra is a pair of loops
 // over memory that has already been proved to be in range.

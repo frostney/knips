@@ -170,8 +170,9 @@ has got to.
 changes the picture rather than the framing: the system pointer is left
 out of the capture and an enlarged arrow is drawn into every frame in its
 place. The drawn pointer is always the arrow — it does not become an
-I-beam over text or a hand over a link the way the real one does. It is part of the video, so it survives a GIF or APNG export —
-which the system pointer also does, only at its ordinary size. It tracks
+I-beam over text or a hand over a link the way the real one does. It is
+part of the video, so it survives a GIF or APNG export — which the
+system pointer also does, only at its ordinary size. It tracks
 a zoom or a pan (it is placed against whatever rectangle is being
 captured at that instant) but does not grow with one; a window recording
 ignores it, because a window's frames have no fixed relationship to the
