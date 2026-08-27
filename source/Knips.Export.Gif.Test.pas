@@ -12,6 +12,7 @@ uses
   Classes,
   Math,
   SysUtils,
+  Types,
 
   Knips.Export.Bitmap,
   Knips.Export.Gif,
@@ -57,6 +58,19 @@ type
     procedure TestSmallLimitIsHonoured;
     procedure TestOrdinaryContentStaysExact;
     procedure TestOverflowFallsBackToTheCellHistogram;
+    procedure TestLateFrameStillReachesThePalette;
+    procedure TestCellSumsSurviveAThirtyTwoBitOverflow;
+  end;
+
+  TGifPaletteSamplerTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestFirstFrameIsAlwaysSampled;
+    procedure TestHonestEstimateHitsTheSampleTarget;
+    procedure TestLyingEstimateStillSpreadsOverAShortStream;
+    procedure TestStrideDoublesOncePerPhase;
+    procedure TestLongStreamIsThinnedNotTruncated;
+    procedure TestMissingEstimateStartsDenseAndThins;
   end;
 
   TGifStructureTests = class(TTestSuite)
@@ -494,6 +508,10 @@ begin
   Test('past the cap the histogram falls back to 6-bit cells',
     TestOverflowFallsBackToTheCellHistogram);
   Test('a smaller colour limit is honoured', TestSmallLimitIsHonoured);
+  Test('a colour that first appears after 8 M sampled pixels still '
+    + 'reaches the palette', TestLateFrameStillReachesThePalette);
+  Test('a cell past 2^32 in its channel sums still averages correctly',
+    TestCellSumsSurviveAThirtyTwoBitOverflow);
 end;
 
 procedure TGifQuantizerTests.TestEmptyQuantizerYieldsOneColor;
@@ -653,6 +671,255 @@ begin
   finally
     Quantizer.Free;
   end;
+end;
+
+// Whether APalette holds exactly this colour.
+function PaletteHolds(const APalette: TGifPalette;
+  ARed, AGreen, ABlue: Integer): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 0 to APalette.Count - 1 do
+    if (APalette.Colors[I].Red = ARed)
+      and (APalette.Colors[I].Green = AGreen)
+      and (APalette.Colors[I].Blue = ABlue) then
+      Exit(True);
+end;
+
+// The regression the old global sampled-pixel budget caused. It stood at
+// 8 000 000 pixels, and past it SampleFrame returned without doing
+// anything at all — so a colour that first appeared later in a movie was
+// invisible to the palette, silently. 33 frames of 500x500 is 8.25 M
+// pixels; the colour that arrives after them has to land all the same.
+procedure TGifQuantizerTests.TestLateFrameStillReachesThePalette;
+var
+  Early, Late: TBgraImage;
+  Quantizer: TGifQuantizer;
+  Palette: TGifPalette;
+  Frame: Integer;
+begin
+  BgraImageResize(Early, 500, 500);
+  FillSolid(Early, 10, 20, 30);
+  BgraImageResize(Late, 8, 8);
+  FillSolid(Late, 240, 130, 60);
+  Quantizer := TGifQuantizer.Create;
+  try
+    for Frame := 0 to 32 do
+      Quantizer.SampleFrame(@Early.Pixels[0], Early.BytesPerRow, Early.Width,
+        Early.Height);
+    Expect<Boolean>(Quantizer.SampledPixels > 8000000).ToBe(True);
+    Expect<Integer>(Quantizer.DistinctColors).ToBe(1);
+    Quantizer.SampleFrame(@Late.Pixels[0], Late.BytesPerRow, Late.Width,
+      Late.Height);
+    Expect<Integer>(Quantizer.DistinctColors).ToBe(2);
+    Palette := Quantizer.BuildPalette(GifMaxOpaqueColors);
+    Expect<Integer>(Palette.Count).ToBe(2);
+    Expect<Boolean>(PaletteHolds(Palette, 240, 130, 60)).ToBe(True);
+    Expect<Boolean>(PaletteHolds(Palette, 10, 20, 30)).ToBe(True);
+  finally
+    Quantizer.Free;
+  end;
+end;
+
+// The arithmetic the budget used to protect. Only the 6-bit cells carry
+// channel sums, so this starts the way the fallback test does — five
+// frames of 500x500 all-distinct colours, past the 2^20 exact cap — and
+// then piles 76 frames of one bright colour into a single cell: 19 M
+// samples, a red sum of 4.75e9, past 2^32 (4.29e9). As UInt32 that wraps
+// to 4.55e8 and the palette entry comes out at red 23 instead of 250.
+//
+// It lands in a box of its own, so the entry is that cell's exact mean:
+// the scattered colours are packed from a counter below 2^20, so none of
+// them has a red above 19, and red is the channel holding the most
+// squared error. Sorted on it the bright cell is last and alone, and the
+// weighted-median split cannot reach it — the scattered colours together
+// are 1.25 M against its 19 M.
+procedure TGifQuantizerTests.TestCellSumsSurviveAThirtyTwoBitOverflow;
+var
+  Scattered, Bright: TBgraImage;
+  Quantizer: TGifQuantizer;
+  Palette: TGifPalette;
+  Frame, X, Y, Value: Integer;
+begin
+  BgraImageResize(Scattered, 500, 500);
+  BgraImageResize(Bright, 500, 500);
+  FillSolid(Bright, 250, 250, 250);
+  Quantizer := TGifQuantizer.Create;
+  try
+    for Frame := 0 to 4 do
+    begin
+      for Y := 0 to 499 do
+        for X := 0 to 499 do
+        begin
+          Value := Frame * 250000 + Y * 500 + X;
+          SetPixel(Scattered, X, Y, Byte((Value shr 16) and $FF),
+            Byte((Value shr 8) and $FF), Byte(Value and $FF));
+        end;
+      Quantizer.SampleFrame(@Scattered.Pixels[0], Scattered.BytesPerRow,
+        Scattered.Width, Scattered.Height);
+    end;
+    Expect<Boolean>(Quantizer.IsExactHistogram).ToBe(False);
+    for Frame := 0 to 75 do
+      Quantizer.SampleFrame(@Bright.Pixels[0], Bright.BytesPerRow,
+        Bright.Width, Bright.Height);
+    Expect<Int64>(Quantizer.SampledPixels).ToBe(20250000);
+    Palette := Quantizer.BuildPalette(GifMaxOpaqueColors);
+    Expect<Boolean>(PaletteHolds(Palette, 250, 250, 250)).ToBe(True);
+  finally
+    Quantizer.Free;
+  end;
+end;
+
+{ TGifPaletteSamplerTests }
+
+procedure TGifPaletteSamplerTests.SetupTests;
+begin
+  Test('the first frame is always sampled', TestFirstFrameIsAlwaysSampled);
+  Test('an honest estimate lands on the sample target',
+    TestHonestEstimateHitsTheSampleTarget);
+  Test('an estimate far above the truth still spreads over the stream',
+    TestLyingEstimateStillSpreadsOverAShortStream);
+  Test('the stride doubles once per phase of samples',
+    TestStrideDoublesOncePerPhase);
+  Test('a stream far longer than its estimate is thinned, not truncated',
+    TestLongStreamIsThinnedNotTruncated);
+  Test('a missing estimate starts dense and thins itself',
+    TestMissingEstimateStartsDenseAndThins);
+end;
+
+// Every index a sampler seeded with AExpectedFrames asks for while a
+// stream of ALength frames is walked past it.
+function SampledIndices(AExpectedFrames, ALength: Int64): TInt64DynArray;
+var
+  Sampler: TGifPaletteSampler;
+  Index: Int64;
+  Filled: Integer;
+begin
+  Result := nil;
+  Filled := 0;
+  Sampler := TGifPaletteSampler.Create(AExpectedFrames);
+  try
+    Index := 0;
+    while Index < ALength do
+    begin
+      if Sampler.TakeFrame(Index) then
+      begin
+        if Filled = Length(Result) then
+          SetLength(Result, Max(16, Filled * 2));
+        Result[Filled] := Index;
+        Inc(Filled);
+      end;
+      Inc(Index);
+    end;
+  finally
+    Sampler.Free;
+  end;
+  SetLength(Result, Filled);
+end;
+
+procedure TGifPaletteSamplerTests.TestFirstFrameIsAlwaysSampled;
+var
+  Indices: TInt64DynArray;
+begin
+  Indices := SampledIndices(1000000000, 1);
+  Expect<Integer>(Length(Indices)).ToBe(1);
+  Expect<Int64>(Indices[0]).ToBe(0);
+end;
+
+// The mainstream case, and the one the seed exists for: a stream whose
+// estimate is right is sampled exactly GifPaletteSampleFrames times, at
+// an even stride, with no doubling reached.
+procedure TGifPaletteSamplerTests.TestHonestEstimateHitsTheSampleTarget;
+var
+  Indices: TInt64DynArray;
+  I: Integer;
+begin
+  Indices := SampledIndices(640, 640);
+  Expect<Integer>(Length(Indices)).ToBe(GifPaletteSampleFrames);
+  for I := 0 to High(Indices) do
+    Expect<Int64>(Indices[I]).ToBe(I * 20);
+end;
+
+// The first of the two open-loop failures: a container whose duration
+// metadata lies high, or a --trim past the end of one, used to yield a
+// stride longer than the movie and a palette built from a single frame.
+// The seed cap is what stops it — 500 frames against an estimate of a
+// billion still gets eight samples, spread across the whole stream.
+procedure TGifPaletteSamplerTests.TestLyingEstimateStillSpreadsOverAShortStream;
+var
+  Indices: TInt64DynArray;
+begin
+  Indices := SampledIndices(1000000000, 500);
+  Expect<Boolean>(Length(Indices) > 1).ToBe(True);
+  Expect<Integer>(Length(Indices)).ToBe(8);
+  Expect<Int64>(Indices[0]).ToBe(0);
+  Expect<Int64>(Indices[High(Indices)]).ToBe(448);
+end;
+
+procedure TGifPaletteSamplerTests.TestStrideDoublesOncePerPhase;
+var
+  Sampler: TGifPaletteSampler;
+  Index: Integer;
+begin
+  Sampler := TGifPaletteSampler.Create(GifPaletteSampleFrames);
+  try
+    Expect<Int64>(Sampler.Stride).ToBe(1);
+    for Index := 0 to GifPaletteSampleFrames - 1 do
+      Expect<Boolean>(Sampler.TakeFrame(Index)).ToBe(True);
+    Expect<Int64>(Sampler.SampledFrames).ToBe(GifPaletteSampleFrames);
+    Expect<Int64>(Sampler.Stride).ToBe(2);
+    Index := GifPaletteSampleFrames - 1;
+    while Sampler.SampledFrames < 2 * GifPaletteSampleFrames do
+    begin
+      Inc(Index);
+      Sampler.TakeFrame(Index);
+    end;
+    Expect<Int64>(Sampler.Stride).ToBe(4);
+  finally
+    Sampler.Free;
+  end;
+end;
+
+// The second open-loop failure: an estimate that runs low used to sample
+// the head of the movie densely and, once the quantiser's pixel budget
+// was spent, the tail not at all. Now the stride doubles as the walk goes
+// on, so the samples still reach the end of the stream and their number
+// grows with its logarithm rather than with its length — 263 samples for
+// 10 000 frames seeded at one, where an unthinned stride of one would
+// have taken all 10 000.
+procedure TGifPaletteSamplerTests.TestLongStreamIsThinnedNotTruncated;
+var
+  Indices: TInt64DynArray;
+  I: Integer;
+begin
+  Indices := SampledIndices(GifPaletteSampleFrames, 10000);
+  Expect<Integer>(Length(Indices)).ToBe(263);
+  Expect<Int64>(Indices[0]).ToBe(0);
+  // The tail of the stream is represented: the last sample sits within
+  // one final stride (256) of the end.
+  Expect<Boolean>(Indices[High(Indices)] > 10000 - 256).ToBe(True);
+  // Monotonically thinning: no gap is ever shorter than the one before.
+  for I := 2 to High(Indices) do
+    Expect<Boolean>((Indices[I] - Indices[I - 1])
+      >= (Indices[I - 1] - Indices[I - 2])).ToBe(True);
+end;
+
+// What ExpectedFrameCount returns when the container will not say how
+// long the movie is. A seed of one frame is dense to begin with and the
+// doubling is the only thing keeping the sample count down, which is the
+// case with no seed to lean on at all.
+procedure TGifPaletteSamplerTests.TestMissingEstimateStartsDenseAndThins;
+var
+  Indices: TInt64DynArray;
+  I: Integer;
+begin
+  Indices := SampledIndices(1, 200);
+  // The first phase is every frame, which is what a seed of one means.
+  for I := 0 to GifPaletteSampleFrames - 1 do
+    Expect<Int64>(Indices[I]).ToBe(I);
+  Expect<Integer>(Length(Indices)).ToBe(90);
+  Expect<Int64>(Indices[High(Indices)]).ToBe(199);
 end;
 
 { TGifStructureTests }
@@ -1031,6 +1298,8 @@ end;
 begin
   GScratchDirectory := GetTempDir;
   TestRunnerProgram.AddSuite(TGifQuantizerTests.Create('TGifQuantizer'));
+  TestRunnerProgram.AddSuite(
+    TGifPaletteSamplerTests.Create('TGifPaletteSampler'));
   TestRunnerProgram.AddSuite(TGifStructureTests.Create('GIF89a structure'));
   TestRunnerProgram.AddSuite(TGifPixelTests.Create('GIF pixels'));
   TestRunnerProgram.Run;

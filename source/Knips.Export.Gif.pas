@@ -8,12 +8,25 @@ unit Knips.Export.Gif;
 //
 // Memory shape: the encoder never holds more than the current frame's
 // palette indices and the previous frame's, so a long movie streams.
-// The quantiser holds one sparse histogram of *exact* colours (a 16 MB
-// open-addressed table capped at 2^20 distinct colours, plus 8 MB while
+// The quantiser holds one sparse histogram of *exact* colours (a 24 MB
+// open-addressed table capped at 2^20 distinct colours, plus 12 MB while
 // median cut sorts them) and falls back to a fixed 6-bits-per-channel
-// histogram (4 MB) if a source ever exceeds the cap. The encoder adds a
+// histogram (8 MB) if a source ever exceeds the cap. The encoder adds a
 // 6 MB nearest-colour memo. None of it grows with the length of the
 // movie.
+//
+// Every counter in those histograms is 64-bit, which is what lets the
+// quantiser accept an unbounded number of sampled pixels: a 32-bit
+// channel sum overflows at 2^32 / 255 pixels in one cell, and the fixed
+// sampling budget that used to keep it below that line did so by
+// *ignoring* every frame past it — leaving the tail of a long movie out
+// of the palette, silently. Strictly only the cell histogram's channel
+// sums need the width — a per-colour count cannot plausibly reach 2^32
+// under a schedule whose sample count grows with the log of the movie —
+// but uniform counters keep the overflow argument one sentence long,
+// at a cost of 12 of the megabytes above. Work is bounded per frame
+// instead (GifMaxSampledPixelsPerFrame), and how many frames are
+// sampled at all is TGifPaletteSampler's business.
 //
 // Frames are written full-canvas the first time and as the changed
 // rectangle afterwards, with disposal left at "leave in place". A
@@ -61,10 +74,23 @@ const
   // slot, so a collision costs a search and never an answer.
   GifMemoBits = 20;
   GifMemoSlots = 1 shl GifMemoBits;
-  // Both histograms sum 8-bit channels into 32-bit counters, so the
-  // total number of sampled pixels has to stay below 2^32 / 255.
-  GifMaxSampledPixels = 8000000;
+  // The cell histogram sums 8-bit channels into 64-bit counters, and
+  // the exact table keeps 64-bit counts (its sums are rebuilt from the
+  // key), so there is no ceiling on the number of pixels sampled in
+  // total. This bounds the work one frame may cost, not the arithmetic:
+  // a frame larger than this is sub-sampled on a stride, never
+  // truncated.
   GifMaxSampledPixelsPerFrame = 250000;
+  // How many frames TGifPaletteSampler aims to take in one phase of its
+  // walk. Enough spread to catch a palette change halfway through a clip
+  // without making the palette pass expensive.
+  GifPaletteSampleFrames = 32;
+  // The largest stride the sampler will *start* from, whatever frame
+  // count the caller estimated. A movie longer than this many frames is
+  // therefore sampled at more than one point even when the estimate was
+  // nonsense; at the rates this program exports at, it is two to four
+  // seconds of animation.
+  GifPaletteMaxSeedStride = 64;
   // Browsers clamp 0 and 1 centisecond delays to 10; 2 is the smallest
   // delay that is honoured everywhere.
   GifMinDelayCentiseconds = 2;
@@ -88,10 +114,10 @@ type
   end;
 
   TGifHistogramCell = record
-    Count: UInt32;
-    SumRed: UInt32;
-    SumGreen: UInt32;
-    SumBlue: UInt32;
+    Count: UInt64;
+    SumRed: UInt64;
+    SumGreen: UInt64;
+    SumBlue: UInt64;
   end;
 
   // Colour statistics over a set of frames, reduced to a palette by
@@ -107,7 +133,7 @@ type
   TGifQuantizer = class
   private
     FExactKeys: array of Int32;
-    FExactCounts: array of UInt32;
+    FExactCounts: array of UInt64;
     FExactColors: Integer;
     FExact: Boolean;
     FCells: array of TGifHistogramCell;
@@ -117,7 +143,7 @@ type
     // colour (exact mode) or per occupied cell (fallback), with its
     // count alongside. FLevelBits says how wide a channel is in a key.
     FKeys: array of Int32;
-    FCounts: array of UInt32;
+    FCounts: array of UInt64;
     FEntries: Integer;
     FLevelBits: Integer;
     procedure EnsureExactTable;
@@ -134,8 +160,11 @@ type
   public
     constructor Create;
     procedure Reset;
-    // Accumulates one frame's colours. Sub-samples internally, so the
-    // accumulator stays in range whatever the frame size.
+    // Accumulates one frame's colours. Sub-samples internally so one
+    // frame costs at most GifMaxSampledPixelsPerFrame pixels of work,
+    // whatever the frame size. There is no ceiling on how many frames
+    // may be handed over: the counters are 64-bit, so the thousandth
+    // frame reaches the histogram exactly as the first one did.
     procedure SampleFrame(const APixels: PByte; ABytesPerRow, AWidth,
       AHeight: Integer);
     // Median cut down to at most AMaxColors representatives. Each one is
@@ -149,6 +178,69 @@ type
     // over — the pipeline reports it, because it changes the quality.
     property IsExactHistogram: Boolean read FExact;
     property SampledPixels: Int64 read FSampledPixels;
+  end;
+
+  // Which frames of a movie the palette is built from, decided one frame
+  // at a time.
+  //
+  // The palette pass wants GifPaletteSampleFrames frames spread across
+  // the whole movie, and it has to choose them while walking it: an
+  // AVAssetReader cannot rewind, and how many frames the walk will yield
+  // is not known until it is over. A stride computed once from an
+  // estimate is open loop, and it fails in both directions. An estimate
+  // that runs high — a container whose duration metadata lies, or a trim
+  // past the end of one — makes the stride longer than the movie and
+  // builds the palette from a single frame. One that runs low samples
+  // the head of the movie densely and, before the counters here were
+  // widened, spent a fixed pixel budget doing it and left the tail out
+  // altogether.
+  //
+  // So the schedule seeds itself from the estimate and then thins as it
+  // goes:
+  //
+  //   * The seed stride is Ceil(estimate / GifPaletteSampleFrames),
+  //     capped at GifPaletteMaxSeedStride. The cap is what makes a lying
+  //     estimate harmless — any movie longer than that many frames is
+  //     sampled at more than one point however large the estimate was.
+  //     Its price is paid by honestly long movies: past
+  //     GifPaletteSampleFrames * GifPaletteMaxSeedStride estimated
+  //     frames the estimate stops influencing the schedule, and the
+  //     doubling below bounds the extra samples logarithmically (2-4x
+  //     the target on tens of minutes, front-loaded) without ever
+  //     letting the density anywhere drop below what a single honest
+  //     stride would have given.
+  //   * Every GifPaletteSampleFrames samples the stride doubles. A movie
+  //     far longer than its estimate is thinned while it is read rather
+  //     than truncated: n phases of GifPaletteSampleFrames samples cover
+  //     GifPaletteSampleFrames * seed * (2^n - 1) frames, so the sample
+  //     count grows with the log of the length and never with the length
+  //     itself.
+  //
+  // Frame 0 is always sampled, so a movie of any length yields at least
+  // one sample frame.
+  //
+  // This sits below the Darwin line for the same reason
+  // TFrameDelayPlanner does: it decides what the exported file looks
+  // like, so it is unit-tested on every host. It lives in this unit
+  // rather than one of its own because it is inseparable from the
+  // quantiser it feeds — both of the constants that define it are
+  // palette constants.
+  TGifPaletteSampler = class
+  private
+    FStride: Int64;
+    FNextIndex: Int64;
+    FSampledFrames: Int64;
+    FSincePhase: Integer;
+  public
+    constructor Create(AExpectedFrames: Int64);
+    // Called once per emitted frame, in index order from zero. True when
+    // that frame should be handed to the quantiser. Taking a frame
+    // advances the schedule — this is a consuming step, not a query.
+    function TakeFrame(AIndex: Int64): Boolean;
+    // The gap the next sample is spaced at. Starts at the seed and
+    // doubles once per phase.
+    property Stride: Int64 read FStride;
+    property SampledFrames: Int64 read FSampledFrames;
   end;
 
   // Streams one GIF89a file. Open, then AddFrame per frame with the
@@ -371,9 +463,9 @@ begin
   if FCells[Cell].Count = 0 then
     Inc(FDistinctCells);
   Inc(FCells[Cell].Count);
-  Inc(FCells[Cell].SumRed, UInt32(ARed));
-  Inc(FCells[Cell].SumGreen, UInt32(AGreen));
-  Inc(FCells[Cell].SumBlue, UInt32(ABlue));
+  Inc(FCells[Cell].SumRed, UInt64(ARed));
+  Inc(FCells[Cell].SumGreen, UInt64(AGreen));
+  Inc(FCells[Cell].SumBlue, UInt64(ABlue));
 end;
 
 procedure TGifQuantizer.AddExact(AKey: Int32);
@@ -409,7 +501,7 @@ end;
 procedure TGifQuantizer.FoldExactIntoCells;
 var
   I, Cell, Red, Green, Blue: Integer;
-  Count: UInt32;
+  Count: UInt64;
 begin
   EnsureCells;
   for I := 0 to GifExactTableSlots - 1 do
@@ -423,9 +515,9 @@ begin
       if FCells[Cell].Count = 0 then
         Inc(FDistinctCells);
       Inc(FCells[Cell].Count, Count);
-      Inc(FCells[Cell].SumRed, UInt32(Red) * Count);
-      Inc(FCells[Cell].SumGreen, UInt32(Green) * Count);
-      Inc(FCells[Cell].SumBlue, UInt32(Blue) * Count);
+      Inc(FCells[Cell].SumRed, UInt64(Red) * Count);
+      Inc(FCells[Cell].SumGreen, UInt64(Green) * Count);
+      Inc(FCells[Cell].SumBlue, UInt64(Blue) * Count);
     end;
   SetLength(FExactKeys, 0);
   SetLength(FExactCounts, 0);
@@ -441,8 +533,6 @@ var
   Source, Pixel: PByte;
 begin
   if (APixels = nil) or (AWidth <= 0) or (AHeight <= 0) then
-    Exit;
-  if FSampledPixels >= GifMaxSampledPixels then
     Exit;
   if FExact then
     EnsureExactTable
@@ -521,7 +611,7 @@ var
   Low, High, Swap: Integer;
   Pivot: Integer;
   Shift, Mask: Integer;
-  SwapCount: UInt32;
+  SwapCount: UInt64;
 begin
   Shift := (2 - AChannel) * FLevelBits;
   Mask := (1 shl FLevelBits) - 1;
@@ -567,6 +657,11 @@ end;
 // is what the export is judged on, so it is also what decides which box
 // to split next and along which channel — the span-based heuristic this
 // replaced spent slots on wide boxes that almost nothing lived in.
+//
+// Everything here is Int64 over 64-bit counters, so the arithmetic is
+// unaffected by how many pixels were sampled: a channel sum is at most
+// 255 times the pixel count, which stays inside Int64 for any number of
+// pixels a movie could ever hand over.
 procedure TGifQuantizer.RangeStatistics(AFirst, ALast: Integer;
   out ACount: Int64; out ASumRed, ASumGreen, ASumBlue: Int64;
   out AErrorRed, AErrorGreen, AErrorBlue: Double);
@@ -585,7 +680,7 @@ begin
   for I := AFirst to ALast do
   begin
     Key := FKeys[I];
-    Count := FCounts[I];
+    Count := Int64(FCounts[I]);
     Inc(ACount, Count);
     if FExact then
     begin
@@ -602,12 +697,12 @@ begin
       // the mean of the real colours rather than of cell corners. The
       // squares treat the cell as a point mass at that mean, which is
       // accurate enough for a choice between boxes.
-      Inc(ASumRed, FCells[Key].SumRed);
-      Inc(ASumGreen, FCells[Key].SumGreen);
-      Inc(ASumBlue, FCells[Key].SumBlue);
-      Red := (FCells[Key].SumRed + Count div 2) div Count;
-      Green := (FCells[Key].SumGreen + Count div 2) div Count;
-      Blue := (FCells[Key].SumBlue + Count div 2) div Count;
+      Inc(ASumRed, Int64(FCells[Key].SumRed));
+      Inc(ASumGreen, Int64(FCells[Key].SumGreen));
+      Inc(ASumBlue, Int64(FCells[Key].SumBlue));
+      Red := Integer((Int64(FCells[Key].SumRed) + Count div 2) div Count);
+      Green := Integer((Int64(FCells[Key].SumGreen) + Count div 2) div Count);
+      Blue := Integer((Int64(FCells[Key].SumBlue) + Count div 2) div Count);
     end;
     SquareRed := SquareRed + Int64(Red) * Red * Count;
     SquareGreen := SquareGreen + Int64(Green) * Green * Count;
@@ -701,7 +796,7 @@ begin
     Split := Boxes[Chosen].First;
     for I := Boxes[Chosen].First to Boxes[Chosen].Last - 1 do
     begin
-      Inc(Running, FCounts[I]);
+      Inc(Running, Int64(FCounts[I]));
       Split := I;
       if Running >= Half then
         Break;
@@ -733,6 +828,49 @@ begin
       Result.Colors[I].Blue := Byte((Boxes[I].SumBlue + Boxes[I].Count div 2)
         div Boxes[I].Count);
     end;
+end;
+
+{ TGifPaletteSampler }
+
+constructor TGifPaletteSampler.Create(AExpectedFrames: Int64);
+begin
+  inherited Create;
+  if AExpectedFrames < 1 then
+    AExpectedFrames := 1;
+  // Ceil in integers, and by division rather than by adding the divisor
+  // first, so an absurd estimate cannot overflow on its way to a stride
+  // that is about to be capped anyway.
+  FStride := AExpectedFrames div GifPaletteSampleFrames;
+  if AExpectedFrames mod GifPaletteSampleFrames <> 0 then
+    Inc(FStride);
+  if FStride < 1 then
+    FStride := 1;
+  if FStride > GifPaletteMaxSeedStride then
+    FStride := GifPaletteMaxSeedStride;
+  FNextIndex := 0;
+  FSampledFrames := 0;
+  FSincePhase := 0;
+end;
+
+// The comparison is >= rather than =, so a caller that skips an index
+// still gets its next sample rather than falling off the schedule for
+// good.
+function TGifPaletteSampler.TakeFrame(AIndex: Int64): Boolean;
+begin
+  Result := AIndex >= FNextIndex;
+  if not Result then
+    Exit;
+  Inc(FSampledFrames);
+  Inc(FSincePhase);
+  if FSincePhase >= GifPaletteSampleFrames then
+  begin
+    FSincePhase := 0;
+    // Guarded so the schedule stays total: no movie reaches this, but a
+    // stride that wrapped would sample everything from then on.
+    if FStride < High(Int64) div 2 then
+      FStride := FStride * 2;
+  end;
+  FNextIndex := AIndex + FStride;
 end;
 
 { TGifEncoder }

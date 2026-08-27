@@ -77,7 +77,7 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | `source/Knips.Export.MovieWriter.pas` | AVAssetWriter bindings + the movie sink |
 | `source/Knips.Export.MovieReader.pas` | AVAssetReader bindings; BGRA frames + presentation stamps, with a trim range |
 | `source/Knips.Export.Bitmap.pas` | Platform-neutral BGRA buffer + box/bilinear resampling (tested) |
-| `source/Knips.Export.Gif.pas` | Platform-neutral GIF89a: exact-colour histogram, median cut, dithering, LZW (tested) |
+| `source/Knips.Export.Gif.pas` | Platform-neutral GIF89a: exact-colour histogram (64-bit counters, no sampling budget), median cut, dithering, LZW, and the self-thinning palette sample schedule the pipeline drives (tested) |
 | `source/Knips.Export.Apng.pas` | Platform-neutral APNG: acTL/fcTL/fdAT, PNG filters, paszlib, truecolour (tested) |
 | `source/Knips.Export.Timing.pas` | Platform-neutral frame-delay planning: grid-snapped, drift-free (tested) |
 | `source/Knips.Export.MovieTrim.pas` | AVAssetExportSession passthrough trim (no decode, no re-encode) |
