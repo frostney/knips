@@ -18,6 +18,10 @@ changed, and why. Written for whoever extends this next.
 - Two things in the carried code are flagged as unverified rather than
   fixed: the AudioEncoder's symbol convention and the exact SCK protocol
   registration behaviour.
+- One thing in it was wrong and is fixed: the pthread mutex declared its
+  opaque storage as bytes, which under-states `pthread_mutex_t`'s 8-byte
+  alignment and made every `--mode release` build bus-error. See
+  [pthread opaque storage is 8-byte aligned](#pthread-opaque-storage-is-8-byte-aligned).
 
 ## lantaarn, as found
 
@@ -128,6 +132,66 @@ clauses, and the `knips additions` banner — never a line of carried body.
 That is the same seam the units were vendored along in the first place,
 so `source/capture/**` stays outside `lwpt format` and a diff against
 lantaarn still reads as it did on day one.
+
+### pthread opaque storage is 8-byte aligned
+
+lantaarn declared the mutex as one byte array:
+
+```pascal
+TPThreadMutex = record
+  _opaque: array[0..PTHREAD_MUTEX_OPAQUE_SIZE - 1] of Byte;
+end;
+```
+
+A record whose only field is a `Byte` array has **alignment 1**, so FPC
+is free to place it at any offset inside a containing record or class.
+`pthread_mutex_t` is not alignment-1: Apple's `_opaque_pthread_mutex_t`
+(`sys/_pthread/_pthread_types.h`) leads with `long __sig`, and
+`libsystem_pthread` reaches that word with `casa`, an atomic that faults
+with `SIGBUS` on an unaligned address. The declaration therefore
+under-stated the type's real alignment for as long as it existed; the
+field only ever happened to land on a multiple of eight.
+
+`lwpt build --mode release` compiles with `-O4`, which is `-O3` plus the
+optimisations FPC labels "might have unexpected side effects". One of
+them is `ORDERFIELDS`, which reorders **class** fields by alignment
+(plain records keep their declaration order — measured, and the reason
+`CMTime` and the other C-shaped records here are not at risk). Given a
+field that claims to need alignment 1, reordering puts it where the
+padding is: in `TCameraBlur` it moved `FLock` from offset 224 to **231**,
+and `knips probe` died in `pthread_mutex_destroy` with
+`EBusError: Bus error or misaligned data access` at the end of
+`ProbeCameraBlurCost` — that being the first path in the program that
+destroys one of these mutexes. The dev build does not enable
+`ORDERFIELDS`, kept the aligned offset, and stayed green, which is what
+made this look like an optimiser bug. It is not one. A twenty-line
+program says so:
+
+```
+class { A, B: Pointer; Flag1, Flag2: Boolean; N: LongInt; D: Double; M }
+                 -O1/-O3   -O4
+M: array of Byte     40     38   ← misaligned
+M: array of QWord    40     32
+```
+
+Nor is the crash new in `71aad18`: every release build back to
+`7e6d70c`, the first commit that ran on device, dies the same way —
+before `TCameraBlur` existed it was `TMovieWriter.FLock`, hit two lines
+later in the same `probe`. Release mode had simply never been run.
+
+The fix is to declare the storage in the width the type is actually
+aligned to, in both this unit and `Knips.ThreadManager` (whose
+`TRawAttr`, `TEventRec.Mutex` and `TEventRec.Cond` had the same shape):
+
+```pascal
+_opaque: array[0..PTHREAD_MUTEX_OPAQUE_QWORDS - 1] of QWord;
+```
+
+The record is the same 128 bytes, every call site still passes `@Mutex`,
+and the record's alignment is now 8 in every mode — so no field
+placement, reordered or not, can produce an address libsystem cannot
+use. Suppressing the optimisation instead would have left the real
+defect in place for the next field that lands on an odd offset.
 
 ### No cthreads, no duetto
 

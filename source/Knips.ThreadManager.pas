@@ -49,8 +49,28 @@ const
   DarwinMutexRecursive = 2; // PTHREAD_MUTEX_RECURSIVE (pthread/pthread.h)
   InfiniteTimeout = Cardinal($FFFFFFFF);
 
+  // Every one of Apple's opaque pthread types leads with a `long __sig`
+  // (sys/_pthread/*.h), so all three are 8-byte aligned, and libsystem
+  // reaches that word with `casa` — an atomic that faults with SIGBUS on
+  // an unaligned address. Byte storage claims alignment 1 and so lets
+  // the compiler put the type anywhere; the release build (-O4) turns on
+  // ORDERFIELDS, which reorders *class* fields by alignment and did
+  // exactly that to Knips.Capture.PThreadMutex, killing `knips probe`
+  // (docs/porting-notes.md, "pthread opaque storage is 8-byte aligned").
+  // Nothing here is a class field today — these are a stack local and a
+  // GetMem'd record, neither of which FPC reorders — but the declaration
+  // was wrong in the same way, and a correct one costs nothing.
+  MutexOpaqueQWords = MutexOpaqueSize div 8;
+  CondOpaqueQWords = CondOpaqueSize div 8;
+  AttrOpaqueQWords = AttrOpaqueSize div 8;
+
+{$IF ((MutexOpaqueSize mod 8) <> 0) or ((CondOpaqueSize mod 8) <> 0)
+  or ((AttrOpaqueSize mod 8) <> 0)}
+  {$ERROR opaque sizes must be multiples of 8: div 8 above would silently shrink the storage}
+{$ENDIF}
+
 type
-  TRawAttr = array[0..AttrOpaqueSize - 1] of Byte;
+  TRawAttr = array[0..AttrOpaqueQWords - 1] of QWord;
 
   TDarwinTimespec = record
     tv_sec: clong;
@@ -65,8 +85,8 @@ type
   // One state record backs both RTL events and basic events.
   PEventRec = ^TEventRec;
   TEventRec = record
-    Mutex: array[0..MutexOpaqueSize - 1] of Byte;
-    Cond: array[0..CondOpaqueSize - 1] of Byte;
+    Mutex: array[0..MutexOpaqueQWords - 1] of QWord;
+    Cond: array[0..CondOpaqueQWords - 1] of QWord;
     IsSet: Boolean;
     ManualReset: Boolean;
   end;
