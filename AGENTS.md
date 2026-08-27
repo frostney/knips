@@ -50,6 +50,7 @@ lwpt format --check   # formatter gate (no flag = rewrite in place)
 ./build/knips probe                     # toolchain verification (macOS)
 ./build/knips record --out=demo.mp4     # record; Ctrl-C stops
 ./build/knips app                       # menu-bar app; drag a region, click to stop
+./build/knips mcp                       # MCP server on stdin/stdout; EOF stops
 tools/make-app.sh                        # wrap the built binary in build/Knips.app
 ```
 
@@ -57,7 +58,7 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 
 | Path | Role |
 | --- | --- |
-| `source/knips.pas` | Program: CLI surface (`app`, `record`, `export`, `displays`, `windows`, `probe`), signals |
+| `source/knips.pas` | Program: CLI surface (`app`, `record`, `export`, `displays`, `windows`, `mcp`, `probe`), signals |
 | `source/Knips.ThreadManager.pas` | Pthread-backed RTL locks/events for the no-cthreads build; no thread creation |
 | `source/Knips.Options.pas` | Platform-neutral recording + export option models, validation, large-export advice (tested) |
 | `source/Knips.App.State.pas` | Platform-neutral app state machine, titles, paths, selection maths, window-menu filter, export arithmetic (tested) |
@@ -79,20 +80,25 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | `source/Knips.Export.MovieTrim.pas` | AVAssetExportSession passthrough trim (no decode, no re-encode) |
 | `source/Knips.Export.Pipeline.pas` | Orchestrator: reader → decimate → scale → GIF or APNG sink |
 | `source/Knips.Recording.pas` | Orchestrator: target → geometry → writer → stream → finish |
+| `source/Knips.Mcp.Params.pas` | Platform-neutral MCP tool table, JSON argument mapping, default paths, flag→argument message rewriting (tested) |
+| `source/Knips.Mcp.pas` | `knips mcp`: the tool handlers on pascal-mcp-sdk's stdio transport; one recording at a time |
 | `source/capture/` | Vendored bindings: CoreMedia/CoreVideo/VideoToolbox/GCD, ScreenCaptureKit, pthread mutex |
 | `docs/` | Architecture, quick-start, tooling, code style, deployment, porting notes, spikes, ADRs |
 
-Layering: `knips.pas` → {`Knips.App`, `Knips.Recording`,
-`Knips.Export.Pipeline`, `Knips.Export.MovieTrim`}
-(`Knips.App.Playback` also reaches `Knips.Export.Pipeline`, so the
-*Export as GIF…* button runs the same session `knips export` does) →
+Layering: `knips.pas` → {`Knips.App`, `Knips.Mcp`, `Knips.Recording`,
+`Knips.Export.Pipeline`, `Knips.Export.MovieTrim`} (`Knips.Mcp` reaches
+the same session classes the CLI does, so an MCP tool and a subcommand
+are one implementation; `Knips.App.Playback` likewise reaches
+`Knips.Export.Pipeline`, so the *Export as GIF…* button runs the same
+session `knips export` does) →
 {`Knips.Capture.*`, `Knips.Export.MovieWriter`,
 `Knips.Export.MovieReader`, `Knips.Export.Gif`, `Knips.Export.Apng`,
 `Knips.Export.Timing`} →
 {`Knips.ObjC.*`, `Knips.Export.Bitmap`, `source/capture/*`}.
 `Knips.Options` is used by every layer and depends on nothing;
-`Knips.App.State` depends only on it. The GIF encoder, the APNG encoder
-and the delay planner are deliberately below the Darwin line: they have
+`Knips.App.State` and `Knips.Mcp.Params` depend only on it (plus
+fpjson). The GIF encoder, the APNG encoder, the delay planner and the
+MCP argument mapping are deliberately below the Darwin line: they have
 no `{$IFDEF DARWIN}` at all and are tested on every host.
 
 ## Testing

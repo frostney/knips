@@ -69,6 +69,31 @@ conventional commits by git-cliff (`cliff.toml`).
 - `export` warns on stderr (exit code still 0) when the result is large:
   a canvas at or past 1280×720, or a file past 20 MB, naming whichever of
   `--width`, `--fps` or `--trim` would actually help.
+- `mcp`: the recorder as a Model Context Protocol server on stdin/stdout,
+  over [pascal-mcp-sdk](https://github.com/frostney/pascal-mcp-sdk).
+  Eight tools — `list_displays`, `list_windows`, `record_start` /
+  `record_stop` / `record_status`, `export_gif`, `export_apng`,
+  `export_trim` — each running the CLI's own session classes with JSON
+  arguments in place of flags, refused by the same `Knips.Options`
+  validation (with the flag names rewritten to the argument names the
+  tool schemas actually declare). Recording is non-blocking: the server
+  answers `record_status` and everything else while ScreenCaptureKit
+  captures on its own queue, and one recording at a time is enforced
+  with an in-band error naming the file already being written. The SDK's
+  stdio transport is a single-threaded read-handle-write loop, so no
+  `cthreads` and no new thread; its HTTP transport, which would need
+  both, is not used. Screen Recording permission is inherited from the
+  MCP client's host application — see
+  [docs/quick-start.md](docs/quick-start.md#the-mcp-server).
+  Two contracts are deliberately stricter than the CLI's, because the
+  caller is a program: `record_start` refuses an existing `out` unless
+  `overwrite: true` is passed (agents guess paths; `knips record`
+  replaces what you typed), and `export_trim` refuses `fps`/`width`/
+  `dither` rather than ignoring what a passthrough copy cannot honour.
+  Paths are returned absolute, every tool declares an `outputSchema`,
+  and a writer that dies mid-recording is reported by `record_status`,
+  which stops the session and says whether the partial file was
+  finalised.
 
 ### Improvements
 

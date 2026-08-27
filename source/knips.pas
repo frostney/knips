@@ -12,6 +12,7 @@ program knips;
 //                               passthrough trim: no decode, no re-encode
 //   knips displays              list capturable displays
 //   knips windows               list capturable on-screen windows
+//   knips mcp                   MCP server on stdin/stdout for AI clients
 //   knips probe                 verify the ObjC runtime + framework path
 //
 // Built and tested with lwpt. Capture is ScreenCaptureKit, the file is
@@ -47,6 +48,7 @@ uses
   Knips.ObjC.Runtime,
   Knips.Recording,
   {$ENDIF}
+  Knips.Mcp,
   Knips.Options;
 
 const
@@ -633,6 +635,31 @@ end;
 
 {$ENDIF}
 
+// The MCP server. Platform-neutral at this level: the protocol loop
+// compiles everywhere and the capture tools refuse in-band off Darwin,
+// so a client that discovers the server on Linux is told why rather
+// than finding half a tool list.
+//
+// Standard output belongs to the JSON-RPC stream from here on — the
+// stdio binding allows nothing else on it — so this command prints
+// diagnostics to standard error and nothing at all on success. Stdin
+// EOF is the shutdown signal, and it is also what gives the server the
+// chance to finalise a recording still in flight; a killed process
+// loses the movie's moov atom, as `record` would.
+function HandleMcp(const APositionals: TStringList;
+  const AOptions: TOptionArray): Integer;
+var
+  Error: string;
+begin
+  if not RunKnipsMcpServer(Error) then
+  begin
+    WriteLn(ErrOutput, ProgramName, ' mcp: ', Error);
+    Flush(ErrOutput);
+    Exit(ExitFailure);
+  end;
+  Result := ExitOk;
+end;
+
 // Option objects are owned by the registry once the subcommand is added.
 function RecordOptions: TOptionArray;
 begin
@@ -758,6 +785,9 @@ begin
       'List capturable displays', '', @HandleDisplays, NoOptions));
     Registry.Add(TSubcommand.Create('windows',
       'List capturable on-screen windows', '', @HandleWindows, NoOptions));
+    Registry.Add(TSubcommand.Create('mcp',
+      'Serve the recorder to an MCP client on stdin/stdout', '',
+      @HandleMcp, NoOptions));
     Registry.Add(TSubcommand.Create('probe',
       'Verify the runtime-built ObjC class and framework linking', '',
       @HandleProbe, NoOptions));
@@ -779,6 +809,9 @@ begin
     Registry.Add(TSubcommand.Create('windows',
       'List capturable on-screen windows (macOS only)', '',
       @HandleUnsupported, NoOptions));
+    Registry.Add(TSubcommand.Create('mcp',
+      'Serve the recorder to an MCP client on stdin/stdout', '',
+      @HandleMcp, NoOptions));
     Registry.Add(TSubcommand.Create('probe',
       'Verify the runtime-built ObjC class and framework linking (macOS only)',
       '', @HandleUnsupported, NoOptions));
