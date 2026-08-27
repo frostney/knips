@@ -449,10 +449,14 @@ influencing the schedule at all, so the seed starts too small and the
 doubling only bounds the extra work logarithmically — a 4 400-frame
 capture takes 50 sample frames where the single stride took 32, a
 20-minute one takes ~114, and the extra samples sit in the front half.
-That is more scale+sample work (2–4×), not worse quality: the final
-stride never exceeds what the single stride would have been, so no
-stretch of the movie is sampled more sparsely than before. The trade is
-deliberate — a bounded cost on long honest movies buys surviving an
+That is more scale+sample work (~1.5–4×, growing with length), and
+mostly denser sampling — though not uniformly so: a movie only just
+past the threshold can see one stretch after a phase boundary sampled
+up to ~2× more sparsely than the single honest stride would have (at
+2 113 frames the schedule doubles to a gap of 128 against an old
+stride of 67). What the doubling guarantees is that the sample *count*
+grows with the log of the length, never the length itself. The trade
+is deliberate — a bounded cost on long honest movies buys surviving an
 estimate that lies high, which the old scheme answered with a
 one-frame palette.
 

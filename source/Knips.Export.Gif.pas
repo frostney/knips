@@ -206,9 +206,10 @@ type
   //     GifPaletteSampleFrames * GifPaletteMaxSeedStride estimated
   //     frames the estimate stops influencing the schedule, and the
   //     doubling below bounds the extra samples logarithmically (2-4x
-  //     the target on tens of minutes, front-loaded) without ever
-  //     letting the density anywhere drop below what a single honest
-  //     stride would have given.
+  //     the target on tens of minutes, front-loaded). A movie only
+  //     just past that threshold can see one post-doubling stretch
+  //     sampled up to ~2x more sparsely than a single honest stride
+  //     would have — the cost of not trusting the estimate.
   //   * Every GifPaletteSampleFrames samples the stride doubles. A movie
   //     far longer than its estimate is thinned while it is read rather
   //     than truncated: n phases of GifPaletteSampleFrames samples cover
