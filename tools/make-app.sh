@@ -95,9 +95,20 @@ printf 'APPL????' > "$CONTENTS/PkgInfo"
 # Ad-hoc sign the finished bundle. An UNSIGNED bundle gets a limbo TCC
 # identity: requestAccessForMediaType for the camera is silently dropped
 # — no prompt, no error, status stays NotDetermined (measured on device;
-# Screen Recording, oddly, still prompts). The ad-hoc signature gives
-# tccd a resolvable identity. Each build's signature differs, so grants
-# still re-prompt per rebuild until a real Developer ID signs releases.
-codesign --force -s - "$APP"
+# Screen Recording, oddly, still prompts).
+#
+# The explicit identifier-only DESIGNATED REQUIREMENT is what makes TCC
+# grants survive rebuilds: without it an ad-hoc signature's requirement
+# is `cdhash H"…"` — the fingerprint of that exact binary — so every
+# rebuild orphaned the user's Screen Recording and Camera grants and
+# re-prompted (measured on device, painfully). Anchored to the bundle
+# identifier instead, the requirement is identical build after build.
+# The trade: any ad-hoc binary claiming this identifier inherits the
+# grant — fine on a development machine, and a real Developer ID
+# signature replaces this wholesale for distribution.
+codesign --force -s - \
+  --identifier "$BUNDLE_IDENTIFIER" \
+  --requirements "=designated => identifier \"$BUNDLE_IDENTIFIER\"" \
+  "$APP"
 
 echo "$APP"
