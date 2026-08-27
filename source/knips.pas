@@ -38,6 +38,7 @@ uses
   Knips.App,
   Knips.App.Border,
   Knips.App.Camera,
+  Knips.App.Camera.Blur,
   Knips.App.Hotkey,
   Knips.App.Overlay,
   Knips.App.Playback,
@@ -455,14 +456,16 @@ const
   // Every action AppKit will dispatch on the target: the menu items, the
   // status-item button, the deferred one-shots, the playback window's
   // buttons, and the Record Window submenu's delegate callback.
-  TargetSelectors: array[0..23] of string = (
+  TargetSelectors: array[0..25] of string = (
     'recordRegion:', 'recordDisplay:', 'recordWindow:', 'recordLastRegion:',
     'toggleSystemAudio:', 'toggleMicrophone:', 'stopRecording:',
     'cancelSelection:',
     'revealRecordings:', 'quitKnips:', 'timerFired:', 'startPending:',
     'stopPending:', 'menuNeedsUpdate:', 'exportGif:', 'revealRecording:',
     'closePlayback:', 'toggleCamera:', 'toggleCameraShape:',
+    'toggleCameraBlur:',
     'restoreCamera:', 'toggleZoomOnClick:', 'toggleFollowMouse:',
+    'toggleBigCursor:',
     'liveTick:', 'cameraRideTick:');
   // The camera window's own drag, and the snap ease's timer callback.
   // Without the three mouse methods the window still appears and still
@@ -518,11 +521,94 @@ begin
   finally
     ReleaseInstance(Instance);
   end;
+  // The camera's background-blur delegate. AVCaptureVideoDataOutput
+  // dispatches by selector like SCStream does, so a class_addMethod that
+  // silently failed would show up only as a blur toggle that switches
+  // on, stops the preview layer, and then shows nothing at all.
+  if not HasMethod(CameraBlurOutputClassName,
+    'captureOutput:didOutputSampleBuffer:fromConnection:') then
+    Exit;
   WriteLn('runtime classes ', AppTargetClassName, ', ',
     OverlayViewClassName, ', ', OverlayWindowClassName, ', ',
     CameraViewClassName, ', ', BorderViewClassName, ', ',
-    PlaybackDelegateClassName, ': registered and answering');
+    PlaybackDelegateClassName, ', ', CameraBlurOutputClassName,
+    ': registered and answering');
   Result := True;
+end;
+
+// What the camera's background blur costs on THIS Mac, in the numbers
+// that decide whether it can be switched on: milliseconds per frame and
+// the frame rate that implies, against the camera window's own 30 Hz.
+//
+// Measured rather than asserted, and measured here rather than from the
+// camera, because the Camera TCC grant belongs to the *bundle* and a
+// probe run from a shell has no camera at all. Vision's segmentation
+// network costs what the frame size and the quality level make it cost,
+// so synthetic frames answer the timing question exactly; what they
+// cannot answer is how the mask looks, which needs eyes and a face.
+//
+// Never fatal. A Mac too slow for the effect is a Mac where the checkbox
+// is a bad idea, not one where the recorder is broken.
+//
+// And no HasWindowServer gate, unlike the Dock and hotkey checks above.
+// Nothing here touches NSApplication or HIToolbox: CIContext
+// contextWithOptions: (given only the cache-intermediates option) picks
+// a renderer for itself
+// (Metal headless, no window server, no display attached), Vision runs
+// on the ANE or the CPU, and the CALayer it renders into is never put on
+// a screen. Over SSH or under launchd this measures exactly what it
+// measures at the console.
+procedure ProbeCameraBlurCost;
+const
+  // The camera window's own feed: AVCaptureSessionPreset640x480.
+  FrameWidth = 640;
+  FrameHeight = 480;
+  // Enough that the first frame's model load and kernel compile is not
+  // what the mean reports. Both caches are PROCESS-wide, not per
+  // pipeline — Vision's segmentation model and CoreImage's compiled
+  // kernels outlive any one CIContext — so the second call below starts
+  // from a warm process even though it builds a fresh pipeline.
+  WarmUpFrames = 5;
+  MeasuredFrames = 30;
+  PreviewFramesPerSecond = 30;
+var
+  Blur: TCameraBlur;
+  Error: string;
+  Milliseconds, Sustainable: Double;
+begin
+  Blur := TCameraBlur.Create;
+  try
+    Blur.Quality := cbqFast;
+    if not Blur.MeasureOffline(FrameWidth, FrameHeight, WarmUpFrames,
+      Error) then
+    begin
+      WriteLn('camera background blur cost: not measured (', Error, ')');
+      Exit;
+    end;
+    if not Blur.MeasureOffline(FrameWidth, FrameHeight, MeasuredFrames,
+      Error) then
+    begin
+      WriteLn('camera background blur cost: not measured (', Error, ')');
+      Exit;
+    end;
+    Milliseconds := Blur.MeanFrameMilliseconds;
+    if Milliseconds <= 0 then
+    begin
+      WriteLn('camera background blur cost: nothing to report');
+      Exit;
+    end;
+    Sustainable := 1000 / Milliseconds;
+    WriteLn(Format('camera background blur cost: %.1f ms/frame at '
+      + '%dx%d (%.1f ms of it Vision), %.0f fps sustainable against a '
+      + '%d fps preview', [Milliseconds, FrameWidth, FrameHeight,
+      Blur.MeanSegmentationMilliseconds, Sustainable,
+      PreviewFramesPerSecond]));
+    if Sustainable < PreviewFramesPerSecond then
+      WriteLn('camera background blur: SLOWER than the preview on this '
+        + 'Mac — the picture will drop frames while it is on');
+  finally
+    Blur.Free;
+  end;
 end;
 
 // The spike check (ADR-0002): register the runtime-built stream output
@@ -682,6 +768,43 @@ begin
     WriteLn('microphone access: not yet asked (the first mic recording ',
       'will prompt)');
   end;
+
+  // Informational, and per binary exactly as the microphone is: the
+  // Camera grant is its own TCC entry, so a fresh build starts undecided
+  // and the first Camera click prompts. A denied grant is invisible from
+  // inside AVCaptureSession — startRunning succeeds and isRunning
+  // answers YES with no access, measured — which is why the camera
+  // window consults this status rather than the session.
+  case CameraAccess of
+    caAuthorized: WriteLn('camera access: granted');
+    caDenied: WriteLn('camera access: denied — ',
+      'System Settings › Privacy & Security › Camera');
+    caRestricted: WriteLn('camera access: restricted');
+  else
+    WriteLn('camera access: not yet asked (the first Camera click ',
+      'will prompt)');
+  end;
+
+  // Background blur, and what the system's own Portrait effect says.
+  // Both informational. The second line is the record of a fact worth
+  // re-checking on a later SDK: AVCaptureDevice exposes the Portrait
+  // effect read-only in both of its forms, so this is the state of a
+  // Control Center switch Knips can neither set nor own — which is why
+  // Blur Background is Vision and CoreImage rather than one property
+  // assignment (docs/architecture.md, "Background blur").
+  if CameraBlurSupported then
+  begin
+    WriteLn('camera background blur: available (Vision + CoreImage)');
+    ProbeCameraBlurCost;
+  end
+  else
+    WriteLn('camera background blur: unavailable on this Mac');
+  if SystemPortraitEffectEnabled then
+    WriteLn('system Portrait effect: on in Control Center (read-only to '
+      + 'every app, including this one)')
+  else
+    WriteLn('system Portrait effect: off in Control Center (read-only to '
+      + 'every app, including this one)');
 
   // Likewise informational. The header puts updateConfiguration: at
   // macOS 12.3, below the project floor, so this should always say

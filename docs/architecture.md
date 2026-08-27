@@ -27,8 +27,10 @@
   — a Dock tile, a place in ⌘-Tab, and a menu bar with ⌘W and ⌘Q. See
   [Menu bar app](#menu-bar-app).
   GIF export. See [Menu bar app](#menu-bar-app).
-- Two menu checkboxes change what a recording shows while it runs —
-  *Zoom on Click* and *Follow Mouse*. Neither touches the file's
+- The menu's checkboxes sit in three submenus — *Camera* (show, circle,
+  background blur), *Behaviour* (Zoom on Click, Follow Mouse) and *Audio*
+  (system, microphone). Two of them change what a recording shows while
+  it runs — *Zoom on Click* and *Follow Mouse*. Neither touches the file's
   dimensions, which `AVAssetWriter` fixes at the first frame: both animate
   the stream's `sourceRect` through
   `SCStream.updateConfiguration:completionHandler:`, so a smaller
@@ -41,6 +43,17 @@
   arithmetic is neutral and tested; the blit runs on the capture queue
   and is written to that thread's rules. See
   [Big Cursor](#big-cursor).
+- The camera picture-in-picture can blur its background — the person
+  sharp, the room behind them soft. AVFoundation exposes the *system*
+  Portrait effect read-only in both of its forms, so this is Knips's own
+  pipeline: Vision person segmentation and a CoreImage composite on a
+  serial GCD queue, 11 ms a frame at 640×480 against a 33 ms budget. See
+  [Background blur](#background-blur).
+- A window recording with the camera up is captured from the **display**
+  through a rectangle riding the window, because desktop-independent
+  window capture composits that window alone and would leave the camera
+  out of the file (measured). See
+  [The composited window recording](#the-composited-window-recording).
 - Timing is taken from each sample buffer's presentation stamp; the
   writer's session starts at the first appended frame. This is what makes
   SCK's change-driven frame delivery record at real speed.
@@ -86,10 +99,10 @@
 | --- | --- | --- |
 | CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `export`, `displays`, `windows`, `mcp`, `probe`; SIGINT/SIGTERM → `StopRequested` |
 | MCP | `Knips.Mcp`, `Knips.Mcp.Params` | The tool surface over pascal-mcp-sdk's stdio transport; the neutral half is the tool table, argument mapping, and default paths (tested) |
-| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window, and the neutral state machine (tested) |
+| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Camera.Blur`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window and its background blur, and the neutral state machine (tested) |
 | Recording | `Knips.Recording` | Target → filter + geometry → writer → stream; progress; report |
 | CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `export`, `displays`, `windows`, `probe`; SIGINT/SIGTERM → `StopRequested` |
-| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Live`, `Knips.App.Hotkey`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window, the live-effect animator, the global stop hotkey, and the neutral state machine (tested) |
+| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Camera.Blur`, `Knips.App.Live`, `Knips.App.Hotkey`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window and its background-blur pipeline, the live-effect animator, the global stop hotkey, and the neutral state machine (tested) |
 | Recording | `Knips.Recording`, `Knips.Recording.LiveMath`, `Knips.Recording.CursorMath`, `Knips.Recording.CursorOverlay` | Target → filter + geometry → writer → stream; progress; report. The live-effect and big-cursor arithmetic are neutral and tested; the overlay is the Darwin half that makes the sprite and blits it |
 | Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
 | Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.MovieTrim`, `Knips.Export.Pipeline` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; AVAssetExportSession passthrough trim; the shared GIF/APNG pipeline |
@@ -696,9 +709,23 @@ machine:
 
   asIdle ──Audio ▸ System Audio─▶ asIdle  (a self-transition: the command
          ──Audio ▸ Microphone──▶           is legal only where the stream
-         ──Zoom on Click───────▶           configuration is not yet fixed)
-         ──Follow Mouse────────▶
+         ──Behaviour ▸ Zoom────▶           configuration is not yet fixed)
+         ──Behaviour ▸ Follow──▶
 ```
+
+**Three submenus, not eleven loose lines.** *Camera* (Show Camera,
+Circular Camera, Blur Background), *Behaviour* (Zoom on Click, Follow
+Mouse) and *Audio* (System Audio, Microphone) each gather the checkboxes
+that are one setting between them: what the picture-in-picture does, what
+the recording does while it runs, what it listens to. The root menu is
+the five *Record*/*Stop* commands, those three, the recordings folder,
+the error line and Quit. Nothing about the state machine or the
+persistence changed with the grouping — each checkbox keeps its own
+command, its own selector and its own defaults key — and the two
+Behaviour items stay idle-only for the reason the audio pair is, while
+all three Camera items stay legal in every state for the reason the
+camera toggle always was: the camera is a passive window the recorder
+knows nothing about.
 
 `Knips.App.State` owns the transition table, the status-item title, the
 `~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4` naming, the selection maths,
@@ -707,17 +734,18 @@ path/width/percentage arithmetic; it is platform-neutral and has a
 co-located suite, so the only untested part of the app is the Cocoa
 plumbing.
 
-Five more classes are built through `Knips.ObjC.Runtime`, none of them
+Six more classes are built through `Knips.ObjC.Runtime`, none of them
 an `objcclass`:
 
 | Runtime class | Superclass | Methods |
 | --- | --- | --- |
-| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `recordWindow:`, `recordLastRegion:`, `toggleSystemAudio:`, `toggleMicrophone:`, `toggleZoomOnClick:`, `toggleFollowMouse:`, `liveTick:`, `cameraRideTick:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `toggleCamera:`, `toggleCameraShape:`, `restoreCamera:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:`, `exportGif:`, `revealRecording:`, `closePlayback:`, `menuNeedsUpdate:` |
+| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `recordWindow:`, `recordLastRegion:`, `toggleSystemAudio:`, `toggleMicrophone:`, `toggleZoomOnClick:`, `toggleFollowMouse:`, `liveTick:`, `cameraRideTick:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `toggleCamera:`, `toggleCameraShape:`, `toggleCameraBlur:`, `restoreCamera:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:`, `exportGif:`, `revealRecording:`, `closePlayback:`, `menuNeedsUpdate:` |
 | `KnipsOverlayView` | `NSView` | `drawRect:`, `mouseDown:`, `mouseDragged:`, `mouseUp:`, `keyDown:`, `acceptsFirstResponder` |
 | `KnipsOverlayWindow` | `NSWindow` | `canBecomeKeyWindow` (a borderless window answers NO, and then Esc never reaches the view) |
 | `KnipsCameraView` | `NSView` | `acceptsFirstMouse:` (Knips is an Accessory app, so without it the first click on the camera window is eaten as the activating click and dragging takes two); `mouseDown:`, `mouseDragged:`, `mouseUp:` — the drag, done here rather than by `movableByWindowBackground` so the corner snap has a drag end; `snapTick:` — one step of the snap ease, so the ease needs no nested run loop and no second runtime class |
 | `KnipsBorderView` | `NSView` | `drawRect:` — the frame drawn around a region while it records |
 | `KnipsPlaybackDelegate` | `NSObject` | `windowWillClose:` — the one teardown path for the playback window; `windowShouldClose:` — NO while a GIF export is running |
+| `KnipsCameraOutput` | `NSObject` | `captureOutput:didOutputSampleBuffer:fromConnection:` — the camera's background-blur pipeline, on its own serial GCD queue ([below](#background-blur)) |
 
 The two bodies that return a constant and never call back into Pascal —
 `KnipsCameraView.acceptsFirstMouse:` and
@@ -802,15 +830,16 @@ that itself: it fires an `OnClosed` event at the end of
 window unit knows about `NSWindow`; the activation policy is the app's
 business.
 
-**Remembered settings.** Four, all in `NSUserDefaults`:
-`KnipsAudioSystem` and `KnipsAudioMicrophone` (the Audio submenu's
-two checkboxes, [below](#the-audio-submenu)),
-`KnipsZoomOnClick` and
-`KnipsFollowMouse` (both off by default, which is what `boolForKey:`
-answers for a key that was never written, so nothing registers defaults;
-see [Live effects](#live-effects-zoom-on-click-and-follow-mouse)), and
-`KnipsLastRegion*` (the display id and rectangle behind *Record Last
-Region*). The region is
+**Remembered settings.** All in `NSUserDefaults`: `KnipsAudioSystem` and
+`KnipsAudioMicrophone` (the Audio submenu's two checkboxes,
+[below](#the-audio-submenu)), `KnipsZoomOnClick` and `KnipsFollowMouse`
+(the Behaviour submenu's two; both off by default, which is what
+`boolForKey:` answers for a key that was never written, so nothing
+registers defaults; see
+[Live effects](#live-effects-zoom-on-click-and-follow-mouse)),
+`KnipsCameraVisible`, `KnipsCameraShape` and `KnipsCameraBlur` (the
+Camera submenu's three), and `KnipsLastRegion*` (the display id and
+rectangle behind *Record Last Region*). The region is
 written only once a capture has actually started, so a region whose
 display has gone never becomes the region to repeat. It is read back
 through `SanitizeStoredRegion`, because `defaults write` is a public
@@ -1235,12 +1264,82 @@ still with no compositing code, just a window in the right place.
   wherever it stands.
 
 **A window recording does not put the camera in the file, and that is
-stated rather than implied.** `SCContentFilter.initWithDesktopIndependentWindow:`
-composits that one window and nothing on top of it. Docking there is
-about the *screen*: the presenter wants the picture beside the thing
-they are demonstrating, and a picture-in-picture stranded in the corner
-of a window they have since dragged away is the complaint that produced
-this. For the file, a region recording is the mode that composites.
+now measured rather than reasoned.** `SCContentFilter.initWithDesktopIndependentWindow:`
+composits that one window and nothing on top of it — proven on device by
+recording another application's window through that path with a solid
+magenta borderless window at window level 3, the camera's own level,
+demonstrably over it on screen (screenshot) and 480×360 device pixels
+across. **0 near-magenta pixels in 1 754 000**, in a frame 20 of the
+capture.
+
+### The composited window recording
+
+So the camera is put in the file the only way it can be: **when the
+camera is up, a window recording captures the DISPLAY instead**, with a
+source rectangle sitting exactly on that window's frame.
+`TAppController.CompositeWindowForPending` rewrites the pending request
+before anything else reads it — the window's AppKit frame from
+`CGWindowListCopyWindowInfo`, the display holding its centre from
+`DisplayIDForScreenRect`, and `ScreenRectRegion` (the inverse of
+`RegionScreenRect`, tested) to turn the one into the other's own top-left
+points. From there every step below it — the display index, the source
+rectangle, the writer's dimensions — is a region recording, and
+ScreenCaptureKit reads the screen, which has the camera on it.
+
+Measured on the same window, the same magenta stand-in and the same
+threshold as the control above: **172 800 near-magenta pixels**, which is
+exactly 480 × 360 — the whole stand-in, nothing clipped. Same file
+dimensions either way (1000 × 1754, the window's frame at scale 2), so
+the writer really is sized from the window's initial frame.
+
+**The trade is stated, not hidden.** A composited window recording
+captures whatever is in front of the window: a notification, a menu
+pulled down over it, another app dragged across. The desktop-independent
+path has none of that and is still what a recording with the camera
+**off** gets, so the cost is paid only by the user who asked for a
+picture-in-picture — which is the only user it buys anything for.
+
+**One display, and it is checked every tick.** The window's frame comes
+back in AppKit's *global* space, so the flip into a display's own points
+is only right for the display the window is actually on — and a window
+can be dragged onto another one. `UpdateCompositedSourceRect` re-resolves
+with `DisplayIDForScreenRect` on every poll; when the window's centre has
+left the display the capture opened on, **the pan stops** and the
+recording stays where it is, with one `Last error:` line saying so.
+Following it would mean rebuilding the content filter around a different
+`SCDisplay` mid-stream, against an output size `AVAssetWriter` fixed at
+the first frame and cannot move. Drag the window back and the pan
+resumes.
+
+**The rectangle pans and never resizes.** `AVAssetWriter` fixes the
+file's dimensions at the first frame, so a window the user resizes
+mid-take must not change them: `ScreenRectRegion` is handed the size the
+recording opened with and follows only the window's top-left corner,
+clamping into the display so a window dragged half off screen still
+yields a rectangle ScreenCaptureKit accepts. That is exactly what Follow
+Mouse does to a region, and it reuses the same two pieces — the 5 Hz
+window poll that already moves the camera (`cameraRideTick:`) and
+`TRecordingSession.UpdateSourceRect`. Measured with the poll instrumented:
+a window moved from x = 200 to x = 500 mid-recording produced
+`win=(500,300) region=(500,282,600,400)` on the next tick, accepted, with
+the region's size unchanged from the `(200,282,600,400)` it opened with.
+
+**Live effects stay off.** `ResolveLiveEffects` gives a window recording
+neither Zoom on Click nor Follow Mouse, and that answer does not change
+because the capture underneath is now a display: a click has no fixed
+meaning in a window the user is free to move, and two owners for one
+source rectangle — the animator and this poll — is a rectangle that
+fights itself. `StartPending` starts the poll instead of the animator,
+and the poll runs even if the camera is switched off mid-take, because by
+then it is what keeps the *capture* on the window. **No border either:**
+a window recording has never had a frame drawn round it, and drawing one
+now would put a second window into a capture that, unlike a region's,
+really does see everything in front of it.
+
+Docking is unchanged and is about the *screen* as well: the presenter
+wants the picture beside the thing they are demonstrating, and a
+picture-in-picture stranded in the corner of a window they have since
+dragged away is the complaint that produced it.
 
 The camera remembers where it was and `Undock` puts it back on every
 stop path (`FinishRecording`, `Fail`, and the `StartCapture` failure
@@ -1258,13 +1357,39 @@ the moment either happens.
 `TCameraPreview.RideTo` is one unanimated `setFrame:` per tick, exactly
 what `TRecordingBorder.MoveTo` does for the frame and for the same
 reason: this runs under a live capture, where an ease is an ease in the
-file. It keeps **the corner the dock chose** and travels by exactly the
-rectangle's displacement — deliberately not "the nearest corner of the
-new rectangle", which would teleport the picture across the shot the
-moment the rectangle's midline crossed it. Positions are computed from
-the dock's own rectangle and origin (`CameraRideOrigin` in
-`Knips.App.State`, tested) rather than accumulated tick by tick, so ten
-minutes at thirty hertz drift by nothing.
+file. It keeps **the corner the dock chose** — deliberately not "the
+nearest corner of the new rectangle", which would teleport the picture
+across the shot the moment the rectangle's midline crossed it. Positions
+are computed from the dock's own anchor (`CameraRideAnchorFor` and
+`CameraRideOrigin` in `Knips.App.State`, tested) rather than accumulated
+tick by tick, so ten minutes at thirty hertz drift by nothing.
+
+**The anchor is a corner, and it used to be an origin.** That is the one
+substantive change to the ride since it was measured, and it is a fix
+rather than a refinement. Following the rectangle's *origin* alone is
+right for a rectangle that only moves and wrong for one that also
+resizes — and a recorded window resizes. In AppKit's bottom-left space,
+dragging a window's bottom edge down moves its origin while its top edge
+stands still: a camera docked into the top-right corner was dragged down
+with an origin it had nothing to do with. Dragging the top edge *down*
+moves no origin at all, so `IsCameraRideMovement` saw nothing to do and
+left the same camera hanging out of the top of the rectangle, straddling
+an edge it is supposed to be inside. Anchoring to the corner the dock
+chose — which edge on each axis, and how far in — answers both, and
+`CameraRideOrigin` then pins an axis on which the camera no longer *fits*
+to that axis's near edge, so a window resized smaller than the camera
+leaves the picture at the rectangle's corner rather than half out of two
+edges at once. It does **not** clamp a camera that fits: the ride
+translates, it does not place. Placement is `NearestCameraCorner`'s and
+the corner snap's, and a picture the user deliberately left outside the
+rectangle would otherwise be teleported inside a thirtieth of a second
+later — the exact move the re-anchor exists to prevent. `IsCameraRideMovement` now compares size as well as origin, because a
+resize by the top or right edge changes nothing else.
+
+For a rectangle that only **translates** the corner anchor is
+arithmetically identical to the old displacement — both edges move by the
+same amount — so every region-pan row in the table below still holds
+unchanged.
 
 **Two clocks, because two different things move the two rectangles.**
 
@@ -1455,6 +1580,156 @@ since been unplugged, or one the Dock has since taken, falls back to the
 bottom right of the main screen. `visibleFrame` rather than `frame`
 because the window floats at level 3 and the Dock sits at 20: under the
 Dock it would be neither visible nor draggable.
+
+### Background blur
+
+*Camera ▸ Blur Background* keeps the person sharp and blurs the room
+behind them. It is off by default and remembered under `KnipsCameraBlur`.
+
+**There is no programmatic route to the system Portrait effect, and that
+was checked against the SDK rather than assumed.** macOS has a Portrait
+effect of its own, in Control Center. AVFoundation's
+`AVCaptureDevicePortraitEffect` category (`AVCaptureDevice.h`, macOS
+26.5) declares exactly two members and both are `readonly`:
+`+isPortraitEffectEnabled`, "a class property indicating whether the
+Portrait Effect feature is currently enabled in Control Center", and
+`-isPortraitEffectActive` for one device. The only writable thing
+anywhere near it is
+`+showSystemUserInterface:AVCaptureSystemUserInterfaceVideoEffects`,
+which "brings up the system user interface and deep links to the
+appropriate module" and returns immediately — a request to the *user*,
+applying to every app on the Mac at once, with nothing to read back as a
+setting of ours. `knips probe` prints the read-only state on every run so
+the claim can be re-checked on a later SDK instead of believed.
+
+So the effect is built, in `Knips.App.Camera.Blur`:
+
+```text
+  AVCaptureVideoDataOutput (BGRA) ─▶ KnipsCameraOutput ─▶ knips.camera.blur
+        │                                                  (serial GCD queue)
+        ├─▶ Vision: VNGeneratePersonSegmentationRequest, quality FAST, through
+        │   one VNSequenceRequestHandler ─▶ a mask buffer, scaled to the frame
+        │
+        └─▶ CoreImage: CIGaussianBlur over the clamped frame, then
+            CIBlendWithMask(sharp over blurred, through the mask), then the
+            mirror transform
+                 │
+                 └─▶ CIContext.createCGImage ─▶ the window's own CALayer
+```
+
+**Two display paths, one window.** The content view hosts a plain root
+`CALayer` that carries the corner radius, the mask and the aspect-fill
+crop. Blur off, the `AVCaptureVideoPreviewLayer` is a *sublayer* of it
+and the framework moves the pixels — the zero-cost path, unchanged. Blur
+on, that sublayer is removed and the root layer's `contents` is replaced
+frame by frame. Switching between them adds and removes an
+`AVCaptureVideoDataOutput` on a session that keeps running (`addOutput:`
+"may be called while the session is running"), so the toggle costs
+nothing like the second-long warm-up a stop and restart would. Both
+layers are owned by `TCameraPreview`, because the preview layer spends
+the whole of a blurred session detached from any superlayer.
+
+**Everything that can be built once is built once.** The `CIContext`, the
+Vision request, the sequence handler, the one-element request array, the
+two filter-parameter dictionaries and the four CoreImage filter/key
+strings are created at `Start` and reused. The queue body is
+allocation-*light*, not allocation-free: it still makes the `CGImage` it
+hands the layer (and releases it), an autorelease pool, and the short
+chain of lazy `CIImage` recipe objects the pipeline is expressed as. What
+the pre-building buys is that no kernel compile and no model load happen
+per frame. A `CIContext` per frame would recompile the filter kernels every
+time, and `VNGeneratePersonSegmentationRequest` is a `VNStatefulRequest`
+whose header says it "may hold on to previous masks to improve temporal
+stability" — a fresh request per frame would also be a worse mask.
+
+**Stopping is a lock, not a hope.** `AVCaptureVideoDataOutput.h` says
+nothing about a callback that is already executing — its whole discussion
+of `-setSampleBufferDelegate:queue:` is about *dropping* frames, plus the
+serial-queue and non-NULL rules — so clearing the delegate cannot be
+assumed to wait for one. With about 8.6 ms of every frame inside Vision,
+a *Blur Background* click, a `Hide` or a camera error landing in that
+window would otherwise release the request, the handler, the mask, the
+parameter dictionaries and the `CIContext` out from under a frame still
+using them. The mutex that guards the statistics therefore guards the
+teardown as well, and the whole frame body — the `FRunning`/layer/context
+guard included — runs inside it.
+
+The lock is deliberately **not** held across `setSampleBufferDelegate:`
+and `removeOutput:`. If those do synchronise with the queue, holding a
+lock the queue is waiting for while calling them is a deadlock. `Stop`
+clears `FRunning` under the lock, releases it, makes the two framework
+calls, and then takes the lock again to tear down — which blocks until a
+frame that was mid-Vision has finished, and lets any later frame wake up
+on nil fields and return.
+
+**The queue rules apply, with one deliberate exception.** The video-data
+queue is a serial GCD queue this unit creates and the RTL never adopts —
+the same standing as ScreenCaptureKit's capture queue, and the same
+discipline in the delegate body: no exceptions, no `try..finally`, no
+`WriteLn`, no managed-type writes outside the mutex. What is different is
+that the *heavy* work happens there, because this program has no
+`cthreads` on Darwin ([ADR-0005](adr/0005-windows-linux-ports.md)) and no
+other queue to put it on. Vision's and CoreImage's
+allocations are Objective-C's, not the RTL's, which is why that is safe:
+the rules exist to keep FPC's process-global exception frame chain and
+its managed-type refcounts off a foreign thread, and neither framework
+touches either. One `NSAutoreleasePool` is opened and drained around each
+frame rather than trusting GCD's own, which drains at unspecified times.
+The layer is written from that queue too — `CALayer` is thread-safe, but
+a thread with no run loop commits no implicit transaction, so the
+assignment is wrapped in an explicit `CATransaction` with actions
+disabled. Without the commit the picture never appears; without the
+disable every frame starts a quarter-second cross-fade.
+
+**Mirroring is done in CoreImage, not by the layer.** There is no
+`AVCaptureConnection` on this path, and a transform on the hosted root
+layer would fight the corner radius and the mask. One
+`CGAffineTransform(-1, 0, 0, 1, width, 0)` on the composited image is
+free by comparison — CoreImage folds it into the pass it was already
+running — and what reaches the layer is a mirrored bitmap, which is what
+makes it checkable from a file. Measured by putting a 1280×960 screen
+capture through the shipped pipeline and reading the rendered layer
+contents back out: the output's column-brightness profile correlates
+**+0.905** with the *reversed* source and **−0.814** with the source as
+it stands, and the mean absolute horizontal gradient collapses from
+**8.31 to 0.29** — 28× less high-frequency energy, which is the blur.
+
+**The budget, measured on this M-series Mac.** 120 frames of 640×480
+BGRA through the real `TCameraBlur`, model load and kernel compile
+excluded:
+
+| quality | Vision every | ms/frame | fps ceiling | Vision alone | CPU |
+| --- | --- | --- | --- | --- | --- |
+| **fast** | **every frame** | **11.0** | **91** | **8.7 ms** | **45 %** |
+| fast | every 2nd | 6.4 | 156 | 8.6 ms | 52 % |
+| balanced | every frame | 24.1 | 42 | 21.6 ms | 40 % |
+| balanced | every 2nd | 13.4 | 75 | 22.4 ms | 43 % |
+| accurate | every frame | 59.9 | 17 | 57.4 ms | 28 % |
+
+Fast every frame is what ships. It holds the camera window's 30 Hz with a
+threefold margin — 11 ms against a 33 ms budget — for under half a core,
+because the segmentation runs on the neural engine and the composite on
+the GPU. Balanced clears 30 Hz too, but with a 27 % margin it would be
+competing with a recording for the same machine; accurate cannot clear it
+at all, and its header describes it as a matting refinement over
+balanced. The CPU column falls as the frames get slower for the same
+reason: more of the wall time is spent waiting for the ANE.
+
+`knips probe` prints the same measurement for the machine it is run on
+(`camera background blur cost: … ms/frame …, N fps sustainable`) and says
+so plainly when N is below the preview's 30. It measures with synthetic
+frames because the Camera grant is per binary and a probe run from a
+shell has no camera at all — Vision's network costs what the frame size
+and the quality level make it cost, not what is in the picture. What that
+cannot answer is how the mask *looks*, which needs a face and eyes.
+
+**Honest degradation.** `alwaysDiscardsLateVideoFrames` is YES, so a
+queue that cannot keep up is handed fewer frames rather than falling
+behind — nothing ever queues. Beyond that, `SegmentationStride` runs
+Vision on every Nth frame and reuses the last mask for the others: the
+mask is the expensive half and a person does not move far in 33 ms. The
+table above is what decided the shipped stride of 1; the measured
+statistics are read back rather than the frame rate being asserted.
 
 The layer's `contentsScale` is pinned at `Show`. Dragging the window
 between a Retina and a non-Retina display leaves it rendering at the old

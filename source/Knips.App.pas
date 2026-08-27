@@ -48,6 +48,7 @@ uses
   CocoaAll,
   Knips.App.Border,
   Knips.App.Camera,
+  Knips.App.Camera.Blur,
   Knips.App.Hotkey,
   Knips.App.Live,
   Knips.App.Overlay,
@@ -128,6 +129,7 @@ const
   StopPendingSelector = 'stopPending:';
   ToggleCameraSelector = 'toggleCamera:';
   ToggleCameraShapeSelector = 'toggleCameraShape:';
+  ToggleCameraBlurSelector = 'toggleCameraBlur:';
   RestoreCameraSelector = 'restoreCamera:';
   ToggleZoomOnClickSelector = 'toggleZoomOnClick:';
   ToggleFollowMouseSelector = 'toggleFollowMouse:';
@@ -284,14 +286,21 @@ type
     FAudioMenu: NSMenu;
     FSystemAudioItem: NSMenuItem;
     FMicrophoneItem: NSMenuItem;
+    // The Behaviour submenu and the two live effects inside it.
+    FBehaviourItem: NSMenuItem;
+    FBehaviourMenu: NSMenu;
     FZoomOnClickItem: NSMenuItem;
     FFollowMouseItem: NSMenuItem;
     FBigCursorItem: NSMenuItem;
     FStopItem: NSMenuItem;
     FCancelItem: NSMenuItem;
     FRevealItem: NSMenuItem;
+    // The Camera submenu and its three checkboxes.
     FCameraItem: NSMenuItem;
+    FCameraMenu: NSMenu;
+    FCameraShowItem: NSMenuItem;
     FCameraShapeItem: NSMenuItem;
+    FCameraBlurItem: NSMenuItem;
     FErrorItem: NSMenuItem;
     FQuitItem: NSMenuItem;
     // The menu bar the process shows while it is a Regular app. Built on
@@ -350,10 +359,27 @@ type
     FPendingHasRegion: Boolean;
     FPendingRegion: TCaptureRegion;
     FPendingWindowID: Cardinal;
+    // The composited window recording. A window recording with the
+    // camera up is captured as a DISPLAY with a source rectangle riding
+    // the window's frame, because ScreenCaptureKit's desktop-independent
+    // window capture composits that window alone and leaves the camera
+    // out of the file — measured, see docs/architecture.md. These three
+    // are the window being ridden, the display it was on, and the
+    // rectangle whose SIZE the writer was opened with; 0 when the
+    // recording is an ordinary one.
+    FCompositedWindowID: Cardinal;
+    FCompositedDisplayID: UInt32;
+    FCompositedRegion: TCaptureRegion;
+    // Set once the recorded window has been dragged onto a display this
+    // capture cannot follow it to, so the message is said once rather
+    // than five times a second; cleared if it comes back.
+    FCompositedDisplayLost: Boolean;
     function AddMenuItem(const ATitle, ASelector: string): NSMenuItem;
     procedure BuildMenu;
     procedure BuildWindowMenu;
     procedure BuildAudioMenu;
+    procedure BuildCameraMenu;
+    procedure BuildBehaviourMenu;
     procedure AddInertItem(AMenu: NSMenu; const ATitle: string);
     function WindowEntriesFresh: Boolean;
     procedure RefreshWindowEntries;
@@ -379,6 +405,16 @@ type
     // the border could not be shown; the recording then runs without one.
     function ShowBorderForPending: Cardinal;
     procedure HideBorder;
+    // Turns a pending WINDOW recording into a pending region recording
+    // on the display that window is on, so the capture composits
+    // everything in front of it — the camera included. False, leaving
+    // the pending request untouched, when the window's frame or its
+    // display cannot be resolved; the recording then runs
+    // desktop-independent as it always did.
+    function CompositeWindowForPending: Boolean;
+    // One tick of the composited pan: the recorded window's frame now,
+    // as a source rectangle of the recording's own fixed size.
+    procedure UpdateCompositedSourceRect;
     // Moves a visible camera window into the corner of the rectangle
     // about to be recorded, so the picture-in-picture goes into the file
     // the way Kap does it. A region recording docks into the region; a
@@ -447,6 +483,7 @@ type
     procedure CommandRevealRecordings;
     procedure CommandToggleCamera;
     procedure CommandToggleCameraShape;
+    procedure CommandToggleCameraBlur;
     // The launch-time restore, one run-loop turn after Setup, so the
     // status item is in the menu bar before the camera warms up.
     procedure CommandRestoreCamera;
@@ -960,6 +997,22 @@ begin
   end;
 end;
 
+procedure TargetToggleCameraBlur(ASelf: id; ACommand: SEL;
+  ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandToggleCameraBlur;
+  except
+    on E: Exception do
+      HandleCameraBodyException(Controller, ToggleCameraBlurSelector, E);
+  end;
+end;
+
 procedure TargetRestoreCamera(ASelf: id; ACommand: SEL; ATimer: id); cdecl;
 var
   Controller: TAppController;
@@ -1052,6 +1105,10 @@ begin
   // probe` — which calls this — fails on a bad class_addMethod instead of
   // the user finding out from a camera window that will not drag.
   EnsureCameraClasses;
+  // And the camera's blur delegate, for the same reason: a video-data
+  // output whose delegate is missing its one method is a preview that
+  // goes black the moment Blur Background is ticked.
+  EnsureCameraBlurClasses;
   EnsureBorderClasses;
   EnsurePlaybackClasses;
   if GTargetClass <> nil then
@@ -1095,6 +1152,8 @@ begin
     AddTargetMethod(Builder, ToggleCameraSelector, @TargetToggleCamera);
     AddTargetMethod(Builder, ToggleCameraShapeSelector,
       @TargetToggleCameraShape);
+    AddTargetMethod(Builder, ToggleCameraBlurSelector,
+      @TargetToggleCameraBlur);
     AddTargetMethod(Builder, RestoreCameraSelector, @TargetRestoreCamera);
     // AppKit only asks respondsToSelector:, so a runtime without the
     // protocol registered is not an error; claiming it is tidier.
@@ -1486,6 +1545,85 @@ begin
       + 'macOS 15 or newer'));
 end;
 
+{ The Camera submenu: the three settings that are all about the
+  picture-in-picture window — whether it is up, what shape it is, and
+  whether its background is blurred. The same argument that put the two
+  audio sources behind one *Audio* item: between them they are one thing,
+  and the root menu had grown to a dozen lines with four of them about a
+  240-point window.
+
+  All three are legal in every state, which is why none of them consults
+  the transition table. The camera is a passive window — ScreenCaptureKit
+  records it because it is on the display, and nothing in the recorder
+  knows it exists — so switching it on, rounding it off or blurring
+  behind it cannot fail a capture. Mid-recording is also exactly when a
+  presenter wants them.
+
+  Built once, like the Audio submenu: nothing here goes stale but the
+  checkmarks, and RefreshStatusItem rewrites those. }
+
+procedure TAppController.BuildCameraMenu;
+
+  function AddCameraItem(const ATitle, ASelector: string): NSMenuItem;
+  begin
+    Result := NSMenuItem(NSMenuItem.alloc.initWithTitle_action_keyEquivalent(
+      PascalToNSString(ATitle), SelectorNamed(ASelector),
+      PascalToNSString('')));
+    Result.setTarget(FTarget);
+    FCameraMenu.addItem(Result);
+    Result.release;
+  end;
+
+begin
+  FCameraMenu := NSMenu(NSMenu.alloc.initWithTitle(
+    PascalToNSString(CameraMenuTitle)));
+  FCameraMenu.setAutoenablesItems(False);
+  FCameraShowItem := AddCameraItem(ShowCameraMenuTitle, ToggleCameraSelector);
+  FCameraShapeItem := AddCameraItem(CircularCameraMenuTitle,
+    ToggleCameraShapeSelector);
+  FCameraBlurItem := AddCameraItem(BlurBackgroundMenuTitle,
+    ToggleCameraBlurSelector);
+  // The one line in this submenu that can be unavailable, and it says so
+  // rather than being silently inert — the same rule the Microphone item
+  // follows. Vision's person segmentation is macOS 12 against a project
+  // floor of 13, so in practice this never fires; it is the honest
+  // answer if some future macOS moves the frameworks.
+  if not CameraBlurSupported then
+    FCameraBlurItem.setToolTip(PascalToNSString(
+      'background blur needs Vision and CoreImage, which this Mac does '
+      + 'not have'));
+end;
+
+{ The Behaviour submenu: the two live effects, which are the settings
+  that change what a recording *shows* while it runs rather than what it
+  captures. Both are idle-only, for the reason the audio checkboxes are:
+  what the stream is configured to do is fixed when the capture starts,
+  and a switch flipped mid-take would silently do nothing. }
+
+procedure TAppController.BuildBehaviourMenu;
+
+  function AddBehaviourItem(const ATitle, ASelector: string): NSMenuItem;
+  begin
+    Result := NSMenuItem(NSMenuItem.alloc.initWithTitle_action_keyEquivalent(
+      PascalToNSString(ATitle), SelectorNamed(ASelector),
+      PascalToNSString('')));
+    Result.setTarget(FTarget);
+    FBehaviourMenu.addItem(Result);
+    Result.release;
+  end;
+
+begin
+  FBehaviourMenu := NSMenu(NSMenu.alloc.initWithTitle(
+    PascalToNSString(BehaviourMenuTitle)));
+  FBehaviourMenu.setAutoenablesItems(False);
+  FZoomOnClickItem := AddBehaviourItem(ZoomOnClickMenuTitle,
+    ToggleZoomOnClickSelector);
+  FFollowMouseItem := AddBehaviourItem(FollowMouseMenuTitle,
+    ToggleFollowMouseSelector);
+  FBigCursorItem := AddBehaviourItem(BigCursorMenuTitle,
+    ToggleBigCursorSelector);
+end;
+
 procedure TAppController.BuildMenu;
 begin
   FMenu := NSMenu(NSMenu.alloc.initWithTitle(PascalToNSString(MenuTitle)));
@@ -1514,30 +1652,17 @@ begin
   // covers the menu bar, and inside it Esc or a stray click cancel.
   FCancelItem := AddMenuItem(CancelSelectionTitle, CancelSelectionSelector);
   FMenu.addItem(NSMenuItem.separatorItem);
-  // Legal in every state on purpose: the camera window is passive — it is
-  // captured by ScreenCaptureKit like any other window and touches
-  // nothing the recorder owns — and mid-recording is exactly when the
-  // user is most likely to want it on or off.
-  FCameraItem := AddMenuItem(CameraMenuTitle, ToggleCameraSelector);
-  // Legal in every state for the same reason the toggle above is: the
-  // shape is a property of a passive window, and switching it mid-take
-  // changes nothing the recorder owns.
-  FCameraShapeItem := AddMenuItem(CircularCameraMenuTitle,
-    ToggleCameraShapeSelector);
-  // The two live effects sit with the other recording settings and are
-  // idle-only for the same reason the audio checkbox is: what the stream
-  // is configured to capture is fixed when the capture starts.
-  FZoomOnClickItem := AddMenuItem(ZoomOnClickMenuTitle,
-    ToggleZoomOnClickSelector);
-  FFollowMouseItem := AddMenuItem(FollowMouseMenuTitle,
-    ToggleFollowMouseSelector);
-  // Big Cursor belongs with them and is idle-only for a plainer reason:
-  // the drawn pointer replaces ScreenCaptureKit's own, which is part of
-  // the configuration the capture started with.
-  FBigCursorItem := AddMenuItem(BigCursorMenuTitle,
-    ToggleBigCursorSelector);
-  // A submenu item carries no action of its own, exactly like Record
-  // Window; the two checkboxes inside carry their own selectors.
+  // Three submenus rather than eight loose checkboxes. Each one is a
+  // single question — what the picture-in-picture does, what the
+  // recording does while it runs, what it listens to — and a submenu item
+  // carries no action of its own, exactly like Record Window; the
+  // checkboxes inside carry their own selectors.
+  FCameraItem := AddMenuItem(CameraMenuTitle, '');
+  BuildCameraMenu;
+  FCameraItem.setSubmenu(FCameraMenu);
+  FBehaviourItem := AddMenuItem(BehaviourMenuTitle, '');
+  BuildBehaviourMenu;
+  FBehaviourItem.setSubmenu(FBehaviourMenu);
   FAudioItem := AddMenuItem(AudioMenuTitle, '');
   BuildAudioMenu;
   FAudioItem.setSubmenu(FAudioMenu);
@@ -1886,12 +2011,23 @@ begin
   FPendingHasRegion := False;
   FPendingRegion := Default(TCaptureRegion);
   FPendingWindowID := 0;
+  FCompositedWindowID := 0;
+  FCompositedDisplayID := 0;
+  FCompositedRegion := Default(TCaptureRegion);
+  FCompositedDisplayLost := False;
 end;
 
 function TAppController.ShowBorderForPending: Cardinal;
 begin
   Result := 0;
   if (FBorder = nil) or not FPendingHasRegion or (FPendingDisplayID = 0) then
+    Exit;
+  // A composited window recording is a region capture underneath, but it
+  // is a *window* recording to the user, and a window recording has
+  // never had a frame drawn round it. Drawing one now would also put a
+  // second window into a capture that — unlike a region's — really does
+  // see everything in front of it.
+  if FCompositedWindowID <> 0 then
     Exit;
   // A border that will not come up is not worth failing a recording over;
   // the recording simply runs without one.
@@ -1904,6 +2040,139 @@ procedure TAppController.HideBorder;
 begin
   if (FBorder <> nil) and FBorder.Visible then
     FBorder.Hide;
+end;
+
+{ The composited window recording.
+
+  **A window recording does not put the camera in the file.** That is not
+  a guess: measured on this machine by recording one application's window
+  through the ordinary path with a solid-magenta borderless window at
+  window level 3 — the camera's own level — demonstrably over it on
+  screen, and counting near-magenta pixels in the resulting frames.
+  Zero, out of 1 754 000. `SCContentFilter.initWithDesktopIndependentWindow:`
+  composits that one window and nothing on top of it, exactly as its
+  header says.
+
+  So docking the camera onto a recorded window used to be about the
+  *screen* only. This is the other half: when the camera is up and the
+  user records a window, capture the **display** instead, with a source
+  rectangle sitting exactly on that window's frame. ScreenCaptureKit then
+  reads the screen, which has the camera on it, and the picture-in-picture
+  really is composited into the file — the same way it already is for a
+  region.
+
+  **The trade is real and is not hidden.** A composited window recording
+  captures whatever is in front of the window: a notification, a menu
+  pulled down over it, another app's window dragged across. The
+  desktop-independent path has none of that, and it is still what a
+  recording with the camera *off* uses — so the cost is paid only by the
+  user who asked for a picture-in-picture, which is the only user it buys
+  anything for.
+
+  **The rectangle pans and never resizes.** AVAssetWriter fixes the
+  file's dimensions at the first frame; a window resized mid-take would
+  otherwise stretch the picture. So the size is the window's frame at the
+  start and the origin follows it, which is exactly what Follow Mouse
+  does to a region — and it reuses the same machinery: the 5 Hz window
+  poll that already moves the camera, and TRecordingSession.UpdateSourceRect.
+
+  **Live effects stay off.** ResolveLiveEffects gives a window recording
+  neither Zoom on Click nor Follow Mouse, and that answer does not change
+  because the capture underneath is now a display: a click has no fixed
+  meaning in a window the user is free to move, and two owners for one
+  source rectangle — the animator and this poll — is a rectangle that
+  fights itself. StartPending therefore does not start the animator for a
+  composited recording. }
+
+function TAppController.CompositeWindowForPending: Boolean;
+var
+  WindowRect, Region: TCameraRect;
+  ScreenFrame: NSRect;
+  DisplayID: UInt32;
+begin
+  Result := False;
+  if FPendingWindowID = 0 then
+    Exit;
+  if not WindowScreenRect(FPendingWindowID, WindowRect) then
+    Exit;
+  // The display the window is on, by its own frame rather than by the
+  // main screen: a window on the external display must be captured from
+  // the external display.
+  if not DisplayIDForScreenRect(NSMakeRect(WindowRect.X, WindowRect.Y,
+    WindowRect.Width, WindowRect.Height), DisplayID, ScreenFrame) then
+    Exit;
+  Region := ScreenRectRegion(WindowRect,
+    CameraRect(ScreenFrame.origin.x, ScreenFrame.origin.y,
+    ScreenFrame.size.width, ScreenFrame.size.height),
+    WindowRect.Width, WindowRect.Height);
+  if (Region.Width < 1) or (Region.Height < 1) then
+    Exit;
+  FCompositedWindowID := FPendingWindowID;
+  FCompositedDisplayID := DisplayID;
+  FCompositedRegion.Left := Round(Region.X);
+  FCompositedRegion.Top := Round(Region.Y);
+  FCompositedRegion.Width := Round(Region.Width);
+  FCompositedRegion.Height := Round(Region.Height);
+  // From here the pending request is a region on a display, and every
+  // step below — the display index, the source rectangle, the writer's
+  // dimensions — treats it as one. The window id lives on in
+  // FCompositedWindowID, which is what the poll rides and what the
+  // camera docks onto.
+  FPendingWindowID := 0;
+  FPendingDisplayID := DisplayID;
+  FPendingHasRegion := True;
+  FPendingRegion := FCompositedRegion;
+  Result := True;
+end;
+
+procedure TAppController.UpdateCompositedSourceRect;
+var
+  WindowRect, Region: TCameraRect;
+  ScreenFrame: NSRect;
+  DisplayID: UInt32;
+begin
+  if (FCompositedWindowID = 0) or (FSession = nil) then
+    Exit;
+  if not WindowScreenRect(FCompositedWindowID, WindowRect) then
+    Exit;
+  // The display is re-resolved every tick rather than taken from the
+  // start, because the window can be dragged onto another one — and the
+  // frame it comes back with is in AppKit's *global* space, so flipping
+  // it against the display it started on would silently pan the capture
+  // into whatever happens to sit at those coordinates on that screen.
+  if not DisplayIDForScreenRect(NSMakeRect(WindowRect.X, WindowRect.Y,
+    WindowRect.Width, WindowRect.Height), DisplayID, ScreenFrame) then
+    Exit;
+  if DisplayID <> FCompositedDisplayID then
+  begin
+    // The window has left the display this capture opened on. Following
+    // it would mean rebuilding the content filter mid-stream — a new
+    // SCDisplay, and an output size the writer fixed at the first frame
+    // and cannot move — so the honest answer is to stop panning and
+    // leave the capture where it is. Said once, not five times a second.
+    if not FCompositedDisplayLost then
+    begin
+      FCompositedDisplayLost := True;
+      RecordError('the recorded window moved to another display; the '
+        + 'recording stays on the display it started on and no longer '
+        + 'follows the window');
+      RefreshStatusItem;
+    end;
+    Exit;
+  end;
+  // Back on the original display after a trip to another one: resume.
+  FCompositedDisplayLost := False;
+  // The size is the recording's, never the window's — see the header.
+  Region := ScreenRectRegion(WindowRect,
+    CameraRect(ScreenFrame.origin.x, ScreenFrame.origin.y,
+    ScreenFrame.size.width, ScreenFrame.size.height),
+    FCompositedRegion.Width, FCompositedRegion.Height);
+  // Fire and forget, with the same latest-wins coalescing the live
+  // animator relies on: an update refused while another is in flight is
+  // dropped, and the next tick carries a newer rectangle than the
+  // dropped one would have.
+  FSession.UpdateSourceRect(CGRectMake(Region.X, Region.Y, Region.Width,
+    Region.Height));
 end;
 
 { Docking the camera into the rectangle being recorded, and riding it.
@@ -1938,19 +2207,27 @@ procedure TAppController.DockCameraForPending;
 var
   ScreenFrame: NSRect;
   WindowRect: TCameraRect;
+  WindowID: Cardinal;
 begin
   if (FCamera = nil) or not FCamera.Visible then
     Exit;
-  if FPendingWindowID <> 0 then
+  // A window recording, ordinary or composited. The window's frame is
+  // the rectangle, and it is read from the window server rather than
+  // from ScreenCaptureKit: SCShareableContent carries no frame, and
+  // asking it would pump the run loop on the one path that must not.
+  //
+  // CompositeWindowForPending has already moved the id across to
+  // FCompositedWindowID by the time this runs, which is why both are
+  // consulted; the dock itself is identical either way.
+  WindowID := FPendingWindowID;
+  if WindowID = 0 then
+    WindowID := FCompositedWindowID;
+  if WindowID <> 0 then
   begin
-    // A window recording. The window's frame is the rectangle, and it is
-    // read from the window server rather than from ScreenCaptureKit:
-    // SCShareableContent carries no frame, and asking it would pump the
-    // run loop on the one path that must not.
-    if not WindowScreenRect(FPendingWindowID, WindowRect) then
+    if not WindowScreenRect(WindowID, WindowRect) then
       Exit;
     if FCamera.DockTo(WindowRect) then
-      StartCameraRide(FPendingWindowID);
+      StartCameraRide(WindowID);
     Exit;
   end;
   if not FPendingHasRegion or (FPendingDisplayID = 0) then
@@ -1970,6 +2247,14 @@ end;
 procedure TAppController.UndockCamera;
 begin
   StopCameraRide;
+  // The composited window recording ends with the same call that undocks
+  // the camera, because it began with the same one that docked it: the
+  // poll they share has no other reason to run. Cleared here rather than
+  // in StopCameraRide, which StartCameraRide calls on the way in.
+  FCompositedWindowID := 0;
+  FCompositedDisplayID := 0;
+  FCompositedRegion := Default(TCaptureRegion);
+  FCompositedDisplayLost := False;
   if FCamera <> nil then
     FCamera.Undock;
 end;
@@ -2080,16 +2365,24 @@ begin
   // same guard the live tick carries, for the same reason.
   if Busy then
     Exit;
-  if (FCamera = nil) or (FRideWindowID = 0) then
+  // The composited recording's pan comes first and is unconditional: it
+  // is what keeps the *capture* on the window, where the camera ride is
+  // only what keeps the picture-in-picture in the corner. A camera
+  // switched off mid-take must not stop the capture following the
+  // window.
+  UpdateCompositedSourceRect;
+  if FRideWindowID = 0 then
   begin
     StopCameraRide;
     Exit;
   end;
-  // The camera decides for itself whether a ride is still live; a stop
-  // that has already undocked answers False here and the timer goes.
-  if not FCamera.Riding then
+  if (FCamera = nil) or not FCamera.Riding then
   begin
-    StopCameraRide;
+    // The camera decides for itself whether a ride is still live; a stop
+    // that has already undocked answers False here. The timer only goes
+    // if nothing else needs it — a composited recording does.
+    if FCompositedWindowID = 0 then
+      StopCameraRide;
     Exit;
   end;
   if not WindowScreenRect(FRideWindowID, Rect) then
@@ -2252,6 +2545,11 @@ begin
   FMicrophoneItem.setEnabled(IsCommandEnabled(FState, acToggleMicrophone)
     and FSupportsMicrophone);
   FMicrophoneItem.setState(MenuCheckState(FMicrophone));
+  // Behaviour's parent follows its three children, exactly as Audio's
+  // does: enabled while any of them could be.
+  FBehaviourItem.setEnabled(IsCommandEnabled(FState, acToggleZoomOnClick)
+    or IsCommandEnabled(FState, acToggleFollowMouse)
+    or IsCommandEnabled(FState, acToggleBigCursor));
   FZoomOnClickItem.setEnabled(IsCommandEnabled(FState, acToggleZoomOnClick));
   FZoomOnClickItem.setState(MenuCheckState(FZoomOnClick));
   FFollowMouseItem.setEnabled(IsCommandEnabled(FState, acToggleFollowMouse));
@@ -2261,17 +2559,23 @@ begin
   FStopItem.setEnabled(IsCommandEnabled(FState, acStopRecording));
   FCancelItem.setEnabled(IsCommandEnabled(FState, acCancelSelection));
 
-  // Not part of the state machine — see BuildMenu. The title is constant;
-  // the checkmark is what says whether the window is up.
+  // Not part of the state machine — see BuildCameraMenu. The titles are
+  // constant; the checkmarks are what say what the window is doing. The
+  // submenu's own parent is never disabled, because all three of its
+  // items are legal in every state.
   CameraVisible := (FCamera <> nil) and FCamera.Visible;
-  FCameraItem.setState(CameraMenuState(CameraVisible));
-  // Both items are read the same way, off a nil-tolerant local: a camera
-  // that does not exist yet is not visible and is the default shape.
+  FCameraShowItem.setState(CameraMenuState(CameraVisible));
+  // All three items are read the same way, off nil-tolerant locals: a
+  // camera that does not exist yet is not visible, is the default shape
+  // and is not blurred.
   if FCamera <> nil then
     CameraShape := FCamera.Shape
   else
     CameraShape := csRectangle;
   FCameraShapeItem.setState(CameraShapeMenuState(CameraShape));
+  FCameraBlurItem.setEnabled(CameraBlurSupported);
+  FCameraBlurItem.setState(MenuCheckState((FCamera <> nil)
+    and FCamera.BlurEnabled));
 
   if FLastError <> '' then
   begin
@@ -2894,6 +3198,17 @@ var
 begin
   if FState <> asRecording then
     Exit;
+  // Before every other read of the pending request, because it rewrites
+  // it: a WINDOW recording with the camera up becomes a region recording
+  // on the display that window is on, so the picture-in-picture is
+  // composited into the file instead of being left out of it. A camera
+  // that is off changes nothing — the desktop-independent path is
+  // cleaner and is what a recording without a camera should get.
+  if (FPendingWindowID <> 0) and (FCamera <> nil) and FCamera.Visible then
+    if not CompositeWindowForPending then
+      LogMessage('the recorded window''s frame or display could not be '
+        + 'resolved, so the camera will not be in the file; recording the '
+        + 'window on its own instead');
   DisplayIndex := -1;
   // A region is meaningless without the display it was drawn on: the
   // NSScreen had no NSScreenNumber, so falling back to the main display
@@ -2950,15 +3265,40 @@ begin
   // otherwise goes without. Asked for only when an effect is actually
   // going to apply — ResolveLiveEffects is the single place that
   // decides, and StartLive asks it again for the same answer.
-  ResolveLiveEffects(Options.TargetKind, Options.HasRegion, FZoomOnClick,
-    FFollowMouse, LiveZoom, LiveFollow);
-  Options.LiveSourceRect := LiveZoom or LiveFollow;
+  if FCompositedWindowID <> 0 then
+  begin
+    // A window recording gets neither effect — ResolveLiveEffects says so
+    // for ctkWindow and the answer does not change because the capture
+    // underneath is now a display. The source rectangle still has to be
+    // live, because the poll pans it as the window moves; it simply has
+    // one owner instead of two.
+    LiveZoom := False;
+    LiveFollow := False;
+    Options.LiveSourceRect := True;
+  end
+  else
+  begin
+    ResolveLiveEffects(Options.TargetKind, Options.HasRegion, FZoomOnClick,
+      FFollowMouse, LiveZoom, LiveFollow);
+    Options.LiveSourceRect := LiveZoom or LiveFollow;
+  end;
   // Big Cursor, resolved rather than passed straight through: the
   // preference is global and a window recording cannot have one, and
   // ValidateRecordingOptions *refuses* that combination rather than
   // ignoring it — so handing it over unresolved would turn a checkbox
   // the user left ticked into a recording that will not start.
-  Options.BigCursor := ResolveBigCursor(Options.TargetKind, FBigCursor);
+  //
+  // Resolved against what the USER asked for, not against the filter
+  // this path happens to build. A composited window recording is a
+  // display capture underneath (FCompositedWindowID <> 0, see
+  // CompositeWindowForPending) and the pointer's screen position would
+  // in fact map onto it correctly — but *Record Window* must not mean
+  // two different things depending on whether the camera happens to be
+  // up. Same command, same answer, camera or no camera.
+  if FCompositedWindowID <> 0 then
+    Options.BigCursor := ResolveBigCursor(ctkWindow, FBigCursor)
+  else
+    Options.BigCursor := ResolveBigCursor(Options.TargetKind, FBigCursor);
   if FBigCursor and not Options.BigCursor then
     LogMessage('Big Cursor is off for this recording: a window capture '
       + 'has no fixed relationship to the screen the pointer is '
@@ -3061,14 +3401,31 @@ begin
   // something else was, and this one refuses Follow Mouse instead. That
   // is the right way round: the cost of being wrong is a recording with
   // its own frame sliding through it.
-  StartLive(BorderWindowID, (BorderWindowID <> 0)
-    and WindowIDRequested(Options.ExcludedWindowIDs, BorderWindowID)
-    and (FSession.Report.ExcludedWindows
-    = Length(Options.ExcludedWindowIDs)));
+  if FCompositedWindowID <> 0 then
+    // The poll is the composited recording's only animator, and it is
+    // started here rather than by the dock: it has to run even when the
+    // camera is undocked or hidden mid-take, because it is what keeps
+    // the capture on the window.
+    StartCameraRide(FCompositedWindowID)
+  else
+    StartLive(BorderWindowID, (BorderWindowID <> 0)
+      and WindowIDRequested(Options.ExcludedWindowIDs, BorderWindowID)
+      and (FSession.Report.ExcludedWindows
+      = Length(Options.ExcludedWindowIDs)));
 
   // Only once the capture is really running, so a repeat of a region that
   // no longer resolves does not become the region to repeat.
-  if FPendingHasRegion and (FPendingDisplayID <> 0) then
+  //
+  // And never for a COMPOSITED window recording. That path sets
+  // FPendingHasRegion — it is a region capture underneath — but the
+  // rectangle is a window's frame, not something the user drew, so
+  // storing it would make *Record Last Region* repeat a rectangle nobody
+  // chose, and would quietly overwrite the region they did choose. The
+  // window recording is not repeatable by that command in the first
+  // place: the window is named by id in a submenu that is rebuilt every
+  // time it opens.
+  if FPendingHasRegion and (FPendingDisplayID <> 0)
+    and (FCompositedWindowID = 0) then
   begin
     FLastRegionDisplayID := FPendingDisplayID;
     FLastRegion := FPendingRegion;
@@ -3263,6 +3620,29 @@ begin
     FCamera.Shape := csRectangle
   else
     FCamera.Shape := csCircle;
+  RefreshStatusItem;
+end;
+
+// The third camera setting, and outside the transition table like the
+// other two. Switching it does not touch the capture session's *inputs*
+// — it adds or removes an AVCaptureVideoDataOutput on a session that
+// keeps running — so there is no warm-up, no permission path, and
+// nothing a live recording could notice beyond the picture in the window
+// it is already capturing.
+procedure TAppController.CommandToggleCameraBlur;
+begin
+  // Not while an export owns the main thread: starting the pipeline
+  // builds a CIContext and loads Vision's model, which is AppKit-adjacent
+  // work measured in seconds on the first run.
+  if Busy or (FCamera = nil) then
+    Exit;
+  if not CameraBlurSupported then
+  begin
+    HandleCameraError('background blur needs Vision and CoreImage, which '
+      + 'this Mac does not have');
+    Exit;
+  end;
+  FCamera.BlurEnabled := not FCamera.BlurEnabled;
   RefreshStatusItem;
 end;
 

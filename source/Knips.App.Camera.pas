@@ -142,6 +142,7 @@ uses
   SysUtils,
 
   CocoaAll,
+  Knips.App.Camera.Blur,
   Knips.App.State,
   Knips.ObjC.Runtime,
   MacOSAll;
@@ -192,6 +193,23 @@ type
       AMediaType: NSString; AHandler: TAVAccessBlock);
       message 'requestAccessForMediaType:completionHandler:';
     function LocalizedName: NSString; message 'localizedName';
+    // The system Portrait effect, and the whole of what AVFoundation
+    // offers of it: a class property that is `readonly` in
+    // AVCaptureDevice.h — "a class property indicating whether the
+    // Portrait Effect feature is currently enabled in Control Center".
+    // There is no setter anywhere in the framework; the only writable
+    // thing near it is +showSystemUserInterface:, which opens Control
+    // Center's Video Effects panel and hands the decision to the user,
+    // system-wide, for every app at once. That is why
+    // Knips.App.Camera.Blur exists — see its header.
+    //
+    // Called through the class, never through an instance cast: a
+    // Delphi-mode class method invoked on an instance expression sends
+    // to [instance class], which for a class object is its *metaclass*
+    // and is an unrecognised selector (measured, and it aborts the
+    // process rather than returning nil).
+    class function IsPortraitEffectEnabled: ObjCBOOL;
+      message 'isPortraitEffectEnabled';
   end;
 
   AVCaptureDeviceInput = objcclass external (AVCaptureInput)
@@ -234,8 +252,23 @@ type
   private
     FWindow: NSWindow;
     FView: NSView;
+    // The content view hosts FRootLayer, always. What draws into it is
+    // one of two things and never both: the AVCaptureVideoPreviewLayer
+    // as a sublayer (blur off, and the framework moves the pixels), or
+    // FRootLayer's own `contents`, replaced frame by frame by
+    // TCameraBlur (blur on).
+    //
+    // The rounded corner, the mask and the aspect-fill crop live on the
+    // root, so switching paths changes what fills the window and nothing
+    // about its shape. Both layers are owned here — the preview layer
+    // spends the whole of a blurred recording detached from any
+    // superlayer, so the sublayer's retain cannot be what keeps it
+    // alive.
+    FRootLayer: CALayer;
     FLayer: AVCaptureVideoPreviewLayer;
     FSession: AVCaptureSession;
+    FBlur: TCameraBlur;
+    FBlurEnabled: Boolean;
     FVisible: Boolean;
     FMirrored: Boolean;
     FShape: TCameraShape;
@@ -254,15 +287,14 @@ type
     FUndocked: TCameraOrigin;
     // The ride: the docked window travelling with a rectangle that is
     // itself moving (a region Follow Mouse is panning, a recorded window
-    // the user is dragging). Measured from the dock rather than
-    // accumulated per tick, so a thousand ticks cannot drift: FRideFrom
-    // and FRideOrigin are the rectangle and the origin the dock landed
-    // on, and every position is FRideOrigin plus the rectangle's total
-    // displacement. FRideAt is only the epsilon's memory.
+    // the user is dragging or resizing). Measured from the dock rather
+    // than accumulated per tick, so a thousand ticks cannot drift:
+    // FRideAnchor is the corner the dock landed in and how far inside it
+    // the window sat, and every position is that pair against the
+    // rectangle's current edges. FRideAt is only the epsilon's memory.
     FRiding: Boolean;
-    FRideFrom: TCameraRect;
     FRideAt: TCameraRect;
-    FRideOrigin: TCameraOrigin;
+    FRideAnchor: TCameraRideAnchor;
     // Set whenever something *else* moved the window — a drag, the snap
     // that follows one, a shape change. The next ride tick re-anchors on
     // wherever the window now is instead of yanking it back to where the
@@ -321,6 +353,12 @@ type
     function RestoredOrigin: TCameraOrigin;
     procedure SaveOrigin;
     procedure SetShape(AShape: TCameraShape);
+    // The two halves of the blur switch, each safe to call when the
+    // window is not up. EnableBlurPath reports and leaves the preview in
+    // place when the pipeline refuses to start.
+    procedure EnableBlurPath;
+    procedure DisableBlurPath;
+    procedure SetBlurEnabled(AEnabled: Boolean);
     procedure TearDown;
   public
     constructor Create;
@@ -376,6 +414,11 @@ type
     class procedure RememberVisible(AVisible: Boolean);
     class function RestoredShape: TCameraShape;
     class procedure RememberShape(AShape: TCameraShape);
+    // Off for a key that was never written, which is what boolForKey:
+    // answers — so nothing has to register a default for a feature that
+    // costs a Vision pass per frame.
+    class function RestoredBlur: Boolean;
+    class procedure RememberBlur(ABlur: Boolean);
     // True only for AVAuthorizationStatusAuthorized. Callers use it to
     // stay off the access path entirely: asking when the status is
     // undecided puts a system prompt on screen, which is wrong at launch
@@ -394,6 +437,15 @@ type
     // Assigning applies immediately when the window is up: the window
     // resizes about its own centre and the layer's corner radius follows.
     property Shape: TCameraShape read FShape write SetShape;
+    // Assigning switches the display path under a running session — no
+    // stop, no second warm-up — and remembers the answer. The setting is
+    // the user's choice, not the last attempt's outcome: a pipeline that
+    // refuses to start reports and leaves the preview up, and the
+    // preference still says what was asked for.
+    property BlurEnabled: Boolean read FBlurEnabled write SetBlurEnabled;
+    // The blur pipeline while one is running, for the caller that wants
+    // its measured frame rate. Nil when blur is off.
+    property Blur: TCameraBlur read FBlur;
     property OnError: TCameraErrorEvent read FOnError write FOnError;
   end;
 
@@ -404,6 +456,21 @@ type
 procedure EnsureCameraClasses;
 
 function CameraViewClassName: string;
+
+type
+  // What TCC says about the camera for this executable, in the shape
+  // Knips.Capture.Stream.MicrophoneAccess already answers for the
+  // microphone. `knips probe` prints it; nothing gates on it, because
+  // Show consults the same status itself.
+  TCameraAccess = (caNotDetermined, caRestricted, caDenied, caAuthorized);
+
+function CameraAccess: TCameraAccess;
+
+// Whether the *system* Portrait effect is switched on in Control Center.
+// Read-only — see the binding above — and reported by `knips probe` so
+// the claim that there is no programmatic route can be re-checked on a
+// later SDK rather than believed. False when the selector is not there.
+function SystemPortraitEffectEnabled: Boolean;
 
 {$ENDIF}
 
@@ -454,6 +521,32 @@ var
 function CameraViewClassName: string;
 begin
   Result := ViewClassName;
+end;
+
+function CameraAccess: TCameraAccess;
+begin
+  case AVCaptureDevice.authorizationStatusForMediaType(AVMediaTypeVideo) of
+    AVAuthorizationStatusAuthorized: Result := caAuthorized;
+    AVAuthorizationStatusDenied: Result := caDenied;
+    AVAuthorizationStatusRestricted: Result := caRestricted;
+  else
+    Result := caNotDetermined;
+  end;
+end;
+
+function SystemPortraitEffectEnabled: Boolean;
+var
+  DeviceClass: pobjc_class;
+begin
+  Result := False;
+  DeviceClass := LookUpClass('AVCaptureDevice');
+  if DeviceClass = nil then
+    Exit;
+  // respondsToSelector: sent to a class object asks about its class
+  // methods, which is exactly the question here.
+  if not RespondsToSelector(id(DeviceClass), 'isPortraitEffectEnabled') then
+    Exit;
+  Result := Boolean(AVCaptureDevice.isPortraitEffectEnabled);
 end;
 
 { The one runtime-built class here (ADR-0002). Knips is an Accessory app
@@ -633,6 +726,7 @@ begin
   // Before the first Show, because the shape decides the window size the
   // restored origin is judged against.
   FShape := RestoredShape;
+  FBlurEnabled := RestoredBlur;
 end;
 
 destructor TCameraPreview.Destroy;
@@ -670,6 +764,16 @@ class procedure TCameraPreview.RememberShape(AShape: TCameraShape);
 begin
   Defaults.setInteger_forKey(StoredCameraShape(AShape),
     DefaultsKey(CameraShapeDefaultsKey));
+end;
+
+class function TCameraPreview.RestoredBlur: Boolean;
+begin
+  Result := Defaults.boolForKey(DefaultsKey(CameraBlurDefaultsKey));
+end;
+
+class procedure TCameraPreview.RememberBlur(ABlur: Boolean);
+begin
+  Defaults.setBool_forKey(ABlur, DefaultsKey(CameraBlurDefaultsKey));
 end;
 
 class function TCameraPreview.IsAuthorized: Boolean;
@@ -979,12 +1083,16 @@ begin
   FWindow.setFrame_display(NSMakeRect(AOrigin.X, AOrigin.Y, ASize.Width,
     ASize.Height), True);
   // The view is layer-*hosting*, so AppKit resizes the content view with
-  // the window but leaves the layer where it was.
-  if FLayer = nil then
+  // the window but leaves the layers where they were. Both of them: the
+  // root that carries the shape, and the preview sublayer inside it.
+  if (FRootLayer = nil) and (FLayer = nil) then
     Exit;
   BeginLayerChange;
   try
-    FLayer.setFrame(NSMakeRect(0, 0, ASize.Width, ASize.Height));
+    if FRootLayer <> nil then
+      FRootLayer.setFrame(NSMakeRect(0, 0, ASize.Width, ASize.Height));
+    if FLayer <> nil then
+      FLayer.setFrame(NSMakeRect(0, 0, ASize.Width, ASize.Height));
   finally
     EndLayerChange;
   end;
@@ -1208,13 +1316,12 @@ begin
   // and a camera sliding into position across the first fifth of a second
   // is something the file would keep for ever.
   ApplyFrame(Origin, Size);
-  // Arm the ride from exactly this rectangle and this origin. Every later
-  // position is computed from the pair rather than from the last one, so
-  // thirty ticks a second for ten minutes accumulate no drift at all.
+  // Arm the ride from exactly this corner and this inset. Every later
+  // position is computed from that anchor rather than from the last one,
+  // so thirty ticks a second for ten minutes accumulate no drift at all.
   FRiding := True;
-  FRideFrom := ARect;
   FRideAt := ARect;
-  FRideOrigin := Origin;
+  FRideAnchor := CameraRideAnchorFor(Origin, Size, ARect);
   FRideStale := False;
   Result := True;
 end;
@@ -1247,26 +1354,26 @@ begin
     FRideStale := True;
     Exit;
   end;
+  Size := CameraWindowSize(FShape);
   if FRideStale then
   begin
     // Somebody else moved the window while the ride was standing aside.
-    // Take the rectangle and the window as they are now for the new
-    // anchor pair; the picture goes on following from wherever the user
-    // dropped it, rather than teleporting back to the corner the dock
-    // chose a minute ago.
-    FRideFrom := ARect;
+    // Re-anchor on the rectangle and the window as they are now; the
+    // picture goes on following from wherever the user dropped it,
+    // rather than teleporting back to the corner the dock chose a minute
+    // ago — and it follows from the corner it is now *nearest*, which is
+    // the corner the drop's own snap put it in.
     FRideAt := ARect;
-    FRideOrigin := WindowOrigin;
+    FRideAnchor := CameraRideAnchorFor(WindowOrigin, Size, ARect);
     FRideStale := False;
     Exit;
   end;
   if not IsCameraRideMovement(FRideAt, ARect) then
     Exit;
   FRideAt := ARect;
-  Size := CameraWindowSize(FShape);
   // One unanimated setFrame:, exactly like TRecordingBorder.MoveTo. This
   // runs under a live capture: an ease here is an ease in the file.
-  ApplyFrame(CameraRideOrigin(FRideOrigin, FRideFrom, ARect), Size);
+  ApplyFrame(CameraRideOrigin(FRideAnchor, Size, ARect), Size);
   Result := True;
 end;
 
@@ -1310,15 +1417,21 @@ end;
 
 procedure TCameraPreview.ApplyShapeToLayer;
 begin
-  if FLayer = nil then
+  if FRootLayer = nil then
     Exit;
+  // On the ROOT layer, so one radius shapes both display paths: the
+  // preview layer is a sublayer and masksToBounds clips it, and the
+  // blurred frames are the root's own contents. A radius on the preview
+  // layer as well would be a second place to keep in step for no visible
+  // difference.
+  //
   // cornerRadius is an animatable property like frame, so without the
   // transaction the rectangle rounds itself into a disc over a quarter of
   // a second while the window has already been square for a whole frame.
   BeginLayerChange;
   try
-    FLayer.setCornerRadius(CameraCornerRadiusForShape(FShape));
-    FLayer.setMasksToBounds(True);
+    FRootLayer.setCornerRadius(CameraCornerRadiusForShape(FShape));
+    FRootLayer.setMasksToBounds(True);
   finally
     EndLayerChange;
   end;
@@ -1428,6 +1541,7 @@ var
   Size: TCameraSize;
   Frame, ContentBounds: NSRect;
   View: NSView;
+  Root: CALayer;
   Layer: AVCaptureVideoPreviewLayer;
   Error: string;
 begin
@@ -1487,12 +1601,15 @@ begin
     or NSWindowCollectionBehaviorFullScreenAuxiliary);
 
   View := NSView(AllocateInstance(GViewClass)).initWithFrame(ContentBounds);
+  Root := CALayer(CALayer.alloc.init);
   Layer := AVCaptureVideoPreviewLayer(
     AVCaptureVideoPreviewLayer.alloc.initWithSession(FSession));
-  if (View = nil) or (Layer = nil) then
+  if (View = nil) or (Root = nil) or (Layer = nil) then
   begin
     if View <> nil then
       View.release;
+    if Root <> nil then
+      Root.release;
     if Layer <> nil then
       Layer.release;
     TearDown;
@@ -1501,12 +1618,18 @@ begin
     Exit(False);
   end;
   SetPointerIvar(id(View), OwnerIvarName, Self);
-  Layer.setFrame(ContentBounds);
+  Root.setFrame(ContentBounds);
   // Fill the window with the camera and crop, rather than letting the
   // picture letterbox inside a rounded rectangle. It is also what makes
   // the circle work: a square window cropping the middle of a 4:3 feed.
+  // The root's contentsGravity is the blurred path's half of the same
+  // rule — a 640x480 rendered frame in a 240x180 layer, cropped, not
+  // squashed — and the preview layer's videoGravity is the other.
+  Root.setContentsGravity(kCAGravityResizeAspectFill);
+  Layer.setFrame(ContentBounds);
   Layer.setVideoGravity(AVLayerVideoGravityResizeAspectFill);
-  // Before the corner radius, which ApplyShapeToLayer sets from the shape.
+  // Before the corner radius, which ApplyShapeToLayer sets on the root.
+  FRootLayer := Root;
   FLayer := Layer;
   ApplyShapeToLayer;
   // The connection exists from initWithSession: onwards, so this is
@@ -1519,18 +1642,24 @@ begin
   // would mean an NSWindowDidChangeBackingProperties observer — another
   // runtime-built class and another owner ivar — for a case that costs
   // one menu click to fix. Recorded in docs/quick-start.md.
+  Root.setContentsScale(FWindow.backingScaleFactor);
   Layer.setContentsScale(FWindow.backingScaleFactor);
+  // The preview goes on as a SUBLAYER of the root rather than as the
+  // hosted layer itself, because the blur path takes it off again and
+  // puts it back. Both are released in TearDown: while blur is on the
+  // preview layer has no superlayer at all, so a sublayer's retain
+  // cannot be the thing keeping it alive.
+  Root.addSublayer(CALayer(Layer));
   // Layer-hosting, not layer-backed: the layer goes on before wantsLayer,
   // and AppKit then draws nothing of its own over the video.
-  View.setLayer(CALayer(Layer));
+  View.setLayer(Root);
   View.setWantsLayer(True);
-  // setLayer: and setContentView: both retain; balance the two allocs.
-  // FLayer and FView stay as unretained back-pointers, alive for exactly
-  // as long as the window is — the border unit holds its view the same
-  // way — and both are cleared in TearDown before the window goes.
-  Layer.release;
   FWindow.setContentView(View);
   FView := View;
+  // setContentView: retains; FView stays an unretained back-pointer,
+  // alive for exactly as long as the window is — the border unit holds
+  // its view the same way — and it is cleared in TearDown before the
+  // window goes.
   View.release;
 
   // Blocks while the camera warms up — the better part of a second on a
@@ -1543,12 +1672,98 @@ begin
   // mirrored; a connection that is momentarily nil leaves the flag as
   // the first pass set it.
   RefreshMirroring;
+  // Last, and only if the preference says so: the blur pipeline attaches
+  // a second output to the session that is now running. A refusal is
+  // reported and the preview stays up — the window is already correct
+  // without it.
+  if FBlurEnabled then
+    EnableBlurPath;
   // orderFront rather than makeKeyAndOrderFront: the camera has nothing
   // to type into, and stealing key status would pull focus out of
   // whatever the user is recording.
   FWindow.orderFront(nil);
   FVisible := True;
   Result := True;
+end;
+
+{ The blur switch. Both halves leave the session alone: addOutput: and
+  removeOutput: "may be called while the session is running"
+  (AVCaptureSession.h), so switching the effect on costs nothing like the
+  second-long warm-up that stopping and restarting the camera would. }
+
+procedure TCameraPreview.EnableBlurPath;
+var
+  Error: string;
+begin
+  if (FSession = nil) or (FRootLayer = nil) then
+    Exit;
+  if FBlur = nil then
+    FBlur := TCameraBlur.Create;
+  if FBlur.Running then
+    Exit;
+  // Mirrored by the pipeline rather than by a connection: there is no
+  // AVCaptureConnection on this path, and the composited image is
+  // flipped in CoreImage before it reaches the layer.
+  if not FBlur.Start(id(FSession), FRootLayer, True, Error) then
+  begin
+    ReportError('background blur: ' + Error);
+    Exit;
+  end;
+  // The preview layer would otherwise draw the unblurred feed straight
+  // over the root's contents.
+  if FLayer <> nil then
+    FLayer.removeFromSuperlayer;
+  // The picture really is mirrored, by the transform rather than by the
+  // connection — so the flag says the same thing it says on the other
+  // path.
+  FMirrored := True;
+end;
+
+procedure TCameraPreview.DisableBlurPath;
+begin
+  if FBlur <> nil then
+    FBlur.Stop;
+  if FRootLayer <> nil then
+  begin
+    // The last blurred frame would otherwise stay behind the preview
+    // layer for the life of the window — invisible while the preview
+    // covers it, and back the moment the shape changes.
+    BeginLayerChange;
+    try
+      FRootLayer.setContents(nil);
+    finally
+      EndLayerChange;
+    end;
+    if (FLayer <> nil) and (FLayer.superlayer = nil) then
+    begin
+      FRootLayer.addSublayer(CALayer(FLayer));
+      // A layer that has been off the tree keeps its frame, but the
+      // window may have changed shape while it was away.
+      BeginLayerChange;
+      try
+        FLayer.setFrame(FRootLayer.bounds);
+      finally
+        EndLayerChange;
+      end;
+    end;
+  end;
+  RefreshMirroring;
+end;
+
+procedure TCameraPreview.SetBlurEnabled(AEnabled: Boolean);
+begin
+  if AEnabled = FBlurEnabled then
+    Exit;
+  FBlurEnabled := AEnabled;
+  // Remembered even when nothing is on screen: like the shape, this is a
+  // setting rather than a property of the current window.
+  RememberBlur(FBlurEnabled);
+  if (FWindow = nil) or not FVisible then
+    Exit;
+  if FBlurEnabled then
+    EnableBlurPath
+  else
+    DisableBlurPath;
 end;
 
 procedure TCameraPreview.Hide;
@@ -1578,6 +1793,13 @@ end;
 
 procedure TCameraPreview.TearDown;
 begin
+  // First: the blur pipeline holds a delegate whose ivar points here and
+  // a GCD queue that may be half way through a frame. Stop waits for it.
+  if FBlur <> nil then
+  begin
+    FBlur.Free;
+    FBlur := nil;
+  end;
   // The timer holds the view, and the view holds a back-pointer to this
   // object; it has to go before either does. StopSnapTimer rather than
   // FinishSnap: Hide has already read the ease's target, and every other
@@ -1600,7 +1822,18 @@ begin
     SetPointerIvar(id(FView), OwnerIvarName, nil);
     FView := nil;
   end;
-  FLayer := nil;
+  // Both layers are ours: the preview layer is detached from the tree
+  // for the whole of a blurred session, so nothing else is holding it.
+  if FLayer <> nil then
+  begin
+    FLayer.release;
+    FLayer := nil;
+  end;
+  if FRootLayer <> nil then
+  begin
+    FRootLayer.release;
+    FRootLayer := nil;
+  end;
   if FWindow <> nil then
   begin
     FWindow.orderOut(nil);

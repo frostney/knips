@@ -114,16 +114,40 @@ const
   // the Dock is unreachable because the camera window floats at level 3
   // while the Dock sits at 20.
   MinVisibleCameraExtent = 40;
+  // *Camera* is now a submenu holding the three settings that are all
+  // about the picture-in-picture window — whether it is up, what shape
+  // it is, and whether its background is blurred — for the same reason
+  // *Audio* is one: between them they are one thing, and three adjacent
+  // lines in a flat list of a dozen do not say so.
+  CameraMenuTitle = 'Camera';
   // One stable title with a checkmark, not a verb that flips: "Hide
   // Camera ✓" reads as a contradiction, and a checked item already says
-  // which way the toggle is.
-  CameraMenuTitle = 'Camera';
+  // which way the toggle is. Named *Show Camera* rather than *Camera*
+  // only because it now sits inside a submenu of that name.
+  ShowCameraMenuTitle = 'Show Camera';
   // The shape switch is a checkbox for the same reason: "Camera Shape:
   // Circle" has to be read twice to work out whether it *is* a circle or
   // would *become* one, where a checkmark next to one stable noun says it
   // once. Circle is the odd shape, so it is the one the box is named
   // after; unchecked is the rectangle the camera has always been.
   CircularCameraMenuTitle = 'Circular Camera';
+  // Portrait-style background blur: the person sharp, the room behind
+  // them blurred. A checkbox like its two neighbours, off by default —
+  // which is what boolForKey: answers for a key that was never written,
+  // so nothing registers defaults — because it costs a Vision pass and a
+  // CoreImage composite on every frame and a user who did not ask for
+  // that should not be paying for it.
+  //
+  // It is *not* the system Portrait effect. AVFoundation exposes that
+  // one read-only in both of its forms (see Knips.App.Camera.Blur), so
+  // this is a pipeline of ours and it can be switched on for Knips's
+  // camera alone rather than for every app on the Mac.
+  BlurBackgroundMenuTitle = 'Blur Background';
+  // *Behaviour* is the second new submenu: the two live effects that
+  // change what a recording *shows* while it runs. Same argument as
+  // Audio and Camera — one setting between them, and the root menu is
+  // shorter for it.
+  BehaviourMenuTitle = 'Behaviour';
   // NSControlStateValueOn / Off (NSCell.h). Spelled out rather than taken
   // from CocoaAll, which is where the wrong NSWindowLevel values live.
   MenuItemStateOn = 1;
@@ -134,6 +158,7 @@ const
   CameraOriginXDefaultsKey = 'KnipsCameraOriginX';
   CameraOriginYDefaultsKey = 'KnipsCameraOriginY';
   CameraShapeDefaultsKey = 'KnipsCameraShape';
+  CameraBlurDefaultsKey = 'KnipsCameraBlur';
 
   // The two live recording effects. Both off by default, both
   // remembered, both checkmarks rather than verbs — the same shape as
@@ -425,6 +450,21 @@ function RecenteredCameraOrigin(const AOrigin: TCameraOrigin;
 function RegionScreenRect(const ARegion: TCaptureRegion;
   const AScreenFrame: TCameraRect): TCameraRect;
 
+// The inverse of RegionScreenRect: an AppKit global rectangle back into
+// the display's own top-left points, given that display's AppKit frame.
+// Used by the composited window recording, which reads a *display* with
+// a source rectangle riding a window's frame.
+//
+// The size is not taken from ARect. It is passed in and held, because
+// AVAssetWriter fixes the file's dimensions at the first frame and a
+// window the user resizes mid-take must not change them: the rectangle
+// pans and never resizes, exactly as Follow Mouse's does. The origin
+// follows the window's top-left corner and is then clamped inside the
+// display, so a window dragged half off the screen still yields a
+// rectangle ScreenCaptureKit will accept.
+function ScreenRectRegion(const ARect, AScreenFrame: TCameraRect;
+  AWidth, AHeight: Double): TCameraRect;
+
 // ARect pulled in by AMargin on every side. An axis with no room to
 // spare is left alone rather than turned inside out, which is the same
 // give-up-on-the-margins rule NearestCameraCorner uses — so clamping into
@@ -451,21 +491,56 @@ function CameraSnapOrigin(const AFrom, ATo: TCameraOrigin; AStep,
   under a running capture — Follow Mouse panning a region, and the user
   dragging a recorded window — and both drive the same arithmetic. }
 
-// The origin the docked camera takes when the rectangle it rides has
-// moved from AFrom to ATo: the origin the dock landed on, displaced by
-// exactly the rectangle's displacement.
+// The ride's anchor: which corner of the ridden rectangle the dock
+// chose, and how far inside that corner the window sat. Computed once,
+// at the dock, and then held for the whole recording.
+//
+// **The corner, not the origin.** Following the rectangle's *origin*
+// alone — which is what this did — is right for a rectangle that only
+// moves and wrong for one that also resizes, and a recorded window
+// resizes. In AppKit's bottom-left space, dragging a window's bottom
+// edge down moves its origin while its top edge stands still: a camera
+// docked into the top-right corner would be dragged down with an origin
+// it has nothing to do with. Dragging the top edge down moves no origin
+// at all: the same camera would be left hanging out of the top of the
+// rectangle, straddling an edge it is supposed to be inside. Anchoring
+// to the corner the dock chose answers both, and is *identical* to the
+// old arithmetic for a rectangle that only translates — both edges move
+// by the same amount — which is the case every measured region pan in
+// docs/architecture.md exercised.
+type
+  TCameraRideAnchor = record
+    // Which edge each offset is measured from. Both are decided at the
+    // dock, by the same nearer-edge test NearestCameraCorner uses, so
+    // the anchor is the corner the dock actually landed on.
+    FromRight: Boolean;
+    FromTop: Boolean;
+    OffsetX: Double;
+    OffsetY: Double;
+  end;
+
+function CameraRideAnchorFor(const AOrigin: TCameraOrigin;
+  const ASize: TCameraSize; const ARect: TCameraRect): TCameraRideAnchor;
+
+// Where the docked camera stands now that the rectangle it rides is
+// ARect: the anchor's corner of ARect, offset back inwards by what the
+// dock measured. A rectangle that has shrunk below the window's own size
+// on an axis pins it to that axis's near edge, because there is nowhere
+// inside for it to be; a window that still fits is left where the anchor
+// puts it, outside the rectangle included — see the implementation.
 //
 // Deliberately *not* "the nearest corner of the new rectangle". That
 // would make the picture-in-picture jump from one corner to another the
 // moment the rectangle's midline crossed it, which is a teleport in the
-// middle of a take; riding keeps the corner the dock chose for as long as
-// the recording lasts. A rectangle that also changed *size* (a window
-// resized mid-recording) is followed by its origin alone for the same
-// reason — the camera keeps its offset rather than re-deciding a corner.
-function CameraRideOrigin(const ADockedOrigin: TCameraOrigin;
-  const AFrom, ATo: TCameraRect): TCameraOrigin;
+// middle of a take; riding keeps the corner the dock chose for as long
+// as the recording lasts.
+function CameraRideOrigin(const AAnchor: TCameraRideAnchor;
+  const ASize: TCameraSize; const ARect: TCameraRect): TCameraOrigin;
 
-// Whether the rectangle has moved far enough to be worth a setFrame:.
+// Whether the rectangle changed enough to be worth a setFrame:. Size as
+// well as origin — a window resized by its top or right edge keeps its
+// origin exactly, and that is precisely the resize the anchor above
+// exists to follow.
 function IsCameraRideMovement(const AFrom, ATo: TCameraRect): Boolean;
 
 // A CGWindowListCopyWindowInfo bounds rectangle as AppKit's global,
@@ -1097,6 +1172,31 @@ begin
     ARegion.Height);
 end;
 
+function ScreenRectRegion(const ARect, AScreenFrame: TCameraRect;
+  AWidth, AHeight: Double): TCameraRect;
+
+  function ClampAxis(AValue, AExtent, AFrameExtent: Double): Double;
+  begin
+    Result := AValue;
+    if Result + AExtent > AFrameExtent then
+      Result := AFrameExtent - AExtent;
+    // Second, so a window wider than the display lands at 0 rather than
+    // at a negative origin ScreenCaptureKit would refuse.
+    if Result < 0 then
+      Result := 0;
+  end;
+
+begin
+  Result := CameraRect(
+    ClampAxis(ARect.X - AScreenFrame.X, AWidth, AScreenFrame.Width),
+    // The flip: AppKit measures up from the display's bottom-left, a
+    // capture region down from its top-left, so the region's top is the
+    // distance from the display's top edge to the window's top edge.
+    ClampAxis(AScreenFrame.Y + AScreenFrame.Height
+    - (ARect.Y + ARect.Height), AHeight, AScreenFrame.Height),
+    AWidth, AHeight);
+end;
+
 function InsetCameraRect(const ARect: TCameraRect;
   AMargin: Double): TCameraRect;
 begin
@@ -1137,17 +1237,63 @@ begin
   Result.Y := AFrom.Y + (ATo.Y - AFrom.Y) * Eased;
 end;
 
-function CameraRideOrigin(const ADockedOrigin: TCameraOrigin;
-  const AFrom, ATo: TCameraRect): TCameraOrigin;
+function CameraRideAnchorFor(const AOrigin: TCameraOrigin;
+  const ASize: TCameraSize; const ARect: TCameraRect): TCameraRideAnchor;
 begin
-  Result.X := ADockedOrigin.X + (ATo.X - AFrom.X);
-  Result.Y := ADockedOrigin.Y + (ATo.Y - AFrom.Y);
+  // Nearer edge on each axis, which for a 2x2 grid of corners is exactly
+  // "nearest corner" — the same separation NearestCameraCorner makes, so
+  // the anchor and the dock cannot disagree about which corner was
+  // chosen. A tie goes to the left/bottom edge, which is where the
+  // origin already is.
+  Result.FromRight := (AOrigin.X - ARect.X)
+    > ((ARect.X + ARect.Width) - (AOrigin.X + ASize.Width));
+  Result.FromTop := (AOrigin.Y - ARect.Y)
+    > ((ARect.Y + ARect.Height) - (AOrigin.Y + ASize.Height));
+  if Result.FromRight then
+    Result.OffsetX := (ARect.X + ARect.Width) - (AOrigin.X + ASize.Width)
+  else
+    Result.OffsetX := AOrigin.X - ARect.X;
+  if Result.FromTop then
+    Result.OffsetY := (ARect.Y + ARect.Height) - (AOrigin.Y + ASize.Height)
+  else
+    Result.OffsetY := AOrigin.Y - ARect.Y;
+end;
+
+function CameraRideOrigin(const AAnchor: TCameraRideAnchor;
+  const ASize: TCameraSize; const ARect: TCameraRect): TCameraOrigin;
+begin
+  if AAnchor.FromRight then
+    Result.X := (ARect.X + ARect.Width) - ASize.Width - AAnchor.OffsetX
+  else
+    Result.X := ARect.X + AAnchor.OffsetX;
+  if AAnchor.FromTop then
+    Result.Y := (ARect.Y + ARect.Height) - ASize.Height - AAnchor.OffsetY
+  else
+    Result.Y := ARect.Y + AAnchor.OffsetY;
+  // The re-clamp, and it is deliberately only the *impossible* case.
+  // A window larger than the rectangle on an axis cannot be inside it at
+  // all, so it goes to the near edge — the same "as far in as it fits"
+  // answer NearestCameraCorner gives a region smaller than the camera.
+  //
+  // A window that FITS is left exactly where the anchor puts it, even
+  // when that is outside the rectangle. Clamping there would contradict
+  // the one promise the re-anchor makes: a picture the user moved goes
+  // on following from where they left it rather than being teleported.
+  // The ride is not the placement policy — NearestCameraCorner and the
+  // corner snap are — and it has no business second-guessing them a
+  // thirtieth of a second after they ran.
+  if ASize.Width > ARect.Width then
+    Result.X := ARect.X;
+  if ASize.Height > ARect.Height then
+    Result.Y := ARect.Y;
 end;
 
 function IsCameraRideMovement(const AFrom, ATo: TCameraRect): Boolean;
 begin
   Result := (Abs(ATo.X - AFrom.X) >= CameraRideEpsilon)
-    or (Abs(ATo.Y - AFrom.Y) >= CameraRideEpsilon);
+    or (Abs(ATo.Y - AFrom.Y) >= CameraRideEpsilon)
+    or (Abs(ATo.Width - AFrom.Width) >= CameraRideEpsilon)
+    or (Abs(ATo.Height - AFrom.Height) >= CameraRideEpsilon);
 end;
 
 function WindowBoundsScreenRect(AX, AY, AWidth, AHeight,
