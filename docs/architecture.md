@@ -363,6 +363,95 @@ Memory is bounded by construction: one decoded frame (the framework's),
 one scaled frame, one pending scaled frame, and two palette-index buffers
 inside the encoder. Nothing accumulates with the length of the movie.
 
+**So does time.** Per-frame cost is flat for the whole encode pass —
+there is no structure in the encoder that degrades as the export
+proceeds, and the nearest-colour memo in particular cannot: it is
+direct-mapped, so a full table costs a clobbered slot and never a longer
+probe. Measured over an 800-frame 1600×1000 export, the memo's occupancy
+climbs to 99.9% of its 2^20 slots while the miss rate stays at 1.8% and
+the palette walk stays at 40 steps a miss, first decile to last; per-frame
+encoder time over the same run is 75.4 ms in the first decile and 77.0 ms
+in the last. On a *real* recording per-frame time moves by a factor of
+two either way, and it tracks how much of the screen changed in that
+frame — content, not history.
+
+**How many frames the export will emit** is asked twice — once by
+whatever draws the progress, once by the palette pass to space its
+sample frames — and `ExpectedFrameCount` answers with two different
+kinds of number depending on when it is asked.
+
+After the palette pass it is a *count*: that pass walks the whole movie
+through the same decimator the encode pass will use, so the frames it
+emitted are the frames the encode pass will emit. Before it there is
+nothing to count, so it is a bound, and the whole design turns on it
+being a bound and not a guess.
+
+The obvious bound — the range times the requested rate, which is the
+number of grid slots the decimator can fill — is far too loose for the
+input this program actually has. ScreenCaptureKit emits a frame when the
+screen *changes*, so a recording with any idle stretch in it holds
+nothing like its length times any rate it was asked for: on a 220 s
+capture asked for at 20 fps that bound says 4412 frames and the movie
+holds 1723. As the encode pass's total it gave a bar that crawled at a
+third of its true rate and then stopped at 54%; as the palette's stride
+it did worse, and that is the next section.
+
+The second bound is the movie's own frame count.
+`AVAssetTrack.nominalFrameRate` is the average a variable-rate track
+really achieved — on the recordings measured here it agrees to four
+figures with the container's frame count over its duration — so the
+*duration* times that rate is how many frames exist at all, which bounds
+any part of the movie as surely as the whole. Taking the duration rather
+than the range is what keeps it a bound: a `--trim` over a busy stretch
+of an otherwise idle recording holds frames far denser than the movie's
+average, and the range times the average would sit *below* what that
+stretch emits. The answer is the smaller of the two bounds, and on the
+220 s capture that is 2428 rather than 4412.
+
+The measured count then replaces both, taken after the first pass has
+finished reporting rather than during it: changing the total mid-pass
+would walk the bar backwards.
+
+**Which frames the palette is built from** is a stride over the emitted
+frame *index*, and the weighting is deliberate. Every frame the encoder
+writes counts the same towards how the result looks, so a busy stretch,
+which produces more frames, has earned more of the palette than an idle
+stretch of the same length. Spreading the samples over the clock instead
+— which has the appeal of needing no frame count at all — was tried on
+the 220 s capture and cost 0.45 dB.
+
+A stride does need the count in advance, which is exactly what the pass
+does not have, and it is the *direction* of the error that matters. Too
+large a stride costs samples. Too small a one is worse than that: the
+quantiser's sampled-pixel budget (`GifMaxSampledPixels`) is precisely
+`PaletteSampleFrames` frames' worth, and past it `SampleFrame` returns
+without doing anything — so a stride that runs long leaves the tail of
+the movie out of the palette entirely, silently. That is why the bound
+above is built to run high and never low.
+
+Measured against the same clip exported as an APNG, which quantises
+nothing and so is exactly the pixels the scaler produced:
+
+| recording | sample frames | PSNR |
+| --- | --- | --- |
+| 220 s 1428×616 → 714 px, 20 fps | 13 → 23 | 39.40 → 39.70 dB |
+| 32 s 1160×860 → 800 px, 30 fps | 23 → 31 | 30.83 → 30.88 dB |
+| 32 s 1160×860, 20 fps | 24 → 24 | 36.42 dB, byte-identical |
+
+The third row is the point as much as the first two: where the slot
+count was already the tighter bound, nothing changes at all.
+
+The other half of an honest bar is the *weight* of the two passes. The
+palette pass reads every frame but resamples only every Nth, so it is
+much the cheaper of the two, and the more so the larger the canvas — the
+encode pass is per-pixel work and the palette pass is not. Measured
+shares of the export's wall time: 1.9% (69 s, 1200×800), 2.6% (32 s,
+1160×860), 5.8% (220 s, 1428×616). `PaletteProgressPercent` in
+`Knips.App.State` is 5 for that reason. It was 25, which is what used to
+make the export look like it stalled a quarter of the way in: the bar
+sprinted through the palette pass in the first few percent of the time
+and then crawled for the rest.
+
 `export` prints one line of advice to **stderr** when the result is going
 to be awkward to hand around — a canvas at or past 1280×720, or a file
 past 20 MB. It names only the knobs that would actually move: `--width=800`
