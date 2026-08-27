@@ -120,6 +120,7 @@ const
   StartPendingSelector = 'startPending:';
   StopPendingSelector = 'stopPending:';
   ToggleCameraSelector = 'toggleCamera:';
+  ToggleCameraShapeSelector = 'toggleCameraShape:';
   RestoreCameraSelector = 'restoreCamera:';
   ToggleZoomOnClickSelector = 'toggleZoomOnClick:';
   ToggleFollowMouseSelector = 'toggleFollowMouse:';
@@ -245,6 +246,7 @@ type
     FCancelItem: NSMenuItem;
     FRevealItem: NSMenuItem;
     FCameraItem: NSMenuItem;
+    FCameraShapeItem: NSMenuItem;
     FErrorItem: NSMenuItem;
     FQuitItem: NSMenuItem;
     // The menu bar the process shows while it is a Regular app. Built on
@@ -311,6 +313,13 @@ type
     // the border could not be shown; the recording then runs without one.
     function ShowBorderForPending: Cardinal;
     procedure HideBorder;
+    // Moves a visible camera window into the corner of the region about
+    // to be recorded, so the picture-in-picture is composited into the
+    // file the way Kap does it. Nothing happens for a display or window
+    // recording, or when the camera is off. UndockCamera puts it back and
+    // is safe on every stop path, docked or not.
+    procedure DockCameraForPending;
+    procedure UndockCamera;
     procedure ShowPlayback(const APath: string; APixelWidth,
       APixelHeight, AScale: Integer);
     procedure HandlePlaybackError(const AMessage: string);
@@ -356,6 +365,7 @@ type
     procedure CommandCancelSelection;
     procedure CommandRevealRecordings;
     procedure CommandToggleCamera;
+    procedure CommandToggleCameraShape;
     // The launch-time restore, one run-loop turn after Setup, so the
     // status item is in the menu bar before the camera warms up.
     procedure CommandRestoreCamera;
@@ -722,6 +732,22 @@ begin
   end;
 end;
 
+procedure TargetToggleCameraShape(ASelf: id; ACommand: SEL;
+  ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandToggleCameraShape;
+  except
+    on E: Exception do
+      HandleCameraBodyException(Controller, ToggleCameraShapeSelector, E);
+  end;
+end;
+
 procedure TargetRestoreCamera(ASelf: id; ACommand: SEL; ATimer: id); cdecl;
 var
   Controller: TAppController;
@@ -851,6 +877,8 @@ begin
     AddTargetMethod(Builder, StartPendingSelector, @TargetStartPending);
     AddTargetMethod(Builder, StopPendingSelector, @TargetStopPending);
     AddTargetMethod(Builder, ToggleCameraSelector, @TargetToggleCamera);
+    AddTargetMethod(Builder, ToggleCameraShapeSelector,
+      @TargetToggleCameraShape);
     AddTargetMethod(Builder, RestoreCameraSelector, @TargetRestoreCamera);
     // AppKit only asks respondsToSelector:, so a runtime without the
     // protocol registered is not an error; claiming it is tidier.
@@ -1204,6 +1232,11 @@ begin
   // nothing the recorder owns — and mid-recording is exactly when the
   // user is most likely to want it on or off.
   FCameraItem := AddMenuItem(CameraMenuTitle, ToggleCameraSelector);
+  // Legal in every state for the same reason the toggle above is: the
+  // shape is a property of a passive window, and switching it mid-take
+  // changes nothing the recorder owns.
+  FCameraShapeItem := AddMenuItem(CircularCameraMenuTitle,
+    ToggleCameraShapeSelector);
   // The two live effects sit with the other recording settings and are
   // idle-only for the same reason the audio checkbox is: what the stream
   // is configured to capture is fixed when the capture starts.
@@ -1510,6 +1543,44 @@ begin
     FBorder.Hide;
 end;
 
+{ Docking the camera into the region being recorded. Kap composes the
+  picture-in-picture into the file; Knips does no compositing at all (see
+  the header of Knips.App.Camera), so the equivalent is to *put the
+  window inside the rectangle* and let ScreenCaptureKit find it there.
+
+  Region recordings only. A display recording already contains the camera
+  wherever it stands, and a window recording captures one window and would
+  not contain it whatever we did — moving it there would be theatre.
+
+  Once, at the start. A Follow Mouse recording pans its region across the
+  display and the camera deliberately does not follow: a
+  picture-in-picture that slides around by itself mid-take is worse than
+  one that ends up outside a rectangle the user is steering. }
+
+procedure TAppController.DockCameraForPending;
+var
+  ScreenFrame: NSRect;
+begin
+  if (FCamera = nil) or not FCamera.Visible then
+    Exit;
+  if not FPendingHasRegion or (FPendingDisplayID = 0) then
+    Exit;
+  // The same NSScreen lookup the border does, and the same flip: a
+  // capture region is top-left display points, an NSWindow frame is
+  // global bottom-left ones.
+  if not ScreenFrameForDisplayID(FPendingDisplayID, ScreenFrame) then
+    Exit;
+  FCamera.DockTo(RegionScreenRect(FPendingRegion,
+    CameraRect(ScreenFrame.origin.x, ScreenFrame.origin.y,
+    ScreenFrame.size.width, ScreenFrame.size.height)));
+end;
+
+procedure TAppController.UndockCamera;
+begin
+  if FCamera <> nil then
+    FCamera.Undock;
+end;
+
 procedure TAppController.ShowPlayback(const APath: string; APixelWidth,
   APixelHeight, AScale: Integer);
 var
@@ -1631,6 +1702,7 @@ procedure TAppController.RefreshStatusItem;
 var
   Button: NSStatusBarButton;
   CameraVisible: Boolean;
+  CameraShape: TCameraShape;
 begin
   if FStatusItem = nil then
     Exit;
@@ -1662,6 +1734,13 @@ begin
   // the checkmark is what says whether the window is up.
   CameraVisible := (FCamera <> nil) and FCamera.Visible;
   FCameraItem.setState(CameraMenuState(CameraVisible));
+  // Both items are read the same way, off a nil-tolerant local: a camera
+  // that does not exist yet is not visible and is the default shape.
+  if FCamera <> nil then
+    CameraShape := FCamera.Shape
+  else
+    CameraShape := csRectangle;
+  FCameraShapeItem.setState(CameraShapeMenuState(CameraShape));
 
   if FLastError <> '' then
   begin
@@ -1725,6 +1804,9 @@ begin
   // A frame left on screen with no recording behind it is a lie about
   // what the app is doing.
   HideBorder;
+  // And so is a camera window parked in the corner of a region nothing
+  // is recording any more.
+  UndockCamera;
   RefreshStatusItem;
 end;
 
@@ -2228,6 +2310,14 @@ begin
     Exit;
   end;
 
+  // Before the capture opens, so the very first frame already has the
+  // camera where the recording wants it — an animated slide into place
+  // would be in the file for ever. Everything that could still refuse
+  // the recording (the output path, the options, the border) has been
+  // settled above; only StartCapture itself can still fail, and it
+  // undocks below.
+  DockCameraForPending;
+
   // Nothing should be animating a session that is about to be freed, and
   // the animator holds a bare pointer to it.
   StopLive;
@@ -2236,6 +2326,7 @@ begin
   if not FSession.StartCapture(Error) then
   begin
     HideBorder;
+    UndockCamera;
     FreeAndNil(FSession);
     Transition(acCaptureFailed);
     // One shot: a denied Screen Recording grant fails the same way every
@@ -2345,6 +2436,16 @@ begin
   Finished := FSession.FinishCapture(Error);
   if not Finished then
     RecordError(Error);
+  // AFTER FinishCapture, never before. The undock eases the camera back
+  // over a fifth of a second, and until FinishCapture returns the stream
+  // is still running and the writer is still appending — the border can
+  // go early because it is a static window being removed, but a window
+  // *moving* would be in the last frames of every docked take. That is
+  // the very artefact DockTo avoids by moving in one step at the start.
+  // FinishCapture stops the stream before it finalises the writer
+  // (Knips.Recording.FinishCapture, "Stream first, then writer"), so by
+  // here there is nothing left for the movement to land in.
+  UndockCamera;
   FreeAndNil(FSession);
   RefreshStatusItem;
   // Playing the clip back is the "done" signal, and the window is where
@@ -2408,6 +2509,24 @@ begin
   // a revoked grant would put an error in the menu on every start with
   // no way to stop it. One click always turns it back on.
   TCameraPreview.RememberVisible(FCamera.Show);
+  RefreshStatusItem;
+end;
+
+// Also outside the transition table, and for the same reason: there is no
+// camera state to be in. Unlike the toggle it never touches the capture
+// session, so it is legal even where switching the camera *on* is not —
+// a shape change cannot put a permission prompt over a recording.
+procedure TAppController.CommandToggleCameraShape;
+begin
+  // Still not while an export owns the main thread: the switch resizes a
+  // window and moves a layer, which is AppKit work in the middle of
+  // AppKit work the export is already doing.
+  if Busy or (FCamera = nil) then
+    Exit;
+  if FCamera.Shape = csCircle then
+    FCamera.Shape := csRectangle
+  else
+    FCamera.Shape := csCircle;
   RefreshStatusItem;
 end;
 

@@ -67,10 +67,29 @@ const
   // is placed in screen coordinates and the layer scales itself.
   CameraWindowWidth = 240;
   CameraWindowHeight = 180;
+  // The circular shape's window is *square*, and that is the whole of it:
+  // a disc needs equal sides or it is an ellipse. Aspect-fill then crops
+  // the camera's centre into it, exactly as it already crops a 16:9 feed
+  // into the 4:3 rectangle. The side is the rectangle's height, so
+  // switching shapes reads as a crop rather than a resize.
+  CameraCircleSide = CameraWindowHeight;
   // Inset from the bottom-right corner of the main screen's visible frame
-  // (so the Dock does not sit on top of the first placement).
+  // (so the Dock does not sit on top of the first placement), and the
+  // same inset a released drag snaps to, and the same inset the window
+  // takes from the edge of a region it is docked into.
   CameraWindowMargin = 24;
   CameraCornerRadius = 8;
+  // How far the window has to have travelled before a released drag is
+  // treated as a drag at all. Without it a bare *click* on the picture
+  // snaps a window that was deliberately placed somewhere else — after a
+  // shape change re-centred it, or on a position restored from before
+  // snapping existed — and a click that teleports the window is a bug
+  // report. Points, and generous: nobody drags two points on purpose.
+  CameraDragThreshold = 3;
+  // The snap ease: how many steps the window takes to travel to its
+  // corner. The step *rate* is the camera unit's business (it owns the
+  // timer); the count is here because the curve is.
+  CameraSnapSteps = 12;
   // A restored position has to leave at least this much of the window on
   // a screen's *visible* frame, or it is thrown away — the display it was
   // dragged onto may be gone since the last launch, and a position under
@@ -81,6 +100,12 @@ const
   // Camera ✓" reads as a contradiction, and a checked item already says
   // which way the toggle is.
   CameraMenuTitle = 'Camera';
+  // The shape switch is a checkbox for the same reason: "Camera Shape:
+  // Circle" has to be read twice to work out whether it *is* a circle or
+  // would *become* one, where a checkmark next to one stable noun says it
+  // once. Circle is the odd shape, so it is the one the box is named
+  // after; unchecked is the rectangle the camera has always been.
+  CircularCameraMenuTitle = 'Circular Camera';
   // NSControlStateValueOn / Off (NSCell.h). Spelled out rather than taken
   // from CocoaAll, which is where the wrong NSWindowLevel values live.
   MenuItemStateOn = 1;
@@ -90,6 +115,7 @@ const
   CameraVisibleDefaultsKey = 'KnipsCameraVisible';
   CameraOriginXDefaultsKey = 'KnipsCameraOriginX';
   CameraOriginYDefaultsKey = 'KnipsCameraOriginY';
+  CameraShapeDefaultsKey = 'KnipsCameraShape';
 
   // The two live recording effects. Both off by default, both
   // remembered, both checkmarks rather than verbs — the same shape as
@@ -114,6 +140,27 @@ type
   TCameraOrigin = record
     X: Double;
     Y: Double;
+  end;
+
+  // What the camera window looks like. The rectangle is the original
+  // 240x180; the circle is a square window with a half-side corner
+  // radius, which is a disc and not a rounded square.
+  TCameraShape = (csRectangle, csCircle);
+
+  TCameraSize = record
+    Width: Double;
+    Height: Double;
+  end;
+
+  // A rectangle in the *same* space as TCameraOrigin — AppKit's global,
+  // bottom-left screen points. Two things arrive as one: a screen's
+  // visibleFrame, and the region a recording has just started on (which
+  // reaches this unit already flipped, by RegionScreenRect below).
+  TCameraRect = record
+    X: Double;
+    Y: Double;
+    Width: Double;
+    Height: Double;
   end;
 
   TAppState = (asIdle, asSelecting, asRecording);
@@ -194,19 +241,95 @@ function MenuCheckState(AChecked: Boolean): Integer;
 // The camera item's checkmark: on when the window is up.
 function CameraMenuState(AVisible: Boolean): Integer;
 
+// The Circular Camera item's checkmark.
+function CameraShapeMenuState(AShape: TCameraShape): Integer;
+
+// Constructors, so callers can write a rectangle or a size inline instead
+// of filling four fields a statement at a time.
+function CameraSize(AWidth, AHeight: Double): TCameraSize;
+function CameraRect(AX, AY, AWidth, AHeight: Double): TCameraRect;
+
+// The window's outside size for a shape, in points.
+function CameraWindowSize(AShape: TCameraShape): TCameraSize;
+
+// The preview layer's corner radius for a shape: the fixed 8 points for
+// the rectangle, half the side for the circle — which is what turns a
+// square layer into a disc.
+function CameraCornerRadiusForShape(AShape: TCameraShape): Double;
+
+// The shape as it goes into (and comes back out of) NSUserDefaults.
+// `defaults write` is a public interface, so anything at all can be
+// sitting under the key; anything that is not the circle reads as the
+// rectangle the camera has always been.
+function StoredCameraShape(AShape: TCameraShape): Integer;
+function CameraShapeFromStored(AStored: Int64): TCameraShape;
+
 // Bottom-right of the given visible frame, inset by CameraWindowMargin.
 // The frame is a screen's visibleFrame, so the result already clears the
 // menu bar and the Dock.
-function DefaultCameraOrigin(AVisibleX, AVisibleY, AVisibleWidth,
-  AVisibleHeight: Double): TCameraOrigin;
+function DefaultCameraOrigin(const ASize: TCameraSize;
+  const AVisible: TCameraRect): TCameraOrigin;
 
 // Whether a restored origin still puts a usable amount of the window on
 // the given screen's *visible* frame. The caller ORs this over every
 // screen; a False everywhere means the saved position belonged to a
 // display that is no longer attached — or to space the Dock has since
 // taken — and the default placement is used instead.
-function IsCameraOriginUsable(const AOrigin: TCameraOrigin; AVisibleX,
-  AVisibleY, AVisibleWidth, AVisibleHeight: Double): Boolean;
+function IsCameraOriginUsable(const AOrigin: TCameraOrigin;
+  const ASize: TCameraSize; const AVisible: TCameraRect): Boolean;
+
+// Where a released drag lands: the corner of AFrame nearest to where the
+// window was let go, inset by AMargin. The four candidates form a 2x2
+// grid, so "nearest corner" separates into "nearer edge on each axis"
+// exactly — no distances to compare. A frame with no room for the window
+// plus its margins (a region smaller than the camera) collapses to the
+// frame's own origin rather than turning inside out, the same way the
+// default placement clamps to the near edge of a tiny screen.
+function NearestCameraCorner(const AOrigin: TCameraOrigin;
+  const ASize: TCameraSize; const AFrame: TCameraRect;
+  AMargin: Double): TCameraOrigin;
+
+// Keeps the whole window inside AFrame, with no margin — what a shape
+// change needs, where the window grows or shrinks in place and must not
+// end up hanging off the screen. A window larger than the frame is
+// aligned to the frame's origin.
+function ClampCameraOrigin(const AOrigin: TCameraOrigin;
+  const ASize: TCameraSize; const AFrame: TCameraRect): TCameraOrigin;
+
+// The origin that keeps a window's centre where it was while its size
+// changes. Switching shapes should look like the picture being re-cropped
+// under the pointer, not like the window walking off to one side.
+function RecenteredCameraOrigin(const AOrigin: TCameraOrigin;
+  const AOld, ANew: TCameraSize): TCameraOrigin;
+
+// A capture region — the display's own points, top-left origin — as a
+// rectangle in AppKit's global bottom-left screen space, given the frame
+// of the NSScreen that display is. The one flip the camera unit needs,
+// and the same arithmetic Knips.App.Border does for the frame it draws
+// (minus the outset, which is the border's own business).
+function RegionScreenRect(const ARegion: TCaptureRegion;
+  const AScreenFrame: TCameraRect): TCameraRect;
+
+// ARect pulled in by AMargin on every side. An axis with no room to
+// spare is left alone rather than turned inside out, which is the same
+// give-up-on-the-margins rule NearestCameraCorner uses — so clamping into
+// an inset region and snapping to its corners agree about where "as far
+// in as it fits" is.
+function InsetCameraRect(const ARect: TCameraRect;
+  AMargin: Double): TCameraRect;
+
+// Whether a released drag moved the window far enough to count as one.
+// A bare click answers False and the window is left exactly where it is.
+function IsCameraDragMovement(const AFrom, ATo: TCameraOrigin): Boolean;
+
+// One step of the snap: the origin AStep steps into a smoothstep ease
+// from AFrom to ATo. Step 0 is AFrom and step ASteps is ATo *exactly* —
+// the ease must land on the corner, not near it. 3t² − 2t³ is the same
+// curve Knips.Recording.LiveMath eases a zoom with; it is repeated here
+// rather than borrowed because the camera has no business depending on
+// the recording layer, and it is four operations.
+function CameraSnapOrigin(const AFrom, ATo: TCameraOrigin; AStep,
+  ASteps: Integer): TCameraOrigin;
 // The GIF a recording exports to: same directory, same stem, .gif.
 function GifPathForRecording(const ARecordingPath: string): string;
 
@@ -615,22 +738,96 @@ begin
   Result := MenuCheckState(AVisible);
 end;
 
-function DefaultCameraOrigin(AVisibleX, AVisibleY, AVisibleWidth,
-  AVisibleHeight: Double): TCameraOrigin;
+function CameraShapeMenuState(AShape: TCameraShape): Integer;
 begin
-  Result.X := AVisibleX + AVisibleWidth - CameraWindowWidth
-    - CameraWindowMargin;
-  Result.Y := AVisibleY + CameraWindowMargin;
-  // A screen narrower or shorter than the window plus its margins would
-  // push the origin off the near edge instead of the far one.
-  if Result.X < AVisibleX then
-    Result.X := AVisibleX;
-  if Result.Y + CameraWindowHeight > AVisibleY + AVisibleHeight then
-    Result.Y := AVisibleY;
+  Result := MenuCheckState(AShape = csCircle);
 end;
 
-function IsCameraOriginUsable(const AOrigin: TCameraOrigin; AVisibleX,
-  AVisibleY, AVisibleWidth, AVisibleHeight: Double): Boolean;
+function CameraSize(AWidth, AHeight: Double): TCameraSize;
+begin
+  Result.Width := AWidth;
+  Result.Height := AHeight;
+end;
+
+function CameraRect(AX, AY, AWidth, AHeight: Double): TCameraRect;
+begin
+  Result.X := AX;
+  Result.Y := AY;
+  Result.Width := AWidth;
+  Result.Height := AHeight;
+end;
+
+function CameraWindowSize(AShape: TCameraShape): TCameraSize;
+begin
+  if AShape = csCircle then
+    Result := CameraSize(CameraCircleSide, CameraCircleSide)
+  else
+    Result := CameraSize(CameraWindowWidth, CameraWindowHeight);
+end;
+
+function CameraCornerRadiusForShape(AShape: TCameraShape): Double;
+var
+  Size: TCameraSize;
+begin
+  if AShape <> csCircle then
+    Exit(CameraCornerRadius);
+  // Half of the *shorter* side, so a window that is somehow not square
+  // still comes out as a capsule rather than as a layer whose corners
+  // overlap — Core Animation clamps that, but the intent should not
+  // depend on the clamp.
+  Size := CameraWindowSize(AShape);
+  if Size.Width < Size.Height then
+    Result := Size.Width / 2
+  else
+    Result := Size.Height / 2;
+end;
+
+function StoredCameraShape(AShape: TCameraShape): Integer;
+begin
+  Result := Ord(AShape);
+end;
+
+function CameraShapeFromStored(AStored: Int64): TCameraShape;
+begin
+  if AStored = Ord(csCircle) then
+    Result := csCircle
+  else
+    Result := csRectangle;
+end;
+
+// The lowest and highest origin the window may take on one axis of a
+// frame, inset by the margin. Shared by the default placement and by the
+// snap, so the corner a drag lands on is the corner the camera started
+// life in.
+procedure CameraOriginRange(AFrameStart, AFrameExtent, AWindowExtent,
+  AMargin: Double; out ALow, AHigh: Double);
+begin
+  ALow := AFrameStart + AMargin;
+  AHigh := AFrameStart + AFrameExtent - AWindowExtent - AMargin;
+  // No room for the window and both margins: give up on the margins
+  // rather than on the frame, and put the window at the near edge.
+  if AHigh < ALow then
+  begin
+    ALow := AFrameStart;
+    AHigh := AFrameStart;
+  end;
+end;
+
+function DefaultCameraOrigin(const ASize: TCameraSize;
+  const AVisible: TCameraRect): TCameraOrigin;
+var
+  Low, High: Double;
+begin
+  CameraOriginRange(AVisible.X, AVisible.Width, ASize.Width,
+    CameraWindowMargin, Low, High);
+  Result.X := High;
+  CameraOriginRange(AVisible.Y, AVisible.Height, ASize.Height,
+    CameraWindowMargin, Low, High);
+  Result.Y := Low;
+end;
+
+function IsCameraOriginUsable(const AOrigin: TCameraOrigin;
+  const ASize: TCameraSize; const AVisible: TCameraRect): Boolean;
 var
   OverlapWidth, OverlapHeight: Double;
 
@@ -650,12 +847,112 @@ var
   end;
 
 begin
-  OverlapWidth := Overlap(AOrigin.X, CameraWindowWidth, AVisibleX,
-    AVisibleWidth);
-  OverlapHeight := Overlap(AOrigin.Y, CameraWindowHeight, AVisibleY,
-    AVisibleHeight);
+  OverlapWidth := Overlap(AOrigin.X, ASize.Width, AVisible.X,
+    AVisible.Width);
+  OverlapHeight := Overlap(AOrigin.Y, ASize.Height, AVisible.Y,
+    AVisible.Height);
   Result := (OverlapWidth >= MinVisibleCameraExtent)
     and (OverlapHeight >= MinVisibleCameraExtent);
+end;
+
+// Ties go to the low edge — left, and bottom — which only decides the
+// exact centre of a frame and has to decide it somehow.
+function NearerEdge(AValue, ALow, AHigh: Double): Double;
+begin
+  if Abs(AValue - ALow) <= Abs(AValue - AHigh) then
+    Result := ALow
+  else
+    Result := AHigh;
+end;
+
+function NearestCameraCorner(const AOrigin: TCameraOrigin;
+  const ASize: TCameraSize; const AFrame: TCameraRect;
+  AMargin: Double): TCameraOrigin;
+var
+  Low, High: Double;
+begin
+  CameraOriginRange(AFrame.X, AFrame.Width, ASize.Width, AMargin, Low, High);
+  Result.X := NearerEdge(AOrigin.X, Low, High);
+  CameraOriginRange(AFrame.Y, AFrame.Height, ASize.Height, AMargin, Low,
+    High);
+  Result.Y := NearerEdge(AOrigin.Y, Low, High);
+end;
+
+function ClampCameraOrigin(const AOrigin: TCameraOrigin;
+  const ASize: TCameraSize; const AFrame: TCameraRect): TCameraOrigin;
+
+  function ClampAxis(AValue, AFrameStart, AFrameExtent,
+    AWindowExtent: Double): Double;
+  begin
+    Result := AValue;
+    if Result + AWindowExtent > AFrameStart + AFrameExtent then
+      Result := AFrameStart + AFrameExtent - AWindowExtent;
+    // Second, so a window larger than the frame ends up at the near edge
+    // rather than pushed off it by the line above.
+    if Result < AFrameStart then
+      Result := AFrameStart;
+  end;
+
+begin
+  Result.X := ClampAxis(AOrigin.X, AFrame.X, AFrame.Width, ASize.Width);
+  Result.Y := ClampAxis(AOrigin.Y, AFrame.Y, AFrame.Height, ASize.Height);
+end;
+
+function RecenteredCameraOrigin(const AOrigin: TCameraOrigin;
+  const AOld, ANew: TCameraSize): TCameraOrigin;
+begin
+  Result.X := AOrigin.X + (AOld.Width - ANew.Width) / 2;
+  Result.Y := AOrigin.Y + (AOld.Height - ANew.Height) / 2;
+end;
+
+function RegionScreenRect(const ARegion: TCaptureRegion;
+  const AScreenFrame: TCameraRect): TCameraRect;
+begin
+  Result := CameraRect(
+    AScreenFrame.X + ARegion.Left,
+    AScreenFrame.Y + AScreenFrame.Height - (ARegion.Top + ARegion.Height),
+    ARegion.Width,
+    ARegion.Height);
+end;
+
+function InsetCameraRect(const ARect: TCameraRect;
+  AMargin: Double): TCameraRect;
+begin
+  Result := ARect;
+  if Result.Width > 2 * AMargin then
+  begin
+    Result.X := Result.X + AMargin;
+    Result.Width := Result.Width - 2 * AMargin;
+  end;
+  if Result.Height > 2 * AMargin then
+  begin
+    Result.Y := Result.Y + AMargin;
+    Result.Height := Result.Height - 2 * AMargin;
+  end;
+end;
+
+function IsCameraDragMovement(const AFrom, ATo: TCameraOrigin): Boolean;
+begin
+  // Either axis on its own: a purely horizontal nudge is a drag, and
+  // squaring two numbers to find that out would be ceremony.
+  Result := (Abs(ATo.X - AFrom.X) >= CameraDragThreshold)
+    or (Abs(ATo.Y - AFrom.Y) >= CameraDragThreshold);
+end;
+
+function CameraSnapOrigin(const AFrom, ATo: TCameraOrigin; AStep,
+  ASteps: Integer): TCameraOrigin;
+var
+  Time, Eased: Double;
+begin
+  // A degenerate step count is an arrival, not a division by zero.
+  if (ASteps <= 0) or (AStep >= ASteps) then
+    Exit(ATo);
+  if AStep <= 0 then
+    Exit(AFrom);
+  Time := AStep / ASteps;
+  Eased := Time * Time * (3 - 2 * Time);
+  Result.X := AFrom.X + (ATo.X - AFrom.X) * Eased;
+  Result.Y := AFrom.Y + (ATo.Y - AFrom.Y) * Eased;
 end;
 
 end.

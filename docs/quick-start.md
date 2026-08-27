@@ -76,6 +76,7 @@ A `◉` appears in the menu bar. Clicking it opens:
 | Stop Recording | Enabled only while recording. |
 | Cancel selection | Enabled only while selecting. The overlay covers the menu bar, so this only matters if the overlay failed to open. |
 | Camera | Floating camera window; checked while it is up. Available in every state, recording included. |
+| Circular Camera | A checkbox. On, the camera window is a circle instead of a rounded rectangle. Applies to the window on screen straight away and is remembered between launches. |
 | Zoom on Click | A checkbox. On, a click inside the recorded area zooms the *recording* to 2× around the click, holds for 0.8 s after the last click, and eases back. Nothing on screen moves — only what the file shows. Remembered between launches; not changeable mid-recording. |
 | Follow Mouse (region) | A checkbox. On, a **region** recording pans to keep the pointer inside the middle third of the frame; the red frame moves with it. Whole-display and window recordings ignore it — a display has nowhere to pan. Remembered between launches; not changeable mid-recording. |
 | Record System Audio | A checkbox. On, recordings get an AAC track of the system mix. Remembered between launches; not changeable mid-recording. |
@@ -182,11 +183,40 @@ Settings › Privacy & Security › Screen Recording and click again.
 
 **Camera** puts a small rounded window with your camera in it at the
 bottom right of the main screen; the item carries a checkmark while it is
-up. Drag it from anywhere in the picture — there is no title bar — and
-drop it inside the region you are about to record: Knips does no
-compositing, the camera is simply a window and ScreenCaptureKit records
-it like any other. It floats above ordinary windows, follows you across
-Spaces, and stays up across recordings until you switch it off or quit.
+up. Knips does no compositing — the camera is simply a window, and
+ScreenCaptureKit records it like any other. It floats above ordinary
+windows, follows you across Spaces, and stays up across recordings until
+you switch it off or quit.
+
+**It is mirrored**, the way every camera preview you have ever used is:
+you raise your left hand and the picture's left hand goes up. Because the
+recorder captures the window exactly as it looks, the *recording* is
+mirrored too — which is what you want, and what Kap does. Text held up to
+the camera will read backwards in the file; that is the trade every
+selfie mirror makes.
+
+**Drag it from anywhere in the picture** — there is no title bar — and it
+**snaps to the nearest corner** of the screen when you let go, tucked in
+by the same margin it started with. Drop it in the middle of the screen
+and it will pick a corner for you; drop it back where it was and it stays
+put. A plain *click* is not a drag: the window has to travel a few points
+before letting go moves it anywhere, so clicking the picture never throws
+it into a corner. Grabbing it again while it is still gliding takes it
+from wherever it has got to.
+
+**Circular Camera** makes it a circle. The window becomes square and the
+picture is cropped to a disc about the middle of the frame; the switch
+happens live, about the window's own centre, and the choice is
+remembered.
+
+**A region recording docks it.** Start a *Record Region…* or *Record Last
+Region* while the camera is up and it moves into the nearest corner
+*inside* the rectangle being recorded, so it ends up in the file — Kap's
+picture-in-picture, without any compositing. When the recording stops it
+travels back to where it was before. Nothing happens for a display or
+window recording, or if the camera is off. With **Follow Mouse** on it
+docks once, to the region as it starts, and then stays put rather than
+sliding around while the region pans.
 
 Where you left it and whether it was on are remembered, so — **once
 camera access is granted** — the next launch brings it back to the same
@@ -220,6 +250,9 @@ Two known limits, both cheap to work around:
   you switch it off and on again.
 - The position is written when the camera is switched off or Knips quits
   from the menu. Force-quitting loses the last move.
+- A drag you make *during* a docked region recording is not kept: when the
+  recording stops, the camera returns to where it stood before the
+  recording moved it.
 
 ## Exporting
 

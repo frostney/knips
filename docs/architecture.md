@@ -562,18 +562,22 @@ an `objcclass`:
 
 | Runtime class | Superclass | Methods |
 | --- | --- | --- |
-| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `recordWindow:`, `recordLastRegion:`, `toggleSystemAudio:`, `toggleZoomOnClick:`, `toggleFollowMouse:`, `liveTick:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `toggleCamera:`, `restoreCamera:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:`, `exportGif:`, `revealRecording:`, `closePlayback:`, `menuNeedsUpdate:` |
+| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `recordWindow:`, `recordLastRegion:`, `toggleSystemAudio:`, `toggleZoomOnClick:`, `toggleFollowMouse:`, `liveTick:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `toggleCamera:`, `toggleCameraShape:`, `restoreCamera:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:`, `exportGif:`, `revealRecording:`, `closePlayback:`, `menuNeedsUpdate:` |
 | `KnipsOverlayView` | `NSView` | `drawRect:`, `mouseDown:`, `mouseDragged:`, `mouseUp:`, `keyDown:`, `acceptsFirstResponder` |
 | `KnipsOverlayWindow` | `NSWindow` | `canBecomeKeyWindow` (a borderless window answers NO, and then Esc never reaches the view) |
-| `KnipsCameraView` | `NSView` | `acceptsFirstMouse:` (Knips is an Accessory app, so without it the first click on the camera window is eaten as the activating click and dragging takes two) |
+| `KnipsCameraView` | `NSView` | `acceptsFirstMouse:` (Knips is an Accessory app, so without it the first click on the camera window is eaten as the activating click and dragging takes two); `mouseDown:`, `mouseDragged:`, `mouseUp:` — the drag, done here rather than by `movableByWindowBackground` so the corner snap has a drag end; `snapTick:` — one step of the snap ease, so the ease needs no nested run loop and no second runtime class |
 | `KnipsBorderView` | `NSView` | `drawRect:` — the frame drawn around a region while it records |
 | `KnipsPlaybackDelegate` | `NSObject` | `windowWillClose:` — the one teardown path for the playback window; `windowShouldClose:` — NO while a GIF export is running |
 
-`KnipsCameraView` is the exception to what follows: it has no ivar and no
-`try..except`, because its one body returns a constant and never calls
-back into Pascal. The others each carry an `knipsOwner` pointer ivar
+The two bodies that return a constant and never call back into Pascal —
+`KnipsCameraView.acceptsFirstMouse:` and
+`KnipsOverlayWindow.canBecomeKeyWindow` — carry no `try..except`, because
+there is nothing there that can raise; `KnipsOverlayWindow` needs no ivar
+either. Every other class carries an `knipsOwner` pointer ivar
 back to the owning Pascal object, cleared before the Objective-C instance
 goes away — the same rule as the stream output object.
+`KnipsCameraView` gained its ivar with the drag: the three mouse bodies
+have an owner to talk to, where `acceptsFirstMouse:` never did.
 `KnipsOverlayView` adds an `knipsIndex`
 ivar holding the screen's index, so one overlay object serves every
 display.
@@ -769,9 +773,9 @@ method returns normally.
 `kCGFloatingWindowLevel` on screen, its content view hosting an
 `AVCaptureVideoPreviewLayer` (`resize-aspect-fill`, 8 pt corner radius,
 `masksToBounds`) fed by an `AVCaptureSession` on
-`defaultDeviceWithMediaType:AVMediaTypeVideo`. It is
-`movableByWindowBackground`, so the whole picture is the drag handle, and
-it joins all Spaces the way the overlay does.
+`defaultDeviceWithMediaType:AVMediaTypeVideo`. The whole picture is the
+drag handle — there is no title bar — and it joins all Spaces the way the
+overlay does.
 
 Knips does **no** compositing: the camera is simply a window, and
 ScreenCaptureKit records it because it is on the display, exactly as Kap
@@ -781,6 +785,109 @@ machine and is legal in every state — a passive window cannot fail a
 capture, and mid-recording is when the user is most likely to want it on
 or off. It keeps running across recordings; only Quit or a second click
 takes it down.
+
+*Mirrored*, because everyone expects a selfie mirror and the raw feed is
+not one. The preview layer's `AVCaptureConnection` gets
+`setAutomaticallyAdjustsVideoMirroring:NO` and then `setVideoMirrored:YES`
+— **that order**, and only after `isVideoMirroringSupported` answers YES,
+because `AVCaptureSession.h` throws `NSInvalidArgumentException` for
+either violation and an Objective-C exception is not something a Pascal
+`try..except` can catch. The guards are the whole safety net. The
+connection is formed by `initWithSession:` and is non-nil from there on
+(measured, [spike 0001](spikes/0001-runtime-objc-class.md)); mirroring is
+applied there and again after `startRunning`, in case starting re-forms
+it. And because the recorder captures the window as it appears,
+**the file gets the mirrored picture too** — which is what Kap does and
+what a viewer wants: the presenter pointed left, the video shows left.
+
+*Dragging and snapping.* `movableByWindowBackground` is **off**.
+The snap needs a moment that unambiguously means "let go", and AppKit's
+background drag runs in `NSWindow`'s own mouse-tracking loop and ends
+there. So `KnipsCameraView` implements `mouseDown:`/`mouseDragged:`/
+`mouseUp:` and `Knips.App.Camera` moves the window itself, from
+`NSEvent.mouseLocation` deltas — global screen points, because
+`locationInWindow` is measured against a window that is itself moving.
+`mouseUp:` is then the drag end by construction, and it demonstrably
+arrives (spike 0001). On release — and only if the window actually
+travelled `CameraDragThreshold` points, so a bare *click* never teleports
+a window that was deliberately placed — it eases into the **nearest
+corner** of the screen's `visibleFrame`, inset by the same
+`CameraWindowMargin` the very first placement uses, so a drop where the
+camera already was does not move it. `NearestCameraCorner` in
+`Knips.App.State` is the maths, and it is separable: four corners on a
+2×2 grid means nearest-corner is nearer-edge on each axis.
+
+That ease is **not** `setFrame:display:animate:YES`. AppKit's animated
+setFrame runs a nested run loop until it finishes, and a nested run loop
+inside `mouseUp:` is the shape this app avoids everywhere else (see
+"Deferrals"): a re-grab lands inside it and fights the animation, a shape
+change lands inside it and leaves the layer's radius arguing with the
+window's size, and a `Hide` lands inside it and has to trust the
+autorelease pool to outlive AppKit's animator. Instead the camera owns
+twelve steps of a smoothstep on a repeating `NSTimer` in
+`NSRunLoopCommonModes` (`snapTick:` on `KnipsCameraView`, so the feature
+adds no runtime-built class of its own), with `CameraSnapOrigin` in
+`Knips.App.State` as the curve — it returns the target *exactly* on the
+last step, because an ease that lands near the corner leaves the window a
+fraction of a point out for ever. A single `FSnapping` flag makes the
+interactions deterministic: `mouseDown:` **cancels** the ease and drags
+on from wherever the window is, while `SetShape`, `DockTo` and `Hide`
+**finish** it first, so none of them ever measures a window that is still
+travelling. There is no nested run loop anywhere in the camera unit.
+
+*Shape.* *Circular Camera* is a checkbox, not a title that flips, for the
+same reason *Camera* is. Checked, the window becomes a **square** 180×180
+— a disc needs equal sides — with the layer's corner radius at half the
+side; `resize-aspect-fill` was already cropping, so the switch reads as a
+re-crop rather than a resize. Applied live: the window resizes about its
+own centre, clamped back onto the screen, and the layer's frame and radius
+follow. Docked, "onto the screen" means into the region *inset by
+`CameraWindowMargin`* — the same inset the dock and the snap use, so a
+circle growing back into a rectangle against the region's edge keeps the
+margin every other placement keeps — and the remembered pre-recording
+origin is re-centred with it, or undocking after a shape change would
+restore the window by its corner and quietly shift its centre. Persisted under `KnipsCameraShape`, and read back through
+`CameraShapeFromStored`, which treats anything that is not the circle as
+the rectangle — `defaults write` is a public interface.
+
+*Docking into a region.* When a **region** recording starts with the
+camera up, the window moves into the nearest corner *inside* the region,
+inset by the same margin, so the picture-in-picture is composited into the
+file the way Kap does it — still with no compositing code, just a window
+in the right place. `Knips.App` flips the capture region (top-left display
+points) into AppKit's bottom-left space with `RegionScreenRect` and hands
+`TCameraPreview.DockTo` a rectangle; the camera remembers where it was and
+`Undock` puts it back on every stop path (`FinishRecording`, `Fail`, and
+the `StartCapture` failure branch). The move in is a **single
+`setFrame`**, not an ease: the capture is about to open on that frame and
+a camera sliding into place would live in the file for ever.
+
+The move back is eased, and **where** it happens is load-bearing.
+`UndockCamera` runs *after* `FSession.FinishCapture` returns, not before
+it with `HideBorder`. Until `FinishCapture` returns the stream is still
+running and the writer is still appending — measured on device: at the
+point the undock used to sit, `Capturing` was still true and the file's
+last frame landed 30 ms later, with frames arriving every 33 ms right up
+to it. A 200 ms glide there would have put roughly six frames of the
+camera sliding away into the tail of *every* docked take — the exact
+artefact the unanimated dock exists to avoid, at the other end of the
+recording. `FinishCapture` stops the stream before it finalises the
+writer ("Stream first, then writer: an append must never race the
+finish"), so after it returns there is nothing left for the movement to
+land in. The border can go early because it is a static window being
+removed; a window in *motion* cannot.
+
+Three deliberate limits. Display and window recordings do nothing (a
+display capture already contains the camera wherever it stands, and a
+window capture would not contain it whatever we did). A camera that is
+**off** does nothing. And the dock happens **once, at the start**: a
+Follow Mouse recording pans its region across the display and the camera
+does not chase it, because a picture-in-picture that slides around by
+itself mid-take is worse than one that ends up outside a rectangle the
+user is steering. While docked, a drag snaps to the *region's* corners
+rather than the screen's; the position restored on stop is still the
+pre-recording one, and that is also what `SaveOrigin` writes out, so a
+recording can never quietly rewrite where the camera lives.
 
 `startRunning` blocks for the better part of a second while the camera
 warms up. This program has no `cthreads` and creates no queues of its
@@ -827,11 +934,16 @@ refused `Show` stores `False`, so a revoked grant cannot turn into an
 error on every launch forever with no way to stop it. One click always
 turns it back on.
 
-Position and visibility live in `NSUserDefaults`
-(`KnipsCameraOriginX/Y`, `KnipsCameraVisible`), written when the window
-is hidden or the app quits. A restored origin is checked against every
+Position, visibility and shape live in `NSUserDefaults`
+(`KnipsCameraOriginX/Y`, `KnipsCameraVisible`, `KnipsCameraShape`). The
+first two are written when the window is hidden or the app quits, the
+shape the moment it changes — it is a setting, not a property of a window
+that happens to be up. A restored origin is checked against every
 attached screen's **`visibleFrame`** — `IsCameraOriginUsable` in
-`Knips.App.State`, tested — so a position saved on a display that has
+`Knips.App.State` — which takes the *shape's* size, since a circle is 60
+points narrower than a rectangle and an origin that leaves a usable
+sliver of one can leave nothing of the other — tested, so a position
+saved on a display that has
 since been unplugged, or one the Dock has since taken, falls back to the
 bottom right of the main screen. `visibleFrame` rather than `frame`
 because the window floats at level 3 and the Dock sits at 20: under the

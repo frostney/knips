@@ -76,6 +76,45 @@ type
     procedure TestAnOriginOnAVanishedScreenIsNot;
     procedure TestAMostlyOffScreenOriginIsNot;
     procedure TestAnOriginUnderTheDockIsNot;
+    procedure TestTheCircleIsJudgedBySquareSize;
+  end;
+
+  TCameraShapeTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestTheCircleIsASquareWindow;
+    procedure TestTheCircleRadiusIsHalfTheSide;
+    procedure TestTheCheckmarkNamesTheCircle;
+    procedure TestAStoredShapeSurvivesARoundTrip;
+    procedure TestStoredNonsenseReadsAsTheRectangle;
+    procedure TestASizeChangeKeepsTheCentre;
+    procedure TestAResizedWindowIsClampedOntoTheScreen;
+    procedure TestAWindowBiggerThanTheFrameSitsAtItsOrigin;
+  end;
+
+  TCameraSnapTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestEachCornerAttractsItsOwnQuadrant;
+    procedure TestTheMarginIsTheInset;
+    procedure TestASmallFrameCollapsesToItsOrigin;
+    procedure TestTheCircleSnapsByItsOwnSize;
+    procedure TestTheMidpointBreaksToTheLowEdge;
+    procedure TestAClickIsNotADrag;
+    procedure TestTheEaseStartsAndLandsExactly;
+    procedure TestTheEaseIsMonotonicAndSlowAtBothEnds;
+    procedure TestADegenerateStepCountArrives;
+  end;
+
+  TCameraDockTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestARegionFlipsIntoScreenSpace;
+    procedure TestARegionOnASecondScreenFlipsToo;
+    procedure TestTheDockCornerIsInsideTheRegion;
+    procedure TestATinyRegionDocksAsFarInAsItFits;
+    procedure TestTheInsetMatchesTheSnapCorner;
+    procedure TestAnInsetTooBigForTheRectLeavesItAlone;
   end;
 
   TExportTests = class(TTestSuite)
@@ -517,6 +556,8 @@ begin
     TestAMostlyOffScreenOriginIsNot);
   Test('a saved origin that would restore under the Dock is rejected',
     TestAnOriginUnderTheDockIsNot);
+  Test('a circular camera''s origin is judged by its own square size',
+    TestTheCircleIsJudgedBySquareSize);
 end;
 
 procedure TCameraTests.TestTheCheckmarkFollowsTheWindow;
@@ -532,7 +573,8 @@ var
   Origin: TCameraOrigin;
 begin
   // A 1440x900 screen whose visible frame excludes a 25 pt menu bar.
-  Origin := DefaultCameraOrigin(0, 0, 1440, 875);
+  Origin := DefaultCameraOrigin(CameraWindowSize(csRectangle),
+    CameraRect(0, 0, 1440, 875));
   Expect<Double>(Origin.X)
     .ToBe(1440 - CameraWindowWidth - CameraWindowMargin);
   Expect<Double>(Origin.Y).ToBe(CameraWindowMargin);
@@ -543,7 +585,8 @@ var
   Origin: TCameraOrigin;
 begin
   // A display to the right of the main one starts at x = 1440.
-  Origin := DefaultCameraOrigin(1440, -200, 1920, 1080);
+  Origin := DefaultCameraOrigin(CameraWindowSize(csRectangle),
+    CameraRect(1440, -200, 1920, 1080));
   Expect<Double>(Origin.X)
     .ToBe(1440 + 1920 - CameraWindowWidth - CameraWindowMargin);
   Expect<Double>(Origin.Y).ToBe(-200 + CameraWindowMargin);
@@ -553,8 +596,8 @@ procedure TCameraTests.TestDefaultStaysOnATinyScreen;
 var
   Origin: TCameraOrigin;
 begin
-  Origin := DefaultCameraOrigin(0, 0, CameraWindowWidth div 2,
-    CameraWindowHeight div 2);
+  Origin := DefaultCameraOrigin(CameraWindowSize(csRectangle),
+    CameraRect(0, 0, CameraWindowWidth div 2, CameraWindowHeight div 2));
   Expect<Double>(Origin.X).ToBe(0);
   Expect<Double>(Origin.Y).ToBe(0);
 end;
@@ -565,7 +608,8 @@ var
 begin
   Origin.X := 100;
   Origin.Y := 100;
-  Expect<Boolean>(IsCameraOriginUsable(Origin, 0, 0, 1440, 900)).ToBe(True);
+  Expect<Boolean>(IsCameraOriginUsable(Origin,
+    CameraWindowSize(csRectangle), CameraRect(0, 0, 1440, 900))).ToBe(True);
 end;
 
 procedure TCameraTests.TestAnOriginOnAVanishedScreenIsNot;
@@ -575,19 +619,24 @@ begin
   // Saved while a second display sat to the right; that display is gone.
   Origin.X := 2000;
   Origin.Y := 400;
-  Expect<Boolean>(IsCameraOriginUsable(Origin, 0, 0, 1440, 900)).ToBe(False);
+  Expect<Boolean>(IsCameraOriginUsable(Origin,
+    CameraWindowSize(csRectangle), CameraRect(0, 0, 1440, 900))).ToBe(False);
 end;
 
 procedure TCameraTests.TestAMostlyOffScreenOriginIsNot;
 var
   Origin: TCameraOrigin;
+  Screen: TCameraRect;
 begin
+  Screen := CameraRect(0, 0, 1440, 900);
   // Only MinVisibleCameraExtent - 1 points of width remain on screen.
   Origin.X := 1440 - (MinVisibleCameraExtent - 1);
   Origin.Y := 100;
-  Expect<Boolean>(IsCameraOriginUsable(Origin, 0, 0, 1440, 900)).ToBe(False);
+  Expect<Boolean>(IsCameraOriginUsable(Origin,
+    CameraWindowSize(csRectangle), Screen)).ToBe(False);
   Origin.X := 1440 - MinVisibleCameraExtent;
-  Expect<Boolean>(IsCameraOriginUsable(Origin, 0, 0, 1440, 900)).ToBe(True);
+  Expect<Boolean>(IsCameraOriginUsable(Origin,
+    CameraWindowSize(csRectangle), Screen)).ToBe(True);
 end;
 
 // The reason the caller passes visibleFrame and not frame: the camera
@@ -600,9 +649,520 @@ var
 begin
   Origin.X := 100;
   Origin.Y := -100;
-  Expect<Boolean>(IsCameraOriginUsable(Origin, 0, 0, 1440, 900)).ToBe(True);
+  Expect<Boolean>(IsCameraOriginUsable(Origin,
+    CameraWindowSize(csRectangle), CameraRect(0, 0, 1440, 900))).ToBe(True);
   // Same screen with a 70 pt Dock along the bottom.
-  Expect<Boolean>(IsCameraOriginUsable(Origin, 0, 70, 1440, 805)).ToBe(False);
+  Expect<Boolean>(IsCameraOriginUsable(Origin,
+    CameraWindowSize(csRectangle), CameraRect(0, 70, 1440, 805))).ToBe(False);
+end;
+
+// The size is a parameter precisely because the circle is 60 points
+// narrower: an origin that leaves a usable sliver of the rectangle on
+// screen can leave nothing at all of the circle.
+procedure TCameraTests.TestTheCircleIsJudgedBySquareSize;
+var
+  Origin: TCameraOrigin;
+  Screen: TCameraRect;
+begin
+  Screen := CameraRect(0, 0, 1440, 900);
+  // The rectangle's left edge is 60 points further left than the
+  // circle's for the same origin, so at this x the rectangle still has
+  // MinVisibleCameraExtent on screen and the circle has none.
+  Origin.X := 1440 - CameraWindowWidth + (CameraWindowWidth
+    - CameraCircleSide);
+  Origin.Y := 100;
+  Expect<Boolean>(IsCameraOriginUsable(Origin,
+    CameraWindowSize(csRectangle), Screen)).ToBe(True);
+  Origin.X := 1440 - MinVisibleCameraExtent + 1;
+  Expect<Boolean>(IsCameraOriginUsable(Origin,
+    CameraWindowSize(csCircle), Screen)).ToBe(False);
+  Origin.X := 1440 - MinVisibleCameraExtent;
+  Expect<Boolean>(IsCameraOriginUsable(Origin,
+    CameraWindowSize(csCircle), Screen)).ToBe(True);
+  // And the vertical extent is the circle's, not the rectangle's: a
+  // window whose top 40 points are on screen passes either way, but the
+  // origin that puts them there differs by the height difference — zero
+  // here, since both are 180 tall, which is worth pinning down.
+  Expect<Double>(CameraWindowSize(csCircle).Height)
+    .ToBe(CameraWindowSize(csRectangle).Height);
+end;
+
+{ TCameraShapeTests }
+
+procedure TCameraShapeTests.SetupTests;
+begin
+  Test('the circular camera is a square window',
+    TestTheCircleIsASquareWindow);
+  Test('the circle''s corner radius is half its side',
+    TestTheCircleRadiusIsHalfTheSide);
+  Test('the shape item''s checkmark names the circle',
+    TestTheCheckmarkNamesTheCircle);
+  Test('a stored shape survives a round trip',
+    TestAStoredShapeSurvivesARoundTrip);
+  Test('a stored value that is not a shape reads as the rectangle',
+    TestStoredNonsenseReadsAsTheRectangle);
+  Test('changing shape keeps the window''s centre',
+    TestASizeChangeKeepsTheCentre);
+  Test('a shape change that would leave the screen is clamped back on',
+    TestAResizedWindowIsClampedOntoTheScreen);
+  Test('a window larger than the frame sits at the frame''s origin',
+    TestAWindowBiggerThanTheFrameSitsAtItsOrigin);
+end;
+
+procedure TCameraShapeTests.TestTheCircleIsASquareWindow;
+var
+  Circle, Rectangle: TCameraSize;
+begin
+  Rectangle := CameraWindowSize(csRectangle);
+  Expect<Double>(Rectangle.Width).ToBe(CameraWindowWidth);
+  Expect<Double>(Rectangle.Height).ToBe(CameraWindowHeight);
+  // Square, or the disc would be an ellipse.
+  Circle := CameraWindowSize(csCircle);
+  Expect<Double>(Circle.Width).ToBe(Circle.Height);
+  // And the same height as the rectangle, so the switch reads as a crop.
+  Expect<Double>(Circle.Height).ToBe(CameraWindowHeight);
+end;
+
+procedure TCameraShapeTests.TestTheCircleRadiusIsHalfTheSide;
+begin
+  Expect<Double>(CameraCornerRadiusForShape(csRectangle))
+    .ToBe(CameraCornerRadius);
+  Expect<Double>(CameraCornerRadiusForShape(csCircle))
+    .ToBe(CameraCircleSide / 2);
+end;
+
+procedure TCameraShapeTests.TestTheCheckmarkNamesTheCircle;
+begin
+  Expect<Integer>(CameraShapeMenuState(csRectangle)).ToBe(MenuItemStateOff);
+  Expect<Integer>(CameraShapeMenuState(csCircle)).ToBe(MenuItemStateOn);
+  Expect<string>(CircularCameraMenuTitle).ToBe('Circular Camera');
+end;
+
+procedure TCameraShapeTests.TestAStoredShapeSurvivesARoundTrip;
+begin
+  Expect<Boolean>(CameraShapeFromStored(StoredCameraShape(csRectangle))
+    = csRectangle).ToBe(True);
+  Expect<Boolean>(CameraShapeFromStored(StoredCameraShape(csCircle))
+    = csCircle).ToBe(True);
+end;
+
+// `defaults write KnipsCameraShape 47` is a thing a user can do, and a
+// never-written key reads back as 0.
+procedure TCameraShapeTests.TestStoredNonsenseReadsAsTheRectangle;
+begin
+  Expect<Boolean>(CameraShapeFromStored(0) = csRectangle).ToBe(True);
+  Expect<Boolean>(CameraShapeFromStored(47) = csRectangle).ToBe(True);
+  Expect<Boolean>(CameraShapeFromStored(-1) = csRectangle).ToBe(True);
+end;
+
+procedure TCameraShapeTests.TestASizeChangeKeepsTheCentre;
+var
+  Origin, Moved: TCameraOrigin;
+begin
+  Origin.X := 500;
+  Origin.Y := 300;
+  Moved := RecenteredCameraOrigin(Origin, CameraWindowSize(csRectangle),
+    CameraWindowSize(csCircle));
+  // 240 -> 180 on the width, so the origin moves right by half the loss;
+  // the height does not change, so neither does y.
+  Expect<Double>(Moved.X).ToBe(500 + (CameraWindowWidth - CameraCircleSide)
+    / 2);
+  Expect<Double>(Moved.Y).ToBe(300);
+  // And the centre is where it was, which is the point of the exercise.
+  Expect<Double>(Moved.X + CameraCircleSide / 2)
+    .ToBe(500 + CameraWindowWidth / 2);
+end;
+
+procedure TCameraShapeTests.TestAResizedWindowIsClampedOntoTheScreen;
+var
+  Origin, Clamped: TCameraOrigin;
+  Screen: TCameraRect;
+begin
+  Screen := CameraRect(0, 0, 1440, 875);
+  // A rectangle hard against the right edge, grown back from a circle:
+  // the recentred origin would hang 30 points off the screen.
+  Origin.X := 1440 - CameraWindowWidth + 30;
+  Origin.Y := -10;
+  Clamped := ClampCameraOrigin(Origin, CameraWindowSize(csRectangle),
+    Screen);
+  Expect<Double>(Clamped.X).ToBe(1440 - CameraWindowWidth);
+  Expect<Double>(Clamped.Y).ToBe(0);
+end;
+
+procedure TCameraShapeTests.TestAWindowBiggerThanTheFrameSitsAtItsOrigin;
+var
+  Origin, Clamped: TCameraOrigin;
+begin
+  Origin.X := 900;
+  Origin.Y := 900;
+  Clamped := ClampCameraOrigin(Origin, CameraWindowSize(csRectangle),
+    CameraRect(100, 50, 120, 90));
+  Expect<Double>(Clamped.X).ToBe(100);
+  Expect<Double>(Clamped.Y).ToBe(50);
+end;
+
+{ TCameraSnapTests }
+
+procedure TCameraSnapTests.SetupTests;
+begin
+  Test('a drop in each quadrant snaps to that quadrant''s corner',
+    TestEachCornerAttractsItsOwnQuadrant);
+  Test('the snapped window is inset by the margin', TestTheMarginIsTheInset);
+  Test('a frame with no room for the margins collapses to its origin',
+    TestASmallFrameCollapsesToItsOrigin);
+  Test('the circle snaps by its own square size',
+    TestTheCircleSnapsByItsOwnSize);
+  Test('a drop exactly between two corners breaks to the low edge',
+    TestTheMidpointBreaksToTheLowEdge);
+  Test('a click is not a drag', TestAClickIsNotADrag);
+  Test('the ease starts at the origin and lands on the corner exactly',
+    TestTheEaseStartsAndLandsExactly);
+  Test('the ease only moves forwards and is slow at both ends',
+    TestTheEaseIsMonotonicAndSlowAtBothEnds);
+  Test('a degenerate step count arrives rather than dividing by zero',
+    TestADegenerateStepCountArrives);
+end;
+
+// The four corners form a 2x2 grid, so nearest-corner separates into
+// nearer-edge per axis; these are the four quadrants of a 1440x875
+// visible frame.
+procedure TCameraSnapTests.TestEachCornerAttractsItsOwnQuadrant;
+var
+  Screen: TCameraRect;
+  Size: TCameraSize;
+  Dropped, Snapped: TCameraOrigin;
+  Left, Right, Bottom, Top: Double;
+begin
+  Screen := CameraRect(0, 0, 1440, 875);
+  Size := CameraWindowSize(csRectangle);
+  Left := CameraWindowMargin;
+  Right := 1440 - CameraWindowWidth - CameraWindowMargin;
+  Bottom := CameraWindowMargin;
+  Top := 875 - CameraWindowHeight - CameraWindowMargin;
+
+  Dropped.X := 60;
+  Dropped.Y := 60;
+  Snapped := NearestCameraCorner(Dropped, Size, Screen, CameraWindowMargin);
+  Expect<Double>(Snapped.X).ToBe(Left);
+  Expect<Double>(Snapped.Y).ToBe(Bottom);
+
+  Dropped.X := 1100;
+  Dropped.Y := 60;
+  Snapped := NearestCameraCorner(Dropped, Size, Screen, CameraWindowMargin);
+  Expect<Double>(Snapped.X).ToBe(Right);
+  Expect<Double>(Snapped.Y).ToBe(Bottom);
+
+  Dropped.X := 60;
+  Dropped.Y := 700;
+  Snapped := NearestCameraCorner(Dropped, Size, Screen, CameraWindowMargin);
+  Expect<Double>(Snapped.X).ToBe(Left);
+  Expect<Double>(Snapped.Y).ToBe(Top);
+
+  Dropped.X := 1100;
+  Dropped.Y := 700;
+  Snapped := NearestCameraCorner(Dropped, Size, Screen, CameraWindowMargin);
+  Expect<Double>(Snapped.X).ToBe(Right);
+  Expect<Double>(Snapped.Y).ToBe(Top);
+end;
+
+// And the corner it lands on is the one the very first placement used,
+// which is what stops the camera moving on its own the first time it is
+// dragged and dropped where it already was.
+procedure TCameraSnapTests.TestTheMarginIsTheInset;
+var
+  Screen: TCameraRect;
+  Size: TCameraSize;
+  Default_, Snapped: TCameraOrigin;
+begin
+  Screen := CameraRect(1440, -200, 1920, 1080);
+  Size := CameraWindowSize(csRectangle);
+  Default_ := DefaultCameraOrigin(Size, Screen);
+  Snapped := NearestCameraCorner(Default_, Size, Screen, CameraWindowMargin);
+  Expect<Double>(Snapped.X).ToBe(Default_.X);
+  Expect<Double>(Snapped.Y).ToBe(Default_.Y);
+end;
+
+procedure TCameraSnapTests.TestASmallFrameCollapsesToItsOrigin;
+var
+  Dropped, Snapped: TCameraOrigin;
+begin
+  Dropped.X := 5000;
+  Dropped.Y := 5000;
+  // A region smaller than the camera window: every corner is the same
+  // corner, and it is the region's own origin.
+  Snapped := NearestCameraCorner(Dropped, CameraWindowSize(csRectangle),
+    CameraRect(300, 400, 200, 150), CameraWindowMargin);
+  Expect<Double>(Snapped.X).ToBe(300);
+  Expect<Double>(Snapped.Y).ToBe(400);
+end;
+
+procedure TCameraSnapTests.TestTheCircleSnapsByItsOwnSize;
+var
+  Dropped, Snapped: TCameraOrigin;
+begin
+  Dropped.X := 1300;
+  Dropped.Y := 800;
+  Snapped := NearestCameraCorner(Dropped, CameraWindowSize(csCircle),
+    CameraRect(0, 0, 1440, 875), CameraWindowMargin);
+  // The square window is 60 points narrower, so its top-right origin sits
+  // 60 points further right than the rectangle's would.
+  Expect<Double>(Snapped.X)
+    .ToBe(1440 - CameraCircleSide - CameraWindowMargin);
+  Expect<Double>(Snapped.Y).ToBe(875 - CameraCircleSide - CameraWindowMargin);
+end;
+
+// The tie has to break somewhere, and it breaks low — left and bottom.
+// Only an origin at the exact midpoint of the two insets can hit it, so
+// this is documentation as much as a test.
+procedure TCameraSnapTests.TestTheMidpointBreaksToTheLowEdge;
+var
+  Dropped, Snapped: TCameraOrigin;
+  Low, High: Double;
+begin
+  Low := CameraWindowMargin;
+  High := 1440 - CameraWindowWidth - CameraWindowMargin;
+  Dropped.X := (Low + High) / 2;
+  Dropped.Y := (CameraWindowMargin
+    + (875 - CameraWindowHeight - CameraWindowMargin)) / 2;
+  Snapped := NearestCameraCorner(Dropped, CameraWindowSize(csRectangle),
+    CameraRect(0, 0, 1440, 875), CameraWindowMargin);
+  Expect<Double>(Snapped.X).ToBe(Low);
+  Expect<Double>(Snapped.Y).ToBe(CameraWindowMargin);
+end;
+
+// Without this a bare click on the picture flings the window into a
+// corner — including a corner a shape change deliberately moved it away
+// from a moment earlier.
+procedure TCameraSnapTests.TestAClickIsNotADrag;
+var
+  Start, Ended: TCameraOrigin;
+begin
+  Start.X := 500;
+  Start.Y := 300;
+  Ended := Start;
+  Expect<Boolean>(IsCameraDragMovement(Start, Ended)).ToBe(False);
+  // A jitter under the threshold on both axes is still a click.
+  Ended.X := Start.X + CameraDragThreshold - 1;
+  Ended.Y := Start.Y - (CameraDragThreshold - 1);
+  Expect<Boolean>(IsCameraDragMovement(Start, Ended)).ToBe(False);
+  // One axis reaching it is enough: a purely horizontal nudge is a drag.
+  Ended.X := Start.X + CameraDragThreshold;
+  Ended.Y := Start.Y;
+  Expect<Boolean>(IsCameraDragMovement(Start, Ended)).ToBe(True);
+  Ended.X := Start.X;
+  Ended.Y := Start.Y - CameraDragThreshold;
+  Expect<Boolean>(IsCameraDragMovement(Start, Ended)).ToBe(True);
+end;
+
+procedure TCameraSnapTests.TestTheEaseStartsAndLandsExactly;
+var
+  From_, Target, Step: TCameraOrigin;
+begin
+  From_.X := 100;
+  From_.Y := 200;
+  Target.X := 1176;
+  Target.Y := 24;
+  Step := CameraSnapOrigin(From_, Target, 0, CameraSnapSteps);
+  Expect<Double>(Step.X).ToBe(From_.X);
+  Expect<Double>(Step.Y).ToBe(From_.Y);
+  // Exactly, not nearly: the ease has to land on the corner, or the
+  // window ends up a fraction of a point out of position for ever.
+  Step := CameraSnapOrigin(From_, Target, CameraSnapSteps, CameraSnapSteps);
+  Expect<Double>(Step.X).ToBe(Target.X);
+  Expect<Double>(Step.Y).ToBe(Target.Y);
+  // And a tick that somehow overran still lands on it rather than past.
+  Step := CameraSnapOrigin(From_, Target, CameraSnapSteps + 5,
+    CameraSnapSteps);
+  Expect<Double>(Step.X).ToBe(Target.X);
+end;
+
+procedure TCameraSnapTests.TestTheEaseIsMonotonicAndSlowAtBothEnds;
+var
+  From_, Target, Step, Previous: TCameraOrigin;
+  I: Integer;
+  FirstJump, MiddleJump: Double;
+begin
+  From_.X := 0;
+  From_.Y := 0;
+  Target.X := 1200;
+  Target.Y := 0;
+  Previous := From_;
+  for I := 1 to CameraSnapSteps do
+  begin
+    Step := CameraSnapOrigin(From_, Target, I, CameraSnapSteps);
+    Expect<Boolean>(Step.X >= Previous.X).ToBe(True);
+    Expect<Boolean>(Step.X <= Target.X).ToBe(True);
+    Previous := Step;
+  end;
+  // Smoothstep, not a straight line: the first step is much smaller than
+  // one in the middle, which is what stops the move looking mechanical.
+  FirstJump := CameraSnapOrigin(From_, Target, 1, CameraSnapSteps).X;
+  MiddleJump := CameraSnapOrigin(From_, Target, CameraSnapSteps div 2 + 1,
+    CameraSnapSteps).X
+    - CameraSnapOrigin(From_, Target, CameraSnapSteps div 2,
+    CameraSnapSteps).X;
+  Expect<Boolean>(FirstJump < MiddleJump).ToBe(True);
+end;
+
+procedure TCameraSnapTests.TestADegenerateStepCountArrives;
+var
+  From_, Target, Step: TCameraOrigin;
+begin
+  From_.X := 10;
+  From_.Y := 20;
+  Target.X := 900;
+  Target.Y := 40;
+  Step := CameraSnapOrigin(From_, Target, 0, 0);
+  Expect<Double>(Step.X).ToBe(Target.X);
+  Expect<Double>(Step.Y).ToBe(Target.Y);
+end;
+
+{ TCameraDockTests }
+
+procedure TCameraDockTests.SetupTests;
+begin
+  Test('a region flips from top-left display points into screen space',
+    TestARegionFlipsIntoScreenSpace);
+  Test('a region on a screen with a non-zero origin flips too',
+    TestARegionOnASecondScreenFlipsToo);
+  Test('the dock corner is inside the region, not on the screen',
+    TestTheDockCornerIsInsideTheRegion);
+  Test('a region smaller than the camera docks as far in as it fits',
+    TestATinyRegionDocksAsFarInAsItFits);
+  Test('the inset frame agrees with the snap about where the corner is',
+    TestTheInsetMatchesTheSnapCorner);
+  Test('an inset bigger than the rectangle leaves it alone',
+    TestAnInsetTooBigForTheRectLeavesItAlone);
+end;
+
+procedure TCameraDockTests.TestARegionFlipsIntoScreenSpace;
+var
+  Region: TCaptureRegion;
+  Rect: TCameraRect;
+begin
+  Region.Left := 100;
+  Region.Top := 50;
+  Region.Width := 800;
+  Region.Height := 600;
+  Rect := RegionScreenRect(Region, CameraRect(0, 0, 1440, 900));
+  Expect<Double>(Rect.X).ToBe(100);
+  // 900 - (50 + 600): the region's bottom edge measured up from the
+  // screen's bottom, which is where AppKit counts from.
+  Expect<Double>(Rect.Y).ToBe(250);
+  Expect<Double>(Rect.Width).ToBe(800);
+  Expect<Double>(Rect.Height).ToBe(600);
+end;
+
+procedure TCameraDockTests.TestARegionOnASecondScreenFlipsToo;
+var
+  Region: TCaptureRegion;
+  Rect: TCameraRect;
+begin
+  Region.Left := 10;
+  Region.Top := 10;
+  Region.Width := 400;
+  Region.Height := 300;
+  // A display below and to the right of the main one.
+  Rect := RegionScreenRect(Region, CameraRect(1440, -1080, 1920, 1080));
+  Expect<Double>(Rect.X).ToBe(1450);
+  Expect<Double>(Rect.Y).ToBe(-1080 + 1080 - 310);
+end;
+
+// The whole point of docking: the picture-in-picture ends up composited
+// into the recording, which means inside the recorded rectangle and not
+// merely near it.
+procedure TCameraDockTests.TestTheDockCornerIsInsideTheRegion;
+var
+  Region: TCaptureRegion;
+  Rect: TCameraRect;
+  Camera, Docked: TCameraOrigin;
+  Size: TCameraSize;
+begin
+  Region.Left := 200;
+  Region.Top := 100;
+  Region.Width := 1000;
+  Region.Height := 700;
+  Rect := RegionScreenRect(Region, CameraRect(0, 0, 1440, 900));
+  Size := CameraWindowSize(csRectangle);
+  // The camera was parked at the screen's bottom right, outside the
+  // region entirely.
+  Camera := DefaultCameraOrigin(Size, CameraRect(0, 0, 1440, 875));
+  Docked := NearestCameraCorner(Camera, Size, Rect, CameraWindowMargin);
+  Expect<Double>(Docked.X)
+    .ToBe(Rect.X + Rect.Width - Size.Width - CameraWindowMargin);
+  Expect<Double>(Docked.Y).ToBe(Rect.Y + CameraWindowMargin);
+  Expect<Boolean>(Docked.X >= Rect.X).ToBe(True);
+  Expect<Boolean>(Docked.Y >= Rect.Y).ToBe(True);
+  Expect<Boolean>(Docked.X + Size.Width <= Rect.X + Rect.Width).ToBe(True);
+  Expect<Boolean>(Docked.Y + Size.Height <= Rect.Y + Rect.Height).ToBe(True);
+end;
+
+// "As far in as it fits", not "inside": a 200x160 region cannot contain a
+// 240x180 window at all, so the window overhangs by design. Lining its
+// corner up with the region's is the most of it that can be in shot.
+procedure TCameraDockTests.TestATinyRegionDocksAsFarInAsItFits;
+var
+  Region: TCaptureRegion;
+  Rect: TCameraRect;
+  Camera, Docked: TCameraOrigin;
+  Size: TCameraSize;
+begin
+  Region.Left := 400;
+  Region.Top := 400;
+  Region.Width := 200;
+  Region.Height := 160;
+  Rect := RegionScreenRect(Region, CameraRect(0, 0, 1440, 900));
+  Size := CameraWindowSize(csRectangle);
+  Camera.X := 1200;
+  Camera.Y := 40;
+  Docked := NearestCameraCorner(Camera, Size, Rect, CameraWindowMargin);
+  // No room for the window and the margins both; the region's own origin
+  // is as far inside as it gets.
+  Expect<Double>(Docked.X).ToBe(Rect.X);
+  Expect<Double>(Docked.Y).ToBe(Rect.Y);
+  // And this is the case that really does hang out of the region — said
+  // plainly here so the name is not read as a promise it cannot keep.
+  Expect<Boolean>(Docked.X + Size.Width > Rect.X + Rect.Width).ToBe(True);
+  Expect<Boolean>(Docked.Y + Size.Height > Rect.Y + Rect.Height).ToBe(True);
+end;
+
+// SetShape clamps into an inset frame while docked; the drop snaps to a
+// margin-inset corner. The two have to agree, or a shape change nudges
+// the window off the corner it had just snapped to.
+procedure TCameraDockTests.TestTheInsetMatchesTheSnapCorner;
+var
+  Rect, Inset: TCameraRect;
+  Size: TCameraSize;
+  Far_, Snapped, Clamped: TCameraOrigin;
+begin
+  Rect := CameraRect(200, 100, 1000, 700);
+  Size := CameraWindowSize(csRectangle);
+  Inset := InsetCameraRect(Rect, CameraWindowMargin);
+  Expect<Double>(Inset.X).ToBe(200 + CameraWindowMargin);
+  Expect<Double>(Inset.Y).ToBe(100 + CameraWindowMargin);
+  Expect<Double>(Inset.Width).ToBe(1000 - 2 * CameraWindowMargin);
+  // A window shoved past the far corner: clamping into the inset frame
+  // lands on the same origin the snap would pick.
+  Far_.X := 5000;
+  Far_.Y := 5000;
+  Snapped := NearestCameraCorner(Far_, Size, Rect, CameraWindowMargin);
+  Clamped := ClampCameraOrigin(Far_, Size, Inset);
+  Expect<Double>(Clamped.X).ToBe(Snapped.X);
+  Expect<Double>(Clamped.Y).ToBe(Snapped.Y);
+end;
+
+procedure TCameraDockTests.TestAnInsetTooBigForTheRectLeavesItAlone;
+var
+  Inset: TCameraRect;
+begin
+  // 40 points wide with a 24 point margin each side would invert; the
+  // axis is left as it was, the same give-up-on-the-margins rule
+  // NearestCameraCorner uses.
+  Inset := InsetCameraRect(CameraRect(10, 20, 40, 500), CameraWindowMargin);
+  Expect<Double>(Inset.X).ToBe(10);
+  Expect<Double>(Inset.Width).ToBe(40);
+  Expect<Double>(Inset.Y).ToBe(20 + CameraWindowMargin);
+  Expect<Double>(Inset.Height).ToBe(500 - 2 * CameraWindowMargin);
 end;
 
 { TExportTests }
@@ -846,6 +1406,10 @@ begin
   TestRunnerProgram.AddSuite(TSelectionTests.Create('selection geometry'));
   TestRunnerProgram.AddSuite(TErrorTitleTests.Create('ErrorMenuTitle'));
   TestRunnerProgram.AddSuite(TCameraTests.Create('camera window placement'));
+  TestRunnerProgram.AddSuite(TCameraShapeTests.Create('camera shape'));
+  TestRunnerProgram.AddSuite(TCameraSnapTests.Create('camera corner snap'));
+  TestRunnerProgram.AddSuite(TCameraDockTests.Create(
+    'camera docking into a region'));
   TestRunnerProgram.AddSuite(TExportTests.Create('one-click GIF export'));
   TestRunnerProgram.AddSuite(TWindowMenuTests.Create('Record Window submenu'));
   TestRunnerProgram.Run;
