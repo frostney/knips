@@ -373,6 +373,24 @@ function CMTimeGetSeconds(
   time: CMTime
 ): Float64; external name '_CMTimeGetSeconds';
 
+{ The clock ScreenCaptureKit stamps its sample buffers against. The event
+  sidecar (Knips.Recording.Sidecar) samples the cursor on the main thread
+  and has to place those samples on the movie's own timeline; reading the
+  same clock the frame PTS comes from is what makes that exact rather than
+  approximate — no wall clock, no elapsed-time estimate, no drift. }
+type
+  CMClockRef = Pointer;
+
+function CMClockGetHostTimeClock: CMClockRef;
+  external name '_CMClockGetHostTimeClock';
+
+function CMClockGetTime(
+  clock: CMClockRef
+): CMTime; external name '_CMClockGetTime';
+
+{ Seconds on the host clock, right now. }
+function HostClockSeconds: Double;
+
 function CMTimeCompare(
   time1: CMTime;
   time2: CMTime
@@ -391,6 +409,39 @@ function CVPixelBufferIsPlanar(
   pixelBuffer: CVPixelBufferRef
 ): Boolean; external name '_CVPixelBufferIsPlanar';
 
+{ Audio format inspection, for the silence check in
+  Knips.Export.MovieWriter: a track that was enabled and came out silent is
+  the failure nobody notices until the take is unrepeatable, and reading
+  the samples is the only way to know. The format description is what says
+  whether the bytes in the block buffer are 32-bit floats — nothing guesses
+  at a layout it has not been told. }
+type
+  AudioStreamBasicDescription = record
+    mSampleRate: Float64;
+    mFormatID: UInt32;
+    mFormatFlags: UInt32;
+    mBytesPerPacket: UInt32;
+    mFramesPerPacket: UInt32;
+    mBytesPerFrame: UInt32;
+    mChannelsPerFrame: UInt32;
+    mBitsPerChannel: UInt32;
+    mReserved: UInt32;
+  end;
+  PAudioStreamBasicDescription = ^AudioStreamBasicDescription;
+
+const
+  { 'lpcm' — kAudioFormatLinearPCM from CoreAudioBaseTypes.h. }
+  kKnipsAudioFormatLinearPCM = $6C70636D;
+  { kAudioFormatFlagIsFloat. }
+  kKnipsAudioFormatFlagIsFloat = 1;
+
+{ Returns nil for a description that is not audio. The pointer belongs to
+  the format description and must not be freed. }
+function CMAudioFormatDescriptionGetStreamBasicDescription(
+  desc: CMFormatDescriptionRef
+): PAudioStreamBasicDescription;
+  external name '_CMAudioFormatDescriptionGetStreamBasicDescription';
+
 { ======== Helper to create CMTime inline ======== }
 function MakeCMTime(value: cint64; timescale: cint32): CMTime;
 
@@ -406,6 +457,11 @@ begin
   Result.timescale := timescale;
   Result.flags := kCMTimeFlags_Valid;
   Result.epoch := 0;
+end;
+
+function HostClockSeconds: Double;
+begin
+  Result := CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock));
 end;
 
 {$ENDIF}

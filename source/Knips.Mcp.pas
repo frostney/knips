@@ -396,6 +396,14 @@ begin
   if (FSession = nil) or not FSession.Capturing then
     Exit(MCPStructuredResult('not recording',
       TJSONObject.Create(['recording', False])));
+  // One pointer sample into the event sidecar, because this is the only
+  // moment an MCP recording has a main thread to sample on: the stdio
+  // transport is a blocking read/handle/write loop, so between tool calls
+  // nothing here runs at all. An MCP take's pointer track is therefore as
+  // dense as the client's polling and no denser — the start, one per
+  // record_status, and the stop. Documented in docs/event-sidecar.md
+  // rather than hidden, and it is why the samples carry their own times.
+  FSession.SampleMetadata;
   Elapsed := (Now - FStartedAt) * SecsPerDay;
   Statistics := FSession.LiveStatistics;
 

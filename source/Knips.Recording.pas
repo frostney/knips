@@ -20,6 +20,8 @@ interface
 {$modeswitch objectivec2}
 
 uses
+  BaseUnix,
+  DateUtils,
   SysUtils,
 
   CocoaAll,
@@ -31,6 +33,8 @@ uses
   Knips.Options,
   Knips.Recording.CursorMath,
   Knips.Recording.CursorOverlay,
+  Knips.Recording.LiveMath,
+  Knips.Recording.Sidecar,
   MacOSAll;
 
 type
@@ -56,6 +60,16 @@ type
     DroppedMicrophoneEarly: Int64;
     DroppedMicrophoneStalled: Int64;
     FailedMicrophoneAppends: Int64;
+    // Was there actually any sound? The loudest sample on each track and
+    // the number of buffers that was measured over
+    // (Knips.Export.MovieWriter). A track that was enabled, arrived, and
+    // was silence throughout is the failure that is invisible until the
+    // take cannot be repeated — Knips.Options.AudioSilenceWarning turns
+    // these into the sentence to show.
+    AudioPeak: Double;
+    AudioInspected: Int64;
+    MicrophonePeak: Double;
+    MicrophoneInspected: Int64;
     // Live source-rectangle updates (Zoom on Click / Follow Mouse): how
     // many were handed to ScreenCaptureKit, how many it completed, how
     // many it refused, and the last NSError code it refused with. All
@@ -72,6 +86,12 @@ type
     // it is the reason these are counted rather than assumed — the
     // compositor runs on a thread with nowhere to report anything.
     BigCursor: Boolean;
+    // Whether this recording deliberately left the pointer out for an
+    // export to draw back (Knips.Export.CursorEffect). Mutually exclusive
+    // with BigCursor, and the reason the sidecar's header says "smooth"
+    // rather than "none": the movie is cursorless on purpose and the
+    // pointer is waiting in the sidecar.
+    SmoothCursor: Boolean;
     // Why the drawn pointer was given up on, when it was; '' otherwise.
     // Never a reason to fail the recording — the file is written with
     // the ordinary system cursor instead.
@@ -80,6 +100,20 @@ type
     CursorOffFrame: Int64;
     CursorRefused: Int64;
     DurationSeconds: Double;
+    // The event sidecar (Knips.Recording.Sidecar): where it went, how many
+    // pointer samples reached it, and why it was given up on if it was.
+    // A sidecar failure is never a reason to fail a recording — the movie
+    // is the deliverable and the sidecar is the note beside it — so the
+    // reason is reported rather than raised.
+    SidecarPath: string;
+    SidecarSamples: Int64;
+    SidecarError: string;
+    // Host-clock seconds of the movie's first frame, and of the stop. The
+    // two together are what an alignment check measures drift against:
+    // the movie's own duration (last PTS minus first PTS) and the elapsed
+    // host time between these must agree, because they are the same clock.
+    AnchorHostSeconds: Double;
+    StopHostSeconds: Double;
   end;
 
   TRecordingSession = class
@@ -102,8 +136,26 @@ type
     // it is what the cursor's position is measured against either way.
     FBaseRect: CGRect;
     FDisplayID: UInt32;
+    // The event sidecar and the state SampleMetadata needs between ticks.
+    // All main-thread: the capture queue never sees any of it.
+    FSidecar: TSidecarWriter;
+    FSidecarButtons: Integer;
+    FHasSidecarButtons: Boolean;
+    // The recorded display's origin in the global point space
+    // CGEventGetLocation answers in, so a pointer position becomes this
+    // display's own points by subtraction. Both zero for a window target,
+    // where the samples stay in global points (see the sidecar header's
+    // "target" field).
+    FDisplayOriginX: Double;
+    FDisplayOriginY: Double;
     procedure HandleSample(ASampleBuffer: CMSampleBufferRef;
       AKind: TSampleKind);
+    procedure OpenSidecar;
+    procedure CloseSidecar;
+    // The rectangle ScreenCaptureKit is reading right now, in the recorded
+    // display's own top-left points: what the live effects last got
+    // through, or the base rectangle when nothing has moved it.
+    function CurrentSourceRect: CGRect;
     function ResolveFilter(const AContent: TShareableContent;
       out AFilter: SCContentFilter; out AGeometry: TStreamGeometry;
       out AError: string): Boolean;
@@ -165,6 +217,20 @@ type
     // this is the mid-recording view, which is what tells a caller whether
     // its rectangles are getting through at all.
     function LiveUpdatesSent: Int64;
+    // One pointer sample into the event sidecar. Main thread only, and
+    // called by whoever owns the run loop while the recording runs: the
+    // CLI's own loop, and the menu-bar app's 30 Hz timer. Cheap enough to
+    // call at that rate and harmless to call at any other — the samples
+    // carry their own times, so a slow or irregular caller produces a
+    // sparser track rather than a wrong one.
+    //
+    // Deliberately not driven from inside the session by a timer of its
+    // own: this program has one main thread and two very different run
+    // loops on it, and a third timer would be a third thing to invalidate
+    // on every failure path.
+    procedure SampleMetadata;
+    // Where the event sidecar is being written, or '' when there is none.
+    function SidecarPath: string;
 
     // True between a successful StartCapture and FinishCapture.
     property Capturing: Boolean read FCapturing;
@@ -183,8 +249,12 @@ implementation
 {$IFDEF DARWIN}
 
 const
-  RunLoopSliceSeconds = 0.25;
-  ProgressEverySlices = 8;
+  // The CLI's run loop turns at the sidecar's sample rate rather than the
+  // quarter-second it used before a recording had events to record. The
+  // slice is the sampling clock, so it is the sampling rate that sets it;
+  // the progress line still lands every two seconds, counted in slices.
+  RunLoopSliceSeconds = 1 / DefaultSidecarSampleHz;
+  ProgressEverySlices = 2 * DefaultSidecarSampleHz;
 
 { TRecordingSession }
 
@@ -201,6 +271,10 @@ begin
   FreeAndNil(FStream);
   FreeAndNil(FCursorOverlay);
   FreeAndNil(FWriter);
+  // After the stream, for the same reason and one more: a session freed
+  // without FinishCapture (a failed start, a quit) still gets its sidecar
+  // flushed and closed rather than losing the last buffer.
+  CloseSidecar;
   ReleaseFilter;
   inherited Destroy;
 end;
@@ -380,7 +454,14 @@ begin
   // cannot quietly bring the system cursor back mid-recording.
   FReport.BigCursor := ResolveBigCursor(FOptions.TargetKind,
     FOptions.BigCursor);
-  AGeometry.ShowsCursor := FOptions.ShowsCursor and not FReport.BigCursor;
+  // Smooth Cursor suppresses the pointer for the opposite reason: nothing
+  // draws it here, and the export puts it back from the sidecar's track.
+  // The two are refused together by validation, so this can only turn the
+  // pointer off on top of a Big Cursor that is already off.
+  FReport.SmoothCursor := ResolveSmoothCursor(FOptions.TargetKind,
+    FOptions.SmoothCursor);
+  AGeometry.ShowsCursor := FOptions.ShowsCursor and not FReport.BigCursor
+    and not FReport.SmoothCursor;
   AGeometry.CapturesAudio := AudioModeCapturesSystem(FOptions.AudioMode);
   AGeometry.AudioSampleRate := FOptions.AudioSampleRate;
   AGeometry.AudioChannelCount := FOptions.AudioChannelCount;
@@ -410,6 +491,9 @@ begin
   begin
     CFRunLoopRunInMode(kCFRunLoopDefaultMode, RunLoopSliceSeconds, False);
     Inc(Slice);
+    // The CLI's event logger. The menu-bar app calls the same method from
+    // its own 30 Hz timer; neither has a timer of its own for it.
+    SampleMetadata;
     // One rejected buffer fails AVAssetWriter for good; keeping the
     // stream running would record minutes into a dead file. Abort as
     // soon as the capture threads have flagged it.
@@ -524,7 +608,212 @@ begin
   end;
 
   FCapturing := True;
+  // Last, once the capture is really running: a start that failed leaves
+  // no half-written sidecar next to a movie that does not exist, and the
+  // header can be filled from a geometry nothing will change again.
+  OpenSidecar;
+  // The first sample before the caller's first tick, so a recording
+  // stopped almost immediately still has a track rather than an empty one.
+  SampleMetadata;
   Result := True;
+end;
+
+function TRecordingSession.CurrentSourceRect: CGRect;
+begin
+  if (FStream <> nil) and FStream.HasSentRect then
+    Result := FStream.LastSentRect
+  else
+    Result := FBaseRect;
+end;
+
+function TRecordingSession.SidecarPath: string;
+begin
+  if FSidecar = nil then
+    Result := ''
+  else
+    Result := FSidecar.Path;
+end;
+
+// The header is everything about the recording that the samples cannot
+// say for themselves. Written once, before the first frame can arrive; the
+// anchor that makes the times mean anything follows as soon as the writer
+// has started the movie's session (SampleMetadata).
+procedure TRecordingSession.OpenSidecar;
+var
+  Header: TSidecarHeader;
+  Bounds: CGRect;
+begin
+  FSidecar := TSidecarWriter.Create(SidecarPathFor(FOptions.OutputPath));
+  FReport.SidecarPath := FSidecar.Path;
+  if FSidecar.Failed then
+  begin
+    FReport.SidecarError := FSidecar.LastError;
+    FreeAndNil(FSidecar);
+    FReport.SidecarPath := '';
+    Exit;
+  end;
+
+  // Global point space, as CGEventGetLocation answers in. Zero for a
+  // window target, whose FDisplayID was never resolved: those samples stay
+  // global on purpose, and the header says so.
+  FDisplayOriginX := 0;
+  FDisplayOriginY := 0;
+  Header := Default(TSidecarHeader);
+  if FDisplayID <> 0 then
+  begin
+    Bounds := CGDisplayBounds(FDisplayID);
+    FDisplayOriginX := Bounds.origin.x;
+    FDisplayOriginY := Bounds.origin.y;
+    Header.DisplayWidth := Bounds.size.width;
+    Header.DisplayHeight := Bounds.size.height;
+  end;
+  Header.Version := SidecarFormatVersion;
+  Header.KnipsVersion := KnipsVersion;
+  // Darwin-only separator: FPC's ExtractFileName also treats a backslash
+  // as one, so a movie legitimately called `a\b.mp4` would be recorded in
+  // the sidecar as `b.mp4` and recovery would look for a file that does
+  // not exist.
+  Header.MovieName := Copy(FOptions.OutputPath,
+    LastDelimiter('/', FOptions.OutputPath) + 1, MaxInt);
+  Header.CreatedUtc := FormatDateTime('yyyy-mm-dd"T"hh:nn:ss"Z"',
+    LocalTimeToUniversal(Now));
+  // The one field the recovery pass needs: a sidecar with no trailer is
+  // both a crashed take and a take in progress, and this is what tells
+  // them apart (Knips.Recording.Recovery).
+  Header.ProcessID := FpGetPid;
+  Header.TargetKind := FOptions.TargetKind;
+  Header.PixelWidth := FGeometry.PixelWidth;
+  Header.PixelHeight := FGeometry.PixelHeight;
+  Header.Scale := FReport.Scale;
+  Header.FramesPerSecond := FGeometry.FramesPerSecond;
+  Header.SampleHz := DefaultSidecarSampleHz;
+  Header.DisplayID := FDisplayID;
+  Header.BaseX := FBaseRect.origin.x;
+  Header.BaseY := FBaseRect.origin.y;
+  Header.BaseWidth := FBaseRect.size.width;
+  Header.BaseHeight := FBaseRect.size.height;
+  // Three states, and the movie looks different in each: Big Cursor drew
+  // its own pointer, ScreenCaptureKit drew the system one, or nothing did.
+  if FReport.BigCursor then
+    Header.CursorRender := scrBaked
+  else if FReport.SmoothCursor then
+    Header.CursorRender := scrSmooth
+  else if FGeometry.ShowsCursor then
+    Header.CursorRender := scrSystem
+  else
+    Header.CursorRender := scrNone;
+  // What the capture itself did, which is what an export can no longer
+  // choose: the live effects move ScreenCaptureKit's own source
+  // rectangle, so a take that zoomed is zoomed in its pixels.
+  //
+  // Resolved here as well as by the caller, so the invariant "these are
+  // what the capture DID" is local to this unit and cannot be broken by a
+  // caller passing its preferences straight through. ResolveLiveEffects
+  // is the same function the app asks, and it answers the same way.
+  ResolveLiveEffects(FOptions.TargetKind, FOptions.HasRegion,
+    FOptions.LiveZoomOnClick, FOptions.LiveFollowMouse,
+    Header.BakedZoomOnClick, Header.BakedFollowMouse);
+  Header.BakedWindowFollow := FOptions.LiveWindowFollow;
+  Header.AudioMode := FOptions.AudioMode;
+  FSidecar.WriteHeader(Header);
+end;
+
+procedure TRecordingSession.CloseSidecar;
+begin
+  if FSidecar = nil then
+    Exit;
+  FSidecar.Close;
+  FReport.SidecarSamples := FSidecar.SampleCount;
+  if FSidecar.Failed and (FReport.SidecarError = '') then
+    FReport.SidecarError := FSidecar.LastError;
+  FreeAndNil(FSidecar);
+end;
+
+procedure TRecordingSession.SampleMetadata;
+var
+  Event: CGEventRef;
+  Location: CGPoint;
+  Moment: Double;
+  Statistics: TMovieWriterStatistics;
+  Sample: TSidecarSample;
+  Edge: TSidecarButtonEvent;
+  Source: CGRect;
+  Buttons: Integer;
+begin
+  // Main thread. Nothing here may be reached from the capture queue: it
+  // allocates, it writes to a file, and it sends no Objective-C message
+  // only by luck rather than by rule.
+  if (FSidecar = nil) or not FCapturing then
+    Exit;
+
+  // The anchor, as soon as there is one. AVAssetWriter starts the movie's
+  // session at the first appended frame's presentation stamp, so until a
+  // frame has arrived there is no timeline for an event to sit on — and
+  // once one has, this never changes again.
+  if not FSidecar.AnchorWritten and (FWriter <> nil) then
+  begin
+    Statistics := FWriter.Statistics;
+    if Statistics.SessionStarted then
+    begin
+      FSidecar.WriteAnchor(Statistics.FirstSampleSeconds);
+      FReport.AnchorHostSeconds := Statistics.FirstSampleSeconds;
+    end;
+  end;
+
+  // The clock first, then the position: the sample's time is then at or a
+  // few microseconds before the instant the position was read, which is
+  // the direction that makes an interpolation between two samples cover
+  // the movement rather than fall short of it.
+  Moment := HostClockSeconds;
+  Event := CGEventCreate(nil);
+  if Event = nil then
+    Exit;
+  Location := CGEventGetLocation(Event);
+  CFRelease(Event);
+
+  // CGEventSourceButtonState, not an event tap: a tap would need the
+  // Input Monitoring grant, and this recorder asks for Screen Recording
+  // and (for the camera) Camera and nothing else. The cost is stated
+  // rather than hidden — a press and release inside one sample period,
+  // about 33 ms, is not seen at all, and the edge times this produces are
+  // accurate to one period. Only the left button is read: the right one
+  // opens a context menu, which is not a gesture anybody wants recorded
+  // as a click on the content.
+  Buttons := 0;
+  if CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState,
+    kCGMouseButtonLeft) <> 0 then
+    Buttons := SidecarLeftButton;
+
+  Source := CurrentSourceRect;
+  Sample := Default(TSidecarSample);
+  Sample.Time := Moment;
+  Sample.X := Location.x - FDisplayOriginX;
+  Sample.Y := Location.y - FDisplayOriginY;
+  Sample.Buttons := Buttons;
+  Sample.SourceX := Source.origin.x;
+  Sample.SourceY := Source.origin.y;
+  Sample.SourceWidth := Source.size.width;
+  Sample.SourceHeight := Source.size.height;
+  FSidecar.WriteSample(Sample);
+
+  // Edge-triggered, and written as its own record: a reader looking for
+  // clicks should not have to diff a thousand samples to find three of
+  // them. The level is in every sample as well, so both readings are
+  // available. The first tick establishes the level without inventing an
+  // edge — whatever the button was doing when the recording started is
+  // not a click into it.
+  if FHasSidecarButtons and (Buttons <> FSidecarButtons) then
+  begin
+    Edge := Default(TSidecarButtonEvent);
+    Edge.Time := Moment;
+    Edge.X := Sample.X;
+    Edge.Y := Sample.Y;
+    Edge.Button := 0;
+    Edge.Down := (Buttons and SidecarLeftButton) <> 0;
+    FSidecar.WriteButton(Edge);
+  end;
+  FSidecarButtons := Buttons;
+  FHasSidecarButtons := True;
 end;
 
 function TRecordingSession.UpdateSourceRect(const ARect: CGRect): Boolean;
@@ -576,6 +865,7 @@ end;
 function TRecordingSession.FinishCapture(out AError: string): Boolean;
 var
   Statistics: TMovieWriterStatistics;
+  Trailer: TSidecarTrailer;
 begin
   Result := False;
   AError := '';
@@ -584,6 +874,10 @@ begin
     AError := 'no recording is running';
     Exit;
   end;
+  // One last pointer sample while the recording is still running, so the
+  // track reaches the end of the movie rather than stopping at the
+  // caller's last tick.
+  SampleMetadata;
   FCapturing := False;
 
   // Stream first, then writer: an append must never race the finish.
@@ -621,9 +915,33 @@ begin
   FReport.DroppedMicrophoneEarly := Statistics.DroppedMicrophoneEarly;
   FReport.DroppedMicrophoneStalled := Statistics.DroppedMicrophoneStalled;
   FReport.FailedMicrophoneAppends := Statistics.FailedMicrophoneAppends;
+  FReport.AudioPeak := Statistics.AudioPeak;
+  FReport.AudioInspected := Statistics.AudioInspected;
+  FReport.MicrophonePeak := Statistics.MicrophonePeak;
+  FReport.MicrophoneInspected := Statistics.MicrophoneInspected;
   FReport.DurationSeconds := Statistics.Duration;
 
+  // The trailer, and the second half of the drift measurement: the host
+  // time at the stop against the movie's own duration. Both come from the
+  // clock ScreenCaptureKit stamps frames with, so the two must agree to
+  // within the gap between the last frame and this line.
+  FReport.StopHostSeconds := HostClockSeconds;
+
   Result := FWriter.Finish(AError);
+  // The trailer goes AFTER the finish, and only when it succeeded. The
+  // trailer is what says "this take is complete"; writing it before the
+  // movie was actually finalised would mark a take that then failed to
+  // finish as one recovery must never look at again.
+  if Result and (FSidecar <> nil) then
+  begin
+    Trailer := Default(TSidecarTrailer);
+    Trailer.Time := FReport.StopHostSeconds;
+    Trailer.Frames := Statistics.AppendedFrames;
+    Trailer.DurationSeconds := Statistics.Duration;
+    Trailer.Samples := FSidecar.SampleCount;
+    FSidecar.WriteTrailer(Trailer);
+  end;
+  CloseSidecar;
   ReleaseFilter;
 end;
 

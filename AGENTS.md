@@ -74,6 +74,10 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | `source/Knips.App.Live.pas` | Zoom on Click / Follow Mouse: a main-thread animator on the app's 30 Hz timer that moves the stream's `sourceRect`, the recording border and a docked camera |
 | `source/Knips.App.Hotkey.pas` | The global ⌘⇧2 stop hotkey: Carbon `RegisterEventHotKey` + an application-target event handler, no TCC grant |
 | `source/Knips.Recording.LiveMath.pas` | Platform-neutral live-effect arithmetic: rect clamping, dead zone, smoothstep easing, which effects a target can have (tested) |
+| `source/Knips.Recording.Sidecar.pas` | The event sidecar: the public JSON Lines format for a take's pointer track, clicks, geometry and what was baked into its pixels (tested; [docs/event-sidecar.md](docs/event-sidecar.md)) |
+| `source/Knips.Recording.Recovery.pas` | Finishes off a take whose process died: an unfinished sidecar plus a dead pid, then a passthrough re-mux |
+| `source/Knips.Export.CursorEffect.pas` | The pointer drawn back into a GIF/APNG at export time from the sidecar's smoothed track |
+| `source/Knips.Export.SizeEstimate.pas` | Pre-export size estimate from the source movie's own density, and the in-flight projection (tested) |
 | `source/Knips.Recording.CursorMath.pas` | Platform-neutral Big Cursor arithmetic: screen point → frame pixel under a live sourceRect, clipped sprite placement, the premultiplied BGRA blit, sprite metrics (tested) |
 | `source/Knips.Recording.CursorOverlay.pas` | Big Cursor: the arrow sprite rendered once on the main thread, composited into each frame's own pixels on the capture queue |
 | `source/Knips.App.Border.pas` | The frame around a recorded region; runtime-built `KnipsBorderView` |

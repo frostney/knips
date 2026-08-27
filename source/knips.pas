@@ -5,9 +5,11 @@ program knips;
 //   knips app                   menu-bar app: drag a region, click to stop
 //   knips record --out=demo.mp4 [--display=N | --window=ID] [--rect=x,y,w,h]
 //                 [--fps=30] [--scale=auto|1|2] [--no-cursor] [--bitrate=N]
-//                 [--audio=none|system|mic|both] [--big-cursor]
+//                 [--audio=none|system|mic|both]
+//                 [--big-cursor | --smooth-cursor]
 //   knips export --in=demo.mp4 --out=demo.gif|.apng [--fps=20] [--width=N]
 //                 [--trim=start,end] [--no-dither]
+//                 [--cursor=as-recorded|none|smooth|big]
 //   knips export --in=demo.mp4 --out=cut.mp4 --trim=1.5,3.5
 //                               passthrough trim: no decode, no re-encode
 //   knips displays              list capturable displays
@@ -47,9 +49,12 @@ uses
   Knips.Export.MovieTrim,
   Knips.Export.MovieWriter,
   Knips.Export.Pipeline,
+  Knips.Export.SizeEstimate,
   Knips.ObjC.Runtime,
   Knips.Recording,
   Knips.Recording.CursorOverlay,
+  Knips.Recording.Recovery,
+  Knips.Recording.Sidecar,
   {$ENDIF}
   Knips.Mcp,
   Knips.Options;
@@ -123,6 +128,7 @@ begin
   ARecording.BitRate := IntegerValue(AOptions, 'bitrate', 0);
   ARecording.ShowsCursor := not FlagPresent(AOptions, 'no-cursor');
   ARecording.BigCursor := FlagPresent(AOptions, 'big-cursor');
+  ARecording.SmoothCursor := FlagPresent(AOptions, 'smooth-cursor');
 
   Scale := LowerCase(StringValue(AOptions, 'scale', 'auto'));
   if Scale = 'auto' then
@@ -168,6 +174,13 @@ begin
     DefaultGifFramesPerSecond);
   AExport.Width := IntegerValue(AOptions, 'width', GifWidthFromSource);
   AExport.Dither := not FlagPresent(AOptions, 'no-dither');
+  // The export-effects list, of which the cursor is the first member.
+  if not ParseExportCursorMode(StringValue(AOptions, 'cursor', ''),
+    AExport.Effects.Cursor) then
+  begin
+    AError := '--cursor must be as-recorded, none, smooth, or big';
+    Exit;
+  end;
 
   Trim := StringValue(AOptions, 'trim', '');
   if Trim <> '' then
@@ -209,6 +222,27 @@ begin
   FpSigAction(SIGTERM, @Action, @Previous);
 end;
 
+// The crash-recovery pass, run at every start. Reported on standard
+// error, not standard output: it is about a different recording than the
+// one the caller asked for, and a script parsing this command's output
+// must not suddenly find a line it has never seen.
+procedure RecoverTakesBeside(const AOutputPath: string);
+var
+  Takes: TRecoveredTakes;
+  Summary: string;
+begin
+  if RecoverOrphanedTakes(ExtractFileDir(ExpandFileName(AOutputPath)),
+    Takes) = 0 then
+    Exit;
+  Summary := DescribeRecoveredTakes(Takes);
+  if Summary = '' then
+    Exit;
+  WriteLn(ErrOutput, ProgramName, ' record: an earlier recording did not '
+    + 'finish; it has been recovered:');
+  WriteLn(ErrOutput, Summary);
+  Flush(ErrOutput);
+end;
+
 function HandleRecord(const APositionals: TStringList;
   const AOptions: TOptionArray): Integer;
 var
@@ -217,12 +251,17 @@ var
   Error: string;
   Audio: string;
   Cursor: string;
+  Silence: string;
 begin
   if not BuildRecordingOptions(AOptions, Recording, Error) then
   begin
     WriteLn(ProgramName, ' record: ', Error);
     Exit(ExitUsage);
   end;
+  // Before anything else: a take whose process died is finished off now,
+  // in the directory this one is about to write into. It is one directory
+  // listing when nothing is wrong, which is the usual case.
+  RecoverTakesBeside(Recording.OutputPath);
   InstallStopSignals;
   Session := TRecordingSession.Create(Recording);
   try
@@ -252,6 +291,8 @@ begin
     // was somewhere this recording does not show — but a refusal is, so
     // it is named rather than folded into the frame count.
     Cursor := '';
+    if Session.Report.SmoothCursor then
+      Cursor := ', no pointer in the movie (smooth cursor)';
     if Session.Report.BigCursor then
       Cursor := Format(
         ', big cursor on %d frames (%d off frame, %d refused)',
@@ -262,6 +303,47 @@ begin
       Session.Report.PixelHeight, Session.Report.DurationSeconds,
       Session.Report.AppendedFrames, Session.Report.DroppedFrames,
       Session.Report.FailedAppends, Cursor, Audio]));
+    // Silence, said out loud. Never a failure — the file is written and
+    // the video is fine — so this goes to standard error like the other
+    // advice, and after the summary line it is about.
+    Flush(Output);
+    Silence := AudioSilenceWarning('system audio',
+      AudioModeCapturesSystem(Session.Report.AudioMode),
+      Session.Report.AppendedAudioSamples, Session.Report.AudioInspected,
+      Session.Report.AudioPeak);
+    if Silence <> '' then
+      WriteLn(ErrOutput, ProgramName, ' record: ', Silence);
+    Silence := AudioSilenceWarning('the microphone',
+      AudioModeCapturesMicrophone(Session.Report.AudioMode),
+      Session.Report.AppendedMicrophoneSamples,
+      Session.Report.MicrophoneInspected, Session.Report.MicrophonePeak);
+    if Silence <> '' then
+      WriteLn(ErrOutput, ProgramName, ' record: ', Silence);
+    Flush(ErrOutput);
+    // The event sidecar, and the two spans that say whether its clock is
+    // the movie's. Both are measured from the same host clock: the first
+    // is anchor-to-stop, the second is the movie's own first-to-last
+    // frame. They differ by the gap between the last captured frame and
+    // the stop — which for a still screen is however long nothing moved,
+    // because ScreenCaptureKit delivers a frame only when something
+    // changes. A difference that GROWS with the length of a busy take
+    // would be the thing to worry about, and it does not.
+    // The two spans are only a pair when there IS an anchor: without one
+    // no frame was ever appended, and StopHostSeconds minus zero is the
+    // machine's uptime.
+    if (Session.Report.SidecarPath <> '')
+      and (Session.Report.AnchorHostSeconds > 0) then
+      WriteLn(Format('wrote %s: %d pointer samples over %.3f s '
+        + '(the movie spans %.3f s)',
+        [Session.Report.SidecarPath, Session.Report.SidecarSamples,
+        Session.Report.StopHostSeconds - Session.Report.AnchorHostSeconds,
+        Session.Report.DurationSeconds]))
+    else if Session.Report.SidecarPath <> '' then
+      WriteLn(Format('wrote %s: %d pointer samples (no anchor — no frame '
+        + 'reached the movie)',
+        [Session.Report.SidecarPath, Session.Report.SidecarSamples]))
+    else if Session.Report.SidecarError <> '' then
+      WriteLn('no event sidecar: ', Session.Report.SidecarError);
     Result := ExitOk;
   finally
     Session.Free;
@@ -283,6 +365,24 @@ begin
   Result := ExitOk;
 end;
 
+// True when the movie beside this path was recorded with the pointer left
+// out for an export to draw back. Reading the sidecar's header is enough,
+// so this does not load a track it is not going to use.
+function MovieWantsSmoothCursor(const AMoviePath: string): Boolean;
+var
+  Log: TSidecarLog;
+  Error: string;
+begin
+  Result := False;
+  Log := TSidecarLog.Create;
+  try
+    if Log.LoadFromFile(SidecarPathFor(AMoviePath), Error) then
+      Result := Log.Header.CursorRender = scrSmooth;
+  finally
+    Log.Free;
+  end;
+end;
+
 // A passthrough trim: same samples, new container, no decode at all.
 function HandleTrimExport(const AOptions: TExportOptions;
   const AParsed: TOptionArray): Integer;
@@ -290,6 +390,18 @@ var
   Session: TMovieTrimSession;
   Error: string;
 begin
+  // The scope limit, said out loud where somebody would otherwise meet it
+  // as a mystery. A trim copies coded samples; drawing a pointer into
+  // them would mean decoding and re-encoding the whole video, which this
+  // command exists precisely not to do.
+  if MovieWantsSmoothCursor(AOptions.InputPath) then
+  begin
+    WriteLn(ErrOutput, ProgramName, ' export: this recording keeps its '
+      + 'pointer in its event sidecar (--smooth-cursor), and a passthrough '
+      + 'trim cannot draw one in — the trimmed movie has no pointer. '
+      + 'Export to .gif or .apng for the smooth pointer.');
+    Flush(ErrOutput);
+  end;
   if FlagPresent(AParsed, 'fps') or FlagPresent(AParsed, 'width')
     or FlagPresent(AParsed, 'no-dither') then
   begin
@@ -344,11 +456,36 @@ begin
     end
     else
       Palette := ' (truecolour)';
+    // The synthetic pointer, when there was one. Counted rather than
+    // assumed: a pointer that was asked for and drawn into nothing looks
+    // exactly like one that was never asked for.
+    if Session.Report.SmoothCursor then
+      Palette := Palette + Format(', export cursor on %d frames',
+        [Session.Report.SmoothCursorFrames]);
     WriteLn(Format('wrote %s: %dx%d, %d frames, %.1fs, %d kB%s',
       [Session.Report.OutputPath, Session.Report.PixelWidth,
       Session.Report.PixelHeight, Session.Report.FramesWritten,
       Session.Report.DurationSeconds, Session.Report.OutputBytes div 1024,
       Palette]));
+    // The sidecar asked for a pointer and it could not be drawn. Never a
+    // failure — the animation is right, it is the pointer that is missing
+    // — but never silent either, because the movie has none of its own.
+    if Session.Report.SmoothCursorNote <> '' then
+    begin
+      Flush(Output);
+      WriteLn(ErrOutput, ProgramName, ' export: no cursor drawn (',
+        Session.Report.SmoothCursorNote, ')');
+      Flush(ErrOutput);
+    end;
+    // How close the pre-export estimate came. Printed because an estimate
+    // nobody ever checks is an estimate nobody can improve — and because
+    // a reader who was told "about 3.5 MB" deserves to see the 3.6.
+    if Session.Report.EstimatedBytes > 0 then
+      WriteLn(Format('  estimated %s before encoding (%s to %s), actual %s',
+        [FormatByteSize(Session.Report.EstimatedBytes),
+        FormatByteSize(Session.Report.EstimatedLowBytes),
+        FormatByteSize(Session.Report.EstimatedHighBytes),
+        FormatByteSize(Session.Report.OutputBytes)]));
     // Advice, not a failure: the file is written and usable either way,
     // so this goes to stderr and the exit code stays zero. Stdout is
     // flushed first, or the two streams interleave and the advice lands
@@ -456,7 +593,7 @@ const
   // Every action AppKit will dispatch on the target: the menu items, the
   // status-item button, the deferred one-shots, the playback window's
   // buttons, and the Record Window submenu's delegate callback.
-  TargetSelectors: array[0..25] of string = (
+  TargetSelectors: array[0..27] of string = (
     'recordRegion:', 'recordDisplay:', 'recordWindow:', 'recordLastRegion:',
     'toggleSystemAudio:', 'toggleMicrophone:', 'stopRecording:',
     'cancelSelection:',
@@ -465,7 +602,7 @@ const
     'closePlayback:', 'toggleCamera:', 'toggleCameraShape:',
     'toggleCameraBlur:',
     'restoreCamera:', 'toggleZoomOnClick:', 'toggleFollowMouse:',
-    'toggleBigCursor:',
+    'toggleBigCursor:', 'toggleSmoothCursor:', 'recoverTakes:',
     'liveTick:', 'cameraRideTick:');
   // The camera window's own drag, and the snap ease's timer callback.
   // Without the three mouse methods the window still appears and still
@@ -932,7 +1069,7 @@ end;
 // Option objects are owned by the registry once the subcommand is added.
 function RecordOptions: TOptionArray;
 begin
-  SetLength(Result, 10);
+  SetLength(Result, 11);
   Result[0] := TStringOption.Create('out',
     'Output file; .mp4 or .mov (required)');
   Result[1] := TIntegerOption.Create('display',
@@ -955,11 +1092,14 @@ begin
     [AudioModeName(amNone)]));
   Result[9] := TFlagOption.Create('big-cursor',
     'Draw an enlarged pointer into the frames; display targets only');
+  Result[10] := TFlagOption.Create('smooth-cursor',
+    'Leave the pointer out of the movie and draw a smoothed one into '
+    + 'GIF/APNG exports; display targets only');
 end;
 
 function ExportOptions: TOptionArray;
 begin
-  SetLength(Result, 6);
+  SetLength(Result, 7);
   Result[0] := TStringOption.Create('in',
     'Input movie; .mp4 or .mov (required)');
   Result[1] := TStringOption.Create('out',
@@ -975,6 +1115,9 @@ begin
     'Seconds to keep: start,end — either side may be empty');
   Result[5] := TFlagOption.Create('no-dither',
     'Skip Floyd-Steinberg dithering; GIF only (smaller file, banding)');
+  Result[6] := TStringOption.Create('cursor',
+    'Pointer in the animation: as-recorded, none, smooth, or big — '
+    + 'drawn from the event sidecar; .gif/.apng only');
 end;
 
 // The cli package's top-level help carries lwpt's own tagline, so the

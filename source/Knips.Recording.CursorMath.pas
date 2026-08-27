@@ -149,6 +149,16 @@ function BigCursorHotSpot(AHotSpotPoints, AImagePoints: Double;
 function ResolveBigCursor(ATargetKind: TCaptureTargetKind;
   ABigCursor: Boolean): Boolean;
 
+// The same question for Smooth Cursor — the pointer that is left out of
+// the capture and drawn back at export time from the event sidecar
+// (Knips.Export.CursorEffect). Refused for a window capture for exactly
+// the reason above, and it is a separate function rather than a shared one
+// because the two features are independent: one may grow a case the other
+// does not have, and a shared predicate would then be wrong for one of
+// them silently.
+function ResolveSmoothCursor(ATargetKind: TCaptureTargetKind;
+  ASmoothCursor: Boolean): Boolean;
+
 implementation
 
 function CursorFrameMapping(APixelWidth, APixelHeight: Integer;
@@ -311,6 +321,12 @@ function ResolveBigCursor(ATargetKind: TCaptureTargetKind;
   ABigCursor: Boolean): Boolean;
 begin
   Result := ABigCursor and (ATargetKind <> ctkWindow);
+end;
+
+function ResolveSmoothCursor(ATargetKind: TCaptureTargetKind;
+  ASmoothCursor: Boolean): Boolean;
+begin
+  Result := ASmoothCursor and (ATargetKind <> ctkWindow);
 end;
 
 end.

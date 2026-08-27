@@ -103,10 +103,10 @@
 | Recording | `Knips.Recording` | Target → filter + geometry → writer → stream; progress; report |
 | CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `export`, `displays`, `windows`, `probe`; SIGINT/SIGTERM → `StopRequested` |
 | App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Camera.Blur`, `Knips.App.Live`, `Knips.App.Hotkey`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window and its background-blur pipeline, the live-effect animator, the global stop hotkey, and the neutral state machine (tested) |
-| Recording | `Knips.Recording`, `Knips.Recording.LiveMath`, `Knips.Recording.CursorMath`, `Knips.Recording.CursorOverlay` | Target → filter + geometry → writer → stream; progress; report. The live-effect and big-cursor arithmetic are neutral and tested; the overlay is the Darwin half that makes the sprite and blits it |
+| Recording | `Knips.Recording`, `Knips.Recording.LiveMath`, `Knips.Recording.CursorMath`, `Knips.Recording.CursorOverlay`, `Knips.Recording.Sidecar`, `Knips.Recording.Recovery` | Target → filter + geometry → writer → stream; progress; report. The live-effect and big-cursor arithmetic are neutral and tested; the overlay is the Darwin half that makes the sprite and blits it. The event sidecar is the neutral, tested file format (docs/event-sidecar.md) and recovery is the Darwin pass that finishes off a take whose process died |
 | Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
-| Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.MovieTrim`, `Knips.Export.Pipeline` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; AVAssetExportSession passthrough trim; the shared GIF/APNG pipeline |
-| Export (neutral) | `Knips.Export.Gif`, `Knips.Export.Apng`, `Knips.Export.Bitmap`, `Knips.Export.Timing` | Median cut, dithering, LZW, GIF89a writer; APNG chunks, PNG filters, paszlib; BGRA buffer + resampling; frame-delay planning (all tested) |
+| Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.MovieTrim`, `Knips.Export.Pipeline`, `Knips.Export.CursorEffect` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; AVAssetExportSession passthrough trim; the shared GIF/APNG pipeline; the pointer drawn back in at export time from the sidecar |
+| Export (neutral) | `Knips.Export.Gif`, `Knips.Export.Apng`, `Knips.Export.Bitmap`, `Knips.Export.Timing`, `Knips.Export.SizeEstimate` | Median cut, dithering, LZW, GIF89a writer; APNG chunks, PNG filters, paszlib; BGRA buffer + resampling; frame-delay planning; the pre-export size estimate and the in-flight projection (all tested) |
 | ObjC | `Knips.ObjC.Runtime`, `Knips.ObjC.TypeEncoding` | Class assembly via libobjc; method type encodings (tested) |
 | Options | `Knips.Options` | Neutral option model, validation, derived values (tested) |
 | Vendored | `source/capture/*` | CoreMedia/CoreVideo/VideoToolbox/GCD, ScreenCaptureKit externals, pthread mutex |
@@ -2293,6 +2293,193 @@ carries `BigCursorError` for the CLI to print and the app to show in the
 menu. `knips probe` renders the sprite once and prints its size, so a
 future macOS that stops answering `+arrowCursor` is a line before a
 recording rather than a recording with no pointer in it.
+
+## Never lose a take
+
+Two things, and the first one is nearly all of it.
+
+**Movie fragments.** `AVAssetWriter.movieFragmentInterval` is set to two
+seconds, so the writer flushes a `moof`/`mdat` pair to disk on that
+cadence instead of holding the whole movie for one `moov` atom at the end.
+Measured on device: a recording killed with `SIGKILL` six seconds in used
+to leave a file of **zero bytes**; it now leaves 483 kB that `ffprobe`
+decodes as 117 frames of 4.0 s. The most a crash costs is the fragment in
+flight.
+
+The price is `shouldOptimizeForNetworkUse`, which is now **off**. With it
+on, AVAssetWriter puts a complete file at the output path only when
+`finishWriting` succeeds — measured, fragments made no difference to that —
+so the two cannot both be had.
+
+**What that costs a normally finished take is one thing only: the `moov`
+atom sits after the media data instead of before it.** Measured by walking
+the boxes rather than by grepping for the string (a raw byte search finds
+`moof` inside `mdat` and says the opposite):
+
+| file | boxes |
+| --- | --- |
+| finished normally | `ftyp` `mdat` `moov` |
+| killed with `SIGKILL` | `ftyp` `mdat` `moov` `mdat` `moof` `wide` `mdat` |
+| after recovery | `ftyp` `moov` `mdat` |
+
+So `finishWriting` consolidates the fragments and a finished take is an
+ordinary MP4 in every respect but the position of its index; only a
+crashed file stays fragmented, and recovery turns even that into a
+front-loaded `moov`. Front-loaded `moov` matters for progressive download
+over a network and not at all for a recorder writing to a local disk.
+
+The revert, if that trade is ever the wrong way round, is one line:
+`setShouldOptimizeForNetworkUse(ObjCBOOL(True))` in
+`Knips.Export.MovieWriter.Open`. Crash recovery loses everything then, so
+the `movieFragmentInterval` beside it should go at the same time.
+
+**Recovery at the next start.** A recording that ended properly wrote a
+trailer into its event sidecar; one that did not, did not. So an orphaned
+take is a `*.knips.jsonl` with a header, an anchor and no trailer — there
+is no lock file and no marker, because the absence of the last line is
+already the marker. `knips record` checks the directory it is about to
+write into; the menu-bar app checks `~/Movies/knips` at launch.
+
+**The scan has to be cheap, because it runs at every start over a
+directory that only grows.** Parsing every sidecar to find the one without
+a trailer cost 5.12 s over fifty finished takes (54 MB of sidecar) and
+would go on climbing. The trailer is by construction the last record, so
+the check reads the last four kilobytes of each file and looks for
+`"k":"trailer"` before parsing anything; only the rare unfinished take is
+parsed in full. The same fifty takes now cost 95–101 ms against 89–99 ms
+for an empty directory — flat rather than linear. The menu-bar app runs
+the pass one turn after launch rather than inside `Setup`, so the status
+item reaches the menu bar first.
+
+Before anything is touched, three things have to be true: the sidecar names
+a movie that exists and is not empty; its process is gone (`kill(pid, 0)`,
+against the `pid` the header carries — a sidecar with no trailer is *also*
+exactly what a recording in progress looks like); and the movie opens.
+Finishing it off is a passthrough re-mux through `Knips.Export.MovieTrim`,
+which copies the same coded samples into an ordinary non-fragmented
+container with a `moov` at the front, replaces the original by `rename(2)`,
+and appends the trailer with `"recovered":true` so the take is never picked
+up twice. A re-mux that fails is not a failure: the fragmented file plays,
+and the caller is told which of the two it has. Nothing in the pass ever
+deletes a movie, and a scratch `*.recovering.mp4` left by a recovery that
+itself died is cleared on the next pass.
+
+**What `kill(pid, 0)` cannot tell you**, and what is done about it:
+
+- **Pids are reused.** A pid that now belongs to some other process reads
+  as alive, and the take is left for the next start — the safe direction.
+- **Pids are reused across a reboot, and the host clock restarts with it.**
+  That one is caught: the anchor is a host-clock reading, so an anchor in
+  the future is proof the sidecar predates this boot. Those takes are left
+  alone rather than re-muxed on the strength of a pid that now means
+  something else.
+- **A shared volume** can hold sidecars written by another machine, whose
+  pids mean nothing here. There is no defence against that beyond the
+  reboot guard above, and recording to a shared volume is not something
+  this program does by default.
+
+A recording driven over MCP is not covered by any of this in practice —
+the operative fact being that `knips mcp` never runs the recovery pass at
+all: a killed MCP process's orphan is only ever recovered when somebody
+later runs `knips record` into that directory or launches the app. The
+server does finalise its take when stdin closes cleanly, and a killed
+MCP process leaves a fragmented movie exactly as `record` does — but its
+sidecar's pointer track is only as dense as the client's polling (see
+[docs/event-sidecar.md](event-sidecar.md)), so what is recovered is the
+movie rather than the events.
+
+### What an export is going to weigh
+
+`knips export` says what the animation is likely to weigh before it writes
+a byte, and then replaces that guess with a projection from what the
+encoder has actually produced. The arithmetic is
+`Knips.Export.SizeEstimate`, which is platform-neutral and tested; this is
+where the numbers behind its constants live.
+
+The estimate is
+
+```text
+bytes ~= outputFrames * outputWidth * outputHeight
+         * sourceBytesPerPixelFrame * K
+```
+
+where `sourceBytesPerPixelFrame` is the source movie's own size divided by
+its frames and its pixels — H.264's verdict on how busy the content is,
+and free to read. Nothing extra is decoded for it.
+
+**Calibration, sixteen GIF exports over seven takes at four output
+widths.** The column is the ratio the fit is over: GIF bytes per output
+pixel, divided by the source's bytes per source pixel-frame.
+
+| take | native | 1512 px | 600 px | 400 px | 300 px |
+| --- | --- | --- | --- | --- | --- |
+| busy region | 27.6 | | 27.7 | | 28.0 |
+| whole display | | 21.9 | 23.6 | | 23.6 |
+| quiet region | 15.3 | | 17.6 | | 20.1 |
+| fragmented take | | | 9.5 | | |
+| small region | 8.8 | | 9.1 | | 9.1 |
+| cursorless region | 8.7 | | | 10.2 | |
+| take with audio | | | | 6.8 | |
+
+`K` is the geometric mean of those, **14.9**. Two things are worth reading
+off the table.
+
+**There is deliberately no downscale term.** The obvious worry is that
+downscaling concentrates detail into fewer output pixels, so a heavily
+reduced GIF ought to cost more per output pixel than the source density
+predicts. Along each row it barely moves — at most +31 % across a fourfold
+linear reduction, and flat to within 2 % for three of the seven takes —
+while down the column it spans 6.8 to 28.0. Fitting
+`(sourcePixels/outputPixels)^a` gives `a = 0`, and forcing a positive
+exponent makes the fit strictly worse: worst-case error 2.19x at `a = 0`,
+2.62x at `a = 0.2`, 3.70x at `a = 0.4`. Over the fourfold range measured,
+content dominates the residual and the per-row trend (+8 % to +31 %,
+rising with the reduction) was not worth a term; a second independent
+sweep reaching 6.4x and 8x reductions found the same trend continuing to
+grow at the far end, still second-order against a content offset. Beyond
+fourfold the model is extrapolating.
+
+**The band is a measured spread, not a bound.** The worst residual across
+those sixteen is 2.19x (and 1.50x across six APNG exports). The reported
+band is **3x** — wider than the calibration set, because a band that only
+just contains its own sample is a band fitted to it. The previous 2x band,
+set from five exports that were all halvings, was exceeded the first time
+somebody exported content unlike those five. Sixteen exports of one
+person's screen is still not the space of screen content, so the wording
+in the output says "roughly" and the in-flight projection replaces the
+whole guess inside the first hundred frames.
+
+Two secondary constants, both measured: `--no-dither` lands at 0.61 of the
+dithered size (0.525 and 0.694 on two takes), and APNG at **59** rather
+than GIF's 14.9 — truecolour zlib against palette LZW.
+
+## Was there actually any sound?
+
+An audio track that was enabled and came out silent is the failure nobody
+notices until the take cannot be repeated. Counting appended samples does
+not catch it — the samples arrive, they are simply all zeroes.
+
+So the writer measures them. `MeasurePeak` in `Knips.Export.MovieWriter`
+reads each PCM buffer's format description, declines anything that is not
+32-bit float linear PCM, and scans up to four thousand samples of the
+contiguous run for the largest magnitude. It runs on the capture queue and
+is written to the same rules as the cursor blit: no allocation, no
+exception, no managed type, no Objective-C message. The peak and the number
+of buffers it was measured over are plain fields under the writer's
+existing mutex, and they travel together — zero buffers inspected means the
+peak says nothing at all, and no caller may read one without the other.
+
+`Knips.Options.AudioSilenceWarning` turns those into the sentence to show,
+and it draws the distinction that matters: **nothing arrived** is a
+plumbing failure and points at permissions and devices; **everything
+arrived and was silence** is a muted source and points somewhere else
+entirely. `AudioLevelNote` is the live half — one word, appended to the
+*Stop Recording* menu item's title while a recording runs, so the question
+"is it actually hearing anything?" has an answer on the way to the item
+people were already going to click, and nothing new moves in the menu bar.
+After the stop the warning goes to the app log, to the menu's *Last error*
+line, and — because that is where the user is actually looking — beside the
+file name in the playback window's title.
 
 ## Geometry
 

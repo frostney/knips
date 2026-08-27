@@ -227,7 +227,7 @@ begin
     Exit;
   end;
 
-  URL := NSURL.fileURLWithPath(NSSTR(PAnsiChar(FInputPath)));
+  URL := NSURL.fileURLWithPath(NSString.stringWithUTF8String(PAnsiChar(FInputPath)));
   FAsset := AVAsset(AVURLAsset.URLAssetWithURL_options(URL, nil));
   if FAsset = nil then
   begin

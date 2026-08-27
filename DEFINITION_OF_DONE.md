@@ -17,4 +17,8 @@ A change is shippable only when every applicable item holds.
 - The affected `docs/` file is updated (one authoritative document per
   topic); new decisions get a new ADR, existing ADRs are not rewritten.
 - No linker flags were added to the default build entry.
-- `CHANGELOG.md` is regenerated from conventional commits (`cliff.toml`).
+- `CHANGELOG.md` carries an entry for the change. It is **hand-maintained**
+  — curated prose under `## [Unreleased]`, written for someone deciding
+  whether they want the change, not a transcription of commit subjects.
+  (`cliff.toml` is kept for the release-tagging step and is not what
+  produces the entries above.)
