@@ -1,8 +1,24 @@
 unit Knips.App.Playback;
 
 // What a finished recording opens into: an ordinary titled window with an
-// AVPlayerView playing the file that was just written, and three buttons
-// under it — Export as GIF…, Reveal in Finder, Close.
+// AVPlayerView playing the deliverable that was just rendered, an Effects
+// control, and four buttons under it — Re-export, Export as GIF…, Reveal
+// in Finder, Close.
+//
+// **Why the effects live here and not in the menu bar.** A recording is
+// raw pixels and open metadata; the pointer and the zoom are put in at
+// render time from the event sidecar (Knips.Export.Render). That means
+// they are no longer promises made before a take — they are decisions
+// about a take that already exists, and the only place to make a decision
+// about a take is in front of it. Re-export re-renders the deliverable
+// from the raw take beside it with whatever the control now says, as
+// often as the user likes, because the raw take is still on disk.
+//
+// The control is asked of the sidecar rather than assumed: a take whose
+// pointer is already in its pixels cannot have another drawn, and a take
+// whose capture was already zooming cannot be zoomed again
+// (Knips.Recording.Sidecar.AvailableExportEffects). An item that cannot
+// apply is disabled and carries the reason as its tooltip.
 //
 // Standard chrome on purpose. The titlebar is AppKit's, the close button
 // is AppKit's, the transport controls are AVKit's; the only thing this
@@ -53,9 +69,11 @@ uses
   Knips.App.State,
   Knips.Capture.ShareableContent,
   Knips.Export.Pipeline,
+  Knips.Export.Render,
   Knips.Export.SizeEstimate,
   Knips.ObjC.Runtime,
   Knips.Options,
+  Knips.Recording.Sidecar,
   MacOSAll;
 
 const
@@ -64,11 +82,23 @@ const
   ExportGifSelector = 'exportGif:';
   RevealRecordingSelector = 'revealRecording:';
   ClosePlaybackSelector = 'closePlayback:';
+  // The Effects control's three items and the button beside them. Same
+  // shape as the three above: declared here, registered by Knips.App on
+  // the one runtime-built target, forwarded to the command below.
+  ToggleEffectZoomSelector = 'toggleEffectZoom:';
+  ToggleEffectSmoothCursorSelector = 'toggleEffectSmoothCursor:';
+  ToggleEffectBigCursorSelector = 'toggleEffectBigCursor:';
+  ReexportSelector = 'reexportRecording:';
 
 type
   // Reported from inside an Objective-C callback or a failed export; the
   // app puts it on the same NSLog + "Last error" path as everything else.
   TPlaybackErrorEvent = procedure(const AMessage: string) of object;
+
+  // Fired when the user changes the Effects control. The window owns the
+  // selection while it is open; the controller owns the saved default,
+  // and this is how the two meet.
+  TPlaybackEffectsEvent = procedure(const AEffects: TExportEffects) of object;
 
   // Fired once the window is really gone, whichever path took it down.
   // This unit never touches the activation policy itself — the controller
@@ -87,7 +117,34 @@ type
     FExportButton: NSButton;
     FRevealButton: NSButton;
     FCloseButton: NSButton;
+    FReexportButton: NSButton;
+    // The Effects pull-down, its menu and the three items in it. A
+    // pull-down rather than three checkboxes because it is one setting
+    // with three parts and because the bar already carries four buttons;
+    // a pull-down's item 0 is its title and is never selected.
+    FEffectsButton: NSPopUpButton;
+    FEffectsMenu: NSMenu;
+    FZoomItem: NSMenuItem;
+    FSmoothCursorItem: NSMenuItem;
+    FBigCursorItem: NSMenuItem;
+    // An inert last line naming why something above it is disabled.
+    FReasonItem: NSMenuItem;
     FPath: string;
+    // The raw take this deliverable was rendered from, and what a
+    // re-export renders again. '' for a recording made before the raw
+    // flow existed, or one whose raw take has been deleted — the Effects
+    // control and Re-export are then both off, with the reason on show.
+    FRawPath: string;
+    FEffects: TExportEffects;
+    FCanDrawCursor: Boolean;
+    FCanZoom: Boolean;
+    // One reason per effect, because a take can be refused each for a
+    // different fact and a tooltip that names the other one is worse
+    // than no tooltip. FEffectsReason is the summary, for the inert line
+    // under them.
+    FCursorReason: string;
+    FZoomReason: string;
+    FEffectsReason: string;
     FPixelWidth: Integer;
     FPixelHeight: Integer;
     FScale: Integer;
@@ -105,13 +162,30 @@ type
     FTitleNote: string;
     FOnError: TPlaybackErrorEvent;
     FOnClosed: TPlaybackClosedEvent;
+    FOnEffectsChanged: TPlaybackEffectsEvent;
     function AddButton(AContent: NSView; const ATitle, ASelector: string;
       ATarget: id; var ARight: Double): NSButton;
     procedure SetButtonsEnabled(AEnabled: Boolean);
     procedure HandleProgress(AStage: TGifExportStage;
       AFramesDone, AFramesTotal, ABytesWritten: Int64);
+    procedure HandleRenderProgress(AFramesDone, AFramesTotal: Int64);
     function TitleWithNote: string;
     procedure ReleasePlayer;
+    // The pull-down's menu is alloc'd here and retained by setMenu:, so
+    // this object owns one reference to it. Released from both teardown
+    // paths — windowWillClose: and the destructor — because a window
+    // whose delegate could not be instantiated never gets the first one.
+    procedure ReleaseEffectsMenu;
+    procedure ReloadPlayer;
+    // Asks the RAW take's sidecar which effects are still open. The
+    // deliverable's own sidecar would answer "none of them", which is
+    // true of the deliverable and beside the point: a re-export starts
+    // from the raw take.
+    procedure LoadAvailability;
+    procedure BuildEffectsControl(AContent: NSView; ATarget: id;
+      var ALeft: Double);
+    procedure RefreshEffects;
+    procedure ApplyCursorEffect(AWanted: TExportCursorMode);
   public
     destructor Destroy; override;
     // Sets the note beside the file name in the title. Safe before or
@@ -124,20 +198,37 @@ type
     // is not used for the window's geometry at all. False when the
     // window could not be made. Raises EObjCRuntime when the delegate
     // class cannot be registered.
-    function Show(ATarget: id; const APath: string;
-      APixelWidth, APixelHeight, AScale: Integer): Boolean;
+    // ARawPath is the raw take beside the deliverable, or '' when there
+    // is none. AEffects is the caller's saved default and is what the
+    // control comes up showing.
+    function Show(ATarget: id; const APath, ARawPath: string;
+      APixelWidth, APixelHeight, AScale: Integer;
+      const AEffects: TExportEffects): Boolean;
     // Asks AppKit to close, which arrives back as windowWillClose:.
     procedure CommandClose;
     procedure CommandReveal;
     procedure CommandExportGif;
+    // The Effects control. Each flips one member of the selection,
+    // refreshes the menu, and reports the whole record so the caller can
+    // save it as the new default.
+    procedure CommandToggleEffectZoom;
+    procedure CommandToggleEffectSmoothCursor;
+    procedure CommandToggleEffectBigCursor;
+    // Renders the deliverable again from the raw take with the current
+    // selection, replacing it in place. Inline on the main thread, behind
+    // the same Busy lockout the GIF export uses.
+    procedure CommandReexport;
     // Called by the runtime-built delegate's method body.
     procedure HandleWindowWillClose;
     procedure ReportError(const AMessage: string);
     function Visible: Boolean;
     property Path: string read FPath;
     property Exporting: Boolean read FExporting;
+    property Effects: TExportEffects read FEffects;
     property OnError: TPlaybackErrorEvent read FOnError write FOnError;
     property OnClosed: TPlaybackClosedEvent read FOnClosed write FOnClosed;
+    property OnEffectsChanged: TPlaybackEffectsEvent read FOnEffectsChanged
+      write FOnEffectsChanged;
   end;
 
 // Registers KnipsPlaybackDelegate once per process. Exposed so
@@ -170,8 +261,12 @@ const
   CloseTitle = 'Close';
 
   // Points. Wide enough that a Retina region recording is legible at 1:1
-  // or better, narrow enough to sit next to what was recorded.
-  ContentWidth = 720;
+  // or better, narrow enough to sit next to what was recorded. Widened
+  // from 720 when the bar gained the Effects control and Re-export: at
+  // 720 the four buttons and the pull-down overlapped at the default
+  // size, and a bar that only fits once the window has been dragged
+  // wider is a bar that looks broken on first sight.
+  ContentWidth = 860;
   MinContentWidth = 360;
   MinContentHeight = 240;
   BarHeight = 48;
@@ -319,12 +414,164 @@ begin
   // window has already gone this is a no-op.
   CommandClose;
   ReleasePlayer;
+  ReleaseEffectsMenu;
   inherited Destroy;
+end;
+
+procedure TPlaybackWindow.ReleaseEffectsMenu;
+begin
+  FZoomItem := nil;
+  FSmoothCursorItem := nil;
+  FBigCursorItem := nil;
+  FReasonItem := nil;
+  if FEffectsMenu = nil then
+    Exit;
+  FEffectsMenu.release;
+  FEffectsMenu := nil;
 end;
 
 function TPlaybackWindow.Visible: Boolean;
 begin
   Result := FWindow <> nil;
+end;
+
+// The Effects pull-down, built left-to-right at the far end of the bar
+// from the buttons. A pull-down's item 0 supplies the title and is never
+// chosen, so the three effects are items 1 to 3 and the reason — when
+// there is one — is an inert item under them.
+//
+// autoenablesItems is off for the same reason the app's own menu turns it
+// off: AppKit would enable every item whose target answers the selector,
+// and whether an effect *applies to this take* is not a question the
+// responder chain can answer.
+procedure TPlaybackWindow.BuildEffectsControl(AContent: NSView; ATarget: id;
+  var ALeft: Double);
+
+  function AddEffectItem(const ATitle, ASelector: string): NSMenuItem;
+  begin
+    Result := NSMenuItem(NSMenuItem.alloc.initWithTitle_action_keyEquivalent(
+      PascalToNSString(ATitle), SelectorNamed(ASelector),
+      PascalToNSString('')));
+    Result.setTarget(ATarget);
+    FEffectsMenu.addItem(Result);
+    Result.release;
+  end;
+
+var
+  Size: NSSize;
+begin
+  FEffectsButton := NSPopUpButton(NSPopUpButton.alloc.initWithFrame_pullsDown(
+    NSMakeRect(ALeft, 0, 140, BarHeight - 2 * BarPadding), True));
+  FEffectsMenu := NSMenu(NSMenu.alloc.initWithTitle(
+    PascalToNSString(EffectsMenuTitle)));
+  FEffectsMenu.setAutoenablesItems(False);
+  // And on the control as well as on the menu. NSPopUpButton keeps an
+  // autoenablesItems of its own on its cell, and a control that decides
+  // for itself which items are live would undo every setEnabled: in
+  // RefreshEffects — which is the whole of "this take cannot take that
+  // effect". Whether it actually overrides the menu's could not be
+  // confirmed on this machine (the control cannot be clicked here), so
+  // this is set defensively: it is a no-op if the menu's already wins,
+  // and the difference between a correct control and a lying one if it
+  // does not.
+  FEffectsButton.setAutoenablesItems(False);
+  // Item 0: the button's own title, never selected and never actioned.
+  AddEffectItem(EffectsMenuTitle, '');
+  FZoomItem := AddEffectItem(ZoomOnClickMenuTitle, ToggleEffectZoomSelector);
+  FSmoothCursorItem := AddEffectItem(SmoothCursorMenuTitle,
+    ToggleEffectSmoothCursorSelector);
+  FBigCursorItem := AddEffectItem(BigCursorMenuTitle,
+    ToggleEffectBigCursorSelector);
+  FReasonItem := AddEffectItem('', '');
+  FReasonItem.setEnabled(False);
+  FReasonItem.setHidden(True);
+  FEffectsButton.setMenu(FEffectsMenu);
+  FEffectsButton.sizeToFit;
+  Size := FEffectsButton.frame.size;
+  FEffectsButton.setFrame(NSMakeRect(ALeft, (BarHeight - Size.height) / 2,
+    Size.width, Size.height));
+  FEffectsButton.setAutoresizingMask(NSViewMaxXMargin or NSViewMaxYMargin);
+  AContent.addSubview(FEffectsButton);
+  // addSubview: retains; balance the alloc.
+  FEffectsButton.release;
+  ALeft := ALeft + Size.width + ButtonGap;
+end;
+
+// Which effects this take can still be given, and why not when it cannot.
+// Asked of the raw take, because that is what a re-export renders.
+procedure TPlaybackWindow.LoadAvailability;
+var
+  Log: TSidecarLog;
+  Available: TSidecarEffectAvailability;
+  Error: string;
+begin
+  FCanDrawCursor := False;
+  FCanZoom := False;
+  FCursorReason := '';
+  FZoomReason := '';
+  FEffectsReason := '';
+  if FRawPath = '' then
+  begin
+    // True of an old recording, of a window take that was never split,
+    // and of one whose render failed and left the raw take on screen:
+    // in every case there is no SEPARATE take to re-render from.
+    FEffectsReason := 'there is no separate raw take for this recording, '
+      + 'so its effects cannot be changed';
+    FCursorReason := FEffectsReason;
+    FZoomReason := FEffectsReason;
+    Exit;
+  end;
+  Log := TSidecarLog.Create;
+  try
+    if not Log.LoadFromFile(SidecarPathFor(FRawPath), Error) then
+    begin
+      FEffectsReason := 'there is no event sidecar for this recording';
+      FCursorReason := FEffectsReason;
+      FZoomReason := FEffectsReason;
+      Exit;
+    end;
+    Available := AvailableExportEffects(Log);
+    FCanDrawCursor := Available.CanDrawCursor;
+    FCanZoom := Available.CanZoomOnClick;
+    FCursorReason := Available.CursorReason;
+    FZoomReason := Available.ZoomReason;
+    if not (FCanDrawCursor and FCanZoom) then
+      FEffectsReason := Available.Reason;
+  finally
+    Log.Free;
+  end;
+end;
+
+procedure TPlaybackWindow.RefreshEffects;
+var
+  Reason: string;
+begin
+  if FEffectsMenu = nil then
+    Exit;
+  FZoomItem.setEnabled(FCanZoom and not FExporting);
+  FZoomItem.setState(MenuCheckState(FEffects.ZoomOnClick and FCanZoom));
+  FSmoothCursorItem.setEnabled(FCanDrawCursor and not FExporting);
+  FSmoothCursorItem.setState(MenuCheckState((FEffects.Cursor = ecmSmooth)
+    and FCanDrawCursor));
+  FBigCursorItem.setEnabled(FCanDrawCursor and not FExporting);
+  FBigCursorItem.setState(MenuCheckState((FEffects.Cursor = ecmBig)
+    and FCanDrawCursor));
+  // The reason goes on the items it explains *and* on a line of its own:
+  // a tooltip is where somebody looks once they have wondered, and a
+  // greyed-out list with no explanation at all is what makes them wonder.
+  if not FCanZoom then
+    FZoomItem.setToolTip(PascalToNSString(FZoomReason));
+  if not FCanDrawCursor then
+  begin
+    FSmoothCursorItem.setToolTip(PascalToNSString(FCursorReason));
+    FBigCursorItem.setToolTip(PascalToNSString(FCursorReason));
+  end;
+  Reason := EffectsUnavailableTitle(FEffectsReason);
+  FReasonItem.setHidden(Reason = '');
+  if Reason <> '' then
+    FReasonItem.setTitle(PascalToNSString(Reason));
+  if FReexportButton <> nil then
+    FReexportButton.setEnabled((FRawPath <> '') and not FExporting);
 end;
 
 // Right to left, so the rightmost button is the first one added and each
@@ -352,10 +599,11 @@ begin
   ARight := ARight - Size.width - ButtonGap;
 end;
 
-function TPlaybackWindow.Show(ATarget: id; const APath: string;
-  APixelWidth, APixelHeight, AScale: Integer): Boolean;
+function TPlaybackWindow.Show(ATarget: id; const APath, ARawPath: string;
+  APixelWidth, APixelHeight, AScale: Integer;
+  const AEffects: TExportEffects): Boolean;
 var
-  ContentHeight, VideoHeight, Right: Double;
+  ContentHeight, VideoHeight, Right, Left: Double;
   ContentRect: NSRect;
   Content: NSView;
   PlayerView: AVPlayerView;
@@ -370,11 +618,18 @@ begin
   EnsurePlaybackClasses;
 
   FPath := APath;
+  FRawPath := ARawPath;
+  if (FRawPath <> '') and not FileExists(FRawPath) then
+    // A raw take the user has tidied away is the same thing as never
+    // having had one, and saying so beats a Re-export that fails.
+    FRawPath := '';
+  FEffects := AEffects;
   FPixelWidth := APixelWidth;
   FPixelHeight := APixelHeight;
   FScale := AScale;
   FExporting := False;
   FLastPercent := -1;
+  LoadAvailability;
 
   if (APixelWidth > 0) and (APixelHeight > 0) then
     VideoHeight := ContentWidth * APixelHeight / APixelWidth
@@ -430,6 +685,11 @@ begin
     ATarget, Right);
   FExportButton := AddButton(Content, ExportGifTitle, ExportGifSelector,
     ATarget, Right);
+  FReexportButton := AddButton(Content, ReexportTitle, ReexportSelector,
+    ATarget, Right);
+  Left := BarPadding;
+  BuildEffectsControl(Content, ATarget, Left);
+  RefreshEffects;
 
   FDelegate := InstantiateClass(GDelegateClass);
   if FDelegate <> nil then
@@ -491,6 +751,21 @@ begin
     FExportButton := nil;
     FRevealButton := nil;
     FCloseButton := nil;
+    FReexportButton := nil;
+    // The pull-down goes with the content view the window releases; the
+    // reference does not, and neither does its menu, which this object
+    // owns (setMenu: retains what BuildEffectsControl alloc'd). Both have
+    // to be dropped HERE and not only in the destructor: the destructor
+    // runs once, at quit, while this runs once per take — Show closes the
+    // previous window and builds a new control, so a menu left behind
+    // here is a menu leaked per recording.
+    //
+    // Nilling them is load-bearing for more than the leak. RefreshEffects
+    // guards on `FEffectsMenu = nil`, and FEffectsButton and
+    // FReexportButton would otherwise point into a view hierarchy that
+    // has been deallocated.
+    FEffectsButton := nil;
+    ReleaseEffectsMenu;
     if FWindow <> nil then
     begin
       FWindow.setDelegate(nil);
@@ -515,9 +790,12 @@ begin
     // process-level consequences of that — the Dock tile, the menu bar —
     // are the controller's to undo. It is also the only place they can be
     // undone from, so leaving them standing is the worse leak. By now
-    // every field is nil, so the handler is free to ask Visible. Whatever
-    // it raises is caught by the cdecl body above and reported like any
-    // other failure.
+    // every field the handler could reach through is nil — the window,
+    // the player, the delegate, all five buttons and the Effects control
+    // — so it is free to ask Visible. (FPath, FRawPath and FEffects are
+    // deliberately kept: they are what this object *is*, not what it
+    // draws with.) Whatever it raises is caught by the cdecl body above
+    // and reported like any other failure.
     if Assigned(FOnClosed) then
       FOnClosed;
   end;
@@ -537,6 +815,10 @@ begin
     FRevealButton.setEnabled(AEnabled);
   if FCloseButton <> nil then
     FCloseButton.setEnabled(AEnabled);
+  if FReexportButton <> nil then
+    FReexportButton.setEnabled(AEnabled and (FRawPath <> ''));
+  if FEffectsButton <> nil then
+    FEffectsButton.setEnabled(AEnabled);
 end;
 
 // Dequeues and dispatches whatever events are already waiting, without
@@ -624,10 +906,27 @@ begin
   WarnHeight := 0;
   WarnBytes := 0;
   Options := DefaultExportOptions;
-  Options.InputPath := FPath;
+  // The GIF comes off the RAW take when there is one, with the same
+  // effects the deliverable was rendered with. Exporting the deliverable
+  // instead would draw the pointer a second time on top of the one
+  // already in its pixels, and zoom a picture that is already zoomed —
+  // its own sidecar says as much, and this is the other half of saying it.
+  if FRawPath <> '' then
+    Options.InputPath := FRawPath
+  else
+    Options.InputPath := FPath;
   Options.OutputPath := GifPathForRecording(FPath);
   Options.FramesPerSecond := AppGifFramesPerSecond;
   Options.Width := AppGifWidth(FPixelWidth, FScale);
+  // The one selection, applied to all three sinks. Effects the take
+  // cannot take are dropped here rather than left to fail quietly
+  // downstream — the control already greys them out, and a saved default
+  // from another take must not reach an export that cannot honour it.
+  Options.Effects := FEffects;
+  if not FCanZoom then
+    Options.Effects.ZoomOnClick := False;
+  if not FCanDrawCursor then
+    Options.Effects.Cursor := ecmAsRecorded;
   if not ValidateExportOptions(Options, Error) then
   begin
     ReportError(Error);
@@ -698,6 +997,136 @@ begin
   end
   else
     ReportError('GIF export: ' + Error);
+end;
+
+// One turn of the render's progress into the window's title. The same
+// shape as the export's — drain, set, drain — and for the same reason:
+// the window server shows the beachball when an app stops dequeueing
+// events, and a render of a long take runs for seconds.
+procedure TPlaybackWindow.HandleRenderProgress(AFramesDone,
+  AFramesTotal: Int64);
+var
+  Percent: Integer;
+begin
+  DrainPendingEvents;
+  CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, True);
+  if FWindow = nil then
+    Exit;
+  Percent := RenderPercent(AFramesDone, AFramesTotal);
+  if Percent = FLastPercent then
+    Exit;
+  FLastPercent := Percent;
+  FWindow.setTitle(PascalToNSString(RenderProgressTitle(Percent)));
+  CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, True);
+end;
+
+// The player is dropped before a re-export and rebuilt after it: the file
+// under it is about to be replaced, and a player holding the old inode
+// would go on showing a movie that is no longer there.
+procedure TPlaybackWindow.ReloadPlayer;
+begin
+  ReleasePlayer;
+  if (FPlayerView = nil) or (FPath = '') then
+    Exit;
+  FPlayer := AVPlayer.PlayerWithURL(NSURL.fileURLWithPath(
+    PascalToNSString(FPath)));
+  if FPlayer = nil then
+    Exit;
+  AVPlayer(FPlayer).retain;
+  AVPlayerView(FPlayerView).SetPlayer(AVPlayer(FPlayer));
+end;
+
+procedure TPlaybackWindow.ApplyCursorEffect(AWanted: TExportCursorMode);
+begin
+  if (FWindow = nil) or FExporting or not FCanDrawCursor then
+    Exit;
+  FEffects.Cursor := ToggledEffectCursor(FEffects.Cursor, AWanted);
+  RefreshEffects;
+  if Assigned(FOnEffectsChanged) then
+    FOnEffectsChanged(FEffects);
+end;
+
+procedure TPlaybackWindow.CommandToggleEffectZoom;
+begin
+  if (FWindow = nil) or FExporting or not FCanZoom then
+    Exit;
+  FEffects.ZoomOnClick := not FEffects.ZoomOnClick;
+  RefreshEffects;
+  if Assigned(FOnEffectsChanged) then
+    FOnEffectsChanged(FEffects);
+end;
+
+procedure TPlaybackWindow.CommandToggleEffectSmoothCursor;
+begin
+  ApplyCursorEffect(ecmSmooth);
+end;
+
+procedure TPlaybackWindow.CommandToggleEffectBigCursor;
+begin
+  ApplyCursorEffect(ecmBig);
+end;
+
+// Re-render the deliverable from the raw take with what the control now
+// says, in place. Inline on the main thread, exactly like the GIF export
+// and for the same reason: the render pass is synchronous and nothing
+// here may pump a nested run loop. FExporting is the same lockout, so a
+// close, a second click and a new recording are all refused while it runs.
+procedure TPlaybackWindow.CommandReexport;
+var
+  Session: TRenderSession;
+  Pool: NSAutoreleasePool;
+  Effects: TExportEffects;
+  Error: string;
+  Succeeded: Boolean;
+begin
+  if (FWindow = nil) or FExporting or (FPath = '') then
+    Exit;
+  if FRawPath = '' then
+  begin
+    ReportError(FEffectsReason);
+    Exit;
+  end;
+  Effects := FEffects;
+  if not FCanZoom then
+    Effects.ZoomOnClick := False;
+  if not FCanDrawCursor then
+    Effects.Cursor := ecmAsRecorded;
+
+  FExporting := True;
+  FLastPercent := -1;
+  SetButtonsEnabled(False);
+  RefreshEffects;
+  FWindow.setTitle(PascalToNSString(RenderProgressTitle(0)));
+  // The player has the file open and the render is about to replace it.
+  ReleasePlayer;
+
+  Succeeded := False;
+  Error := '';
+  try
+    Pool := NSAutoreleasePool(NSAutoreleasePool.alloc.init);
+    try
+      Session := TRenderSession.Create(FRawPath, FPath, Effects);
+      try
+        // No console under an app bundle; the title is the report.
+        Session.Verbose := False;
+        Session.OnProgress := HandleRenderProgress;
+        Succeeded := Session.Run(Error);
+      finally
+        Session.Free;
+      end;
+    finally
+      Pool.release;
+    end;
+  finally
+    FExporting := False;
+    SetButtonsEnabled(True);
+    RefreshEffects;
+    ReloadPlayer;
+    if FWindow <> nil then
+      FWindow.setTitle(PascalToNSString(TitleWithNote));
+  end;
+  if not Succeeded then
+    ReportError('re-export: ' + Error);
 end;
 
 procedure TPlaybackWindow.SetTitleNote(const ANote: string);

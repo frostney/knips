@@ -40,6 +40,7 @@ type
     procedure TestBandBracketsTheEstimate;
     procedure TestNoDitherIsCheaper;
     procedure TestApngIsDearerThanGif;
+    procedure TestApngHasItsOwnWiderBand;
     procedure TestATrimGetsNoEstimate;
     procedure TestDegenerateInputsGiveNothing;
   end;
@@ -112,6 +113,7 @@ begin
     TestNoDitherIsCheaper);
   Test('APNG estimates larger than GIF for the same movie',
     TestApngIsDearerThanGif);
+  Test('APNG carries its own, wider band', TestApngHasItsOwnWiderBand);
   Test('a passthrough trim has nothing to estimate',
     TestATrimGetsNoEstimate);
   Test('no frames, no size, no answer', TestDegenerateInputsGiveNothing);
@@ -145,10 +147,28 @@ begin
   Estimate := GifEstimate(600, 400, 205, MiddlingDensity);
   Expect<Boolean>(Estimate.LowBytes < Estimate.Bytes).ToBe(True);
   Expect<Boolean>(Estimate.HighBytes > Estimate.Bytes).ToBe(True);
-  ExpectRatio(Estimate.HighBytes / Estimate.Bytes, EstimateBand, 1E-3,
+  ExpectRatio(Estimate.HighBytes / Estimate.Bytes, GifEstimateBand, 1E-3,
     'high');
-  ExpectRatio(Estimate.Bytes / Estimate.LowBytes, EstimateBand, 1E-3, 'low');
+  ExpectRatio(Estimate.Bytes / Estimate.LowBytes, GifEstimateBand, 1E-3,
+    'low');
   Expect<Boolean>(Estimate.FromSource).ToBe(True);
+end;
+
+// APNG's band is its own and is wider, because its residuals are: the
+// same content signal that predicts a GIF to within about 2x predicts an
+// APNG to within about 13x (see ApngBytesPerSourceByte). A single band
+// over both would be a claim about APNG that nothing measured supports.
+procedure TEstimateTests.TestApngHasItsOwnWiderBand;
+var
+  Estimate: TExportSizeEstimate;
+begin
+  Estimate := EstimateExportSize(efApng, 600, 400, 205, True,
+    MiddlingDensity);
+  ExpectRatio(Estimate.HighBytes / Estimate.Bytes, ApngEstimateBand, 1E-3,
+    'apng high');
+  ExpectRatio(Estimate.Bytes / Estimate.LowBytes, ApngEstimateBand, 1E-3,
+    'apng low');
+  Expect<Boolean>(ApngEstimateBand > GifEstimateBand).ToBe(True);
 end;
 
 procedure TEstimateTests.TestNoDitherIsCheaper;

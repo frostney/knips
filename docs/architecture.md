@@ -27,22 +27,29 @@
   — a Dock tile, a place in ⌘-Tab, and a menu bar with ⌘W and ⌘Q. See
   [Menu bar app](#menu-bar-app).
   GIF export. See [Menu bar app](#menu-bar-app).
-- The menu's checkboxes sit in three submenus — *Camera* (show, circle,
-  background blur), *Behaviour* (Zoom on Click, Follow Mouse) and *Audio*
-  (system, microphone). Two of them change what a recording shows while
-  it runs — *Zoom on Click* and *Follow Mouse*. Neither touches the file's
-  dimensions, which `AVAssetWriter` fixes at the first frame: both animate
-  the stream's `sourceRect` through
-  `SCStream.updateConfiguration:completionHandler:`, so a smaller
-  rectangle is a zoom and a sliding one is a pan. See
+- **A recording is raw pixels and open metadata; the deliverable is
+  rendered.** The menu-bar app records a *raw take* — ScreenCaptureKit's
+  pointer switched off, the framing left alone, everything the recorder
+  knew written to the [event sidecar](event-sidecar.md) — and then renders
+  the file the user gets from it: the pointer drawn back, Zoom on Click
+  cropped in, the audio **copied** rather than re-encoded. The raw take
+  stays on disk beside the deliverable, so the same recording can be
+  rendered again with different effects for as long as it is kept. See
+  [The render pass](#the-render-pass).
+- The menu's checkboxes sit in two submenus — *Camera* (show, circle,
+  background blur) and *Audio* (system, microphone) — plus one loose
+  checkbox, *Follow Mouse*. Follow Mouse is the one effect that has to
+  happen while the screen is being read, because a pan decides which
+  pixels are read at all; it animates the stream's `sourceRect` through
+  `SCStream.updateConfiguration:completionHandler:` without touching the
+  file's dimensions, which `AVAssetWriter` fixes at the first frame. See
   [Live effects](#live-effects-zoom-on-click-and-follow-mouse).
-- *Big Cursor* is the one place this program does touch pixels:
-  ScreenCaptureKit's own pointer is switched off and a sprite rendered
-  once on the main thread is blitted into each frame's `CVPixelBuffer`
-  before the writer sees it, so the GIF and APNG exports inherit it. The
-  arithmetic is neutral and tested; the blit runs on the capture queue
-  and is written to that thread's rules. See
-  [Big Cursor](#big-cursor).
+- *Zoom on Click*, *Smooth Cursor* and *Big Cursor* used to sit beside it
+  and are now **effects**: chosen in the playback window in front of the
+  take they apply to, saved as defaults, and applied by the render and by
+  the GIF and APNG exporters from one `TExportEffects` record. The
+  pointer-drawing arithmetic is Big Cursor's own, moved from the capture
+  queue to render time; see [Big Cursor](#big-cursor).
 - The camera picture-in-picture can blur its background — the person
   sharp, the room behind them soft. AVFoundation exposes the *system*
   Portrait effect read-only in both of its forms, so this is Knips's own
@@ -60,6 +67,11 @@
 - Two threads: the main thread (run loop, signals, progress) and SCK's
   capture queue (sample delivery → append). No `cthreads`; shared counters
   sit under a pthread mutex; the capture path never raises or prints.
+- `knips render --in=take-raw.mp4 [--effects=…]` is the scriptable face of
+  the render pass. `knips record` is deliberately unchanged — it still
+  bakes the system pointer in by default, and `--big-cursor` and
+  `--smooth-cursor` still mean what they meant — so scripts and the MCP
+  server keep working; the raw flow is the app's.
 - `knips export` writes three things from one `--out` extension: a GIF
   (exact-colour palette, dithering, LZW), an APNG (truecolour, no
   quantisation, paszlib), or a trimmed movie via
@@ -101,12 +113,12 @@
 | MCP | `Knips.Mcp`, `Knips.Mcp.Params` | The tool surface over pascal-mcp-sdk's stdio transport; the neutral half is the tool table, argument mapping, and default paths (tested) |
 | App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Camera.Blur`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window and its background blur, and the neutral state machine (tested) |
 | Recording | `Knips.Recording` | Target → filter + geometry → writer → stream; progress; report |
-| CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `export`, `displays`, `windows`, `probe`; SIGINT/SIGTERM → `StopRequested` |
+| CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `render`, `export`, `displays`, `windows`, `mcp`, `probe`; SIGINT/SIGTERM → `StopRequested` |
 | App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Camera.Blur`, `Knips.App.Live`, `Knips.App.Hotkey`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window and its background-blur pipeline, the live-effect animator, the global stop hotkey, and the neutral state machine (tested) |
 | Recording | `Knips.Recording`, `Knips.Recording.LiveMath`, `Knips.Recording.CursorMath`, `Knips.Recording.CursorOverlay`, `Knips.Recording.Sidecar`, `Knips.Recording.Recovery` | Target → filter + geometry → writer → stream; progress; report. The live-effect and big-cursor arithmetic are neutral and tested; the overlay is the Darwin half that makes the sprite and blits it. The event sidecar is the neutral, tested file format (docs/event-sidecar.md) and recovery is the Darwin pass that finishes off a take whose process died |
 | Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
-| Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.MovieTrim`, `Knips.Export.Pipeline`, `Knips.Export.CursorEffect` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; AVAssetExportSession passthrough trim; the shared GIF/APNG pipeline; the pointer drawn back in at export time from the sidecar |
-| Export (neutral) | `Knips.Export.Gif`, `Knips.Export.Apng`, `Knips.Export.Bitmap`, `Knips.Export.Timing`, `Knips.Export.SizeEstimate` | Median cut, dithering, LZW, GIF89a writer; APNG chunks, PNG filters, paszlib; BGRA buffer + resampling; frame-delay planning; the pre-export size estimate and the in-flight projection (all tested) |
+| Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.MovieTrim`, `Knips.Export.Pipeline`, `Knips.Export.Render`, `Knips.Export.CursorEffect` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; AVAssetExportSession passthrough trim; the shared GIF/APNG pipeline; the raw-take → deliverable render (video re-encoded, audio copied); the pointer drawn back in at render/export time from the sidecar |
+| Export (neutral) | `Knips.Export.Gif`, `Knips.Export.Apng`, `Knips.Export.Bitmap`, `Knips.Export.Timing`, `Knips.Export.SizeEstimate`, `Knips.Export.ZoomTrack` | Median cut, dithering, LZW, GIF89a writer; APNG chunks, PNG filters, paszlib; BGRA buffer + resampling; frame-delay planning; the pre-export size estimate and the in-flight projection; the post-recording Zoom on Click replayed from the click track (all tested) |
 | ObjC | `Knips.ObjC.Runtime`, `Knips.ObjC.TypeEncoding` | Class assembly via libobjc; method type encodings (tested) |
 | Options | `Knips.Options` | Neutral option model, validation, derived values (tested) |
 | Vendored | `source/capture/*` | CoreMedia/CoreVideo/VideoToolbox/GCD, ScreenCaptureKit externals, pthread mutex |
@@ -141,6 +153,15 @@ rewrite being remembered at each of a dozen call sites. The rewrites are
 anchored to token boundaries: these templates interpolate the caller's
 own text, and a file named `x.--fps.mp4` must come back spelled the way
 it was passed.
+
+**MCP takes are CLI-shaped.** `record_start` builds the same
+`TRecordingOptions` the CLI does, so an agent's recording has the system
+pointer baked into its pixels and its framing untouched, exactly as
+`knips record` does — the raw-take flow and the automatic render belong to
+the menu-bar app, which has a playback window to choose effects in. An
+agent that wants the render pass has the same door a script has:
+`knips record --smooth-cursor` for a raw take, then `knips render`. This
+lane added nothing to the MCP surface, and that is the reason.
 
 Two places where the MCP contract deliberately differs from the CLI's,
 both because the caller is a program rather than a person:
@@ -187,6 +208,171 @@ Screen Recording permission is granted per host application and this
 process inherits its client's attribution, so the first capture prompts
 whichever app launched the server — see
 [quick-start](quick-start.md#the-mcp-server).
+
+## The render pass
+
+The menu-bar app records a **raw take** and renders the deliverable from
+it. That is the whole product model, and everything below follows from it.
+
+**What raw means.** ScreenCaptureKit's pointer is switched off
+(`--smooth-cursor`'s suppression, applied unconditionally), the live Zoom
+on Click is not run, and the framing is left alone. The movie is what the
+screen looked like and nothing else; where the pointer was, when a button
+went down and which rectangle was being read all go to the
+[event sidecar](event-sidecar.md) instead. Follow Mouse is the deliberate
+exception — a pan decides which pixels are read off the screen at all, so
+it cannot be undone afterwards and stays a live effect, with
+`bakedFollowMouse:true` on the take to say so.
+
+**What the render does.** `Knips.Export.Render` reads the raw take with
+`AVAssetReader` (BGRA), crops and scales each frame by the post-hoc zoom
+(`Knips.Export.ZoomTrack`), composites the pointer into it
+(`Knips.Export.CursorEffect`), and encodes H.264 through an
+`AVAssetWriterInputPixelBufferAdaptor`. Three properties are worth stating
+because each is a decision:
+
+- **Audio is copied, never re-encoded.** Each audio track of the source
+  gets an `AVAssetReaderTrackOutput` with *nil* output settings feeding an
+  `AVAssetWriterInput` with nil output settings and the source track's own
+  format description as its `sourceFormatHint` — which
+  `AVAssetWriterInput.h` documents as passthrough, and equally documents
+  as *requiring* the hint for anything but a QuickTime movie. Verified by
+  extracting both tracks to ADTS and comparing: byte-identical, same MD5,
+  same 326 879 bytes. A render costs a recording nothing in sound.
+- **Video presentation stamps are copied verbatim**, as `CMTime` rather
+  than as seconds. Measured over a 600-frame take: taking each stamp
+  through a `Double` and back at a 1/600 s timescale moved it by up to
+  1.7 ms; the container's own stamp moves it by exactly zero, all 600
+  frames. That is what keeps the sidecar's clock anchor valid for the
+  rendered file.
+- **Audio content is bit-identical; an audio track's start offset can
+  move by up to one 1/600 s tick.** The packets themselves are copied, so
+  the codec data, the packet count and every stamp *relative to the
+  track* come through untouched. What can shift is where the track is
+  placed: the recorder starts its session from a nanosecond-timescale
+  `CMTime`, while the render starts its own from the video frame's stamp
+  in the video track's 1/600 s timebase, so an audio track's start offset
+  quantises (truncating) to that grid.
+
+  Measured twice. Across multi-track takes, 6 of 6 tracks moved, by a
+  constant per-track shift, at most **1.67 ms** lead — which is one whole
+  1/600 s tick, the bound the mechanism allows. And on a single real
+  `--audio=system` take the snap is visible directly: the take's audio
+  starts at `241/48000`, the render's at `240/48000`, which is exactly
+  `3/600`. Packet counts and every stamp relative to the track are
+  identical (205 and 205).
+
+  1.67 ms is a twelfth of the ~20 ms at which a listener begins to notice
+  audio/video desync, and a twentieth of a frame at 30 fps. It is worth
+  writing down and not worth chasing. A single-track take whose audio
+  already starts at 0 shows no shift at all, which is the shape the first
+  measurement of this used and the reason it concluded — wrongly — that
+  nothing moved.
+- **A render with nothing to apply is a byte copy** — and a take that can
+  take *no* effect at all is refused outright rather than duplicated.
+  Re-encoding a movie to produce the same movie is a generation of loss
+  for nothing; copying one to produce a second identical file is a
+  duplicate the user then has to find and delete.
+- **The output is replaced atomically.** The movie is built as
+  `<out>.knips-render-tmp` and renamed into place only when it is
+  complete, and the sidecar is written after the rename. The failure this
+  closes is not a render that returns an error, it is a render that is
+  *killed*: writing straight to the deliverable meant deleting a good file
+  and dying with a zero-byte stub under its name, which crash recovery
+  never finds because recovery scans sidecars and a stub has none.
+  Same-directory `rename(2)` on APFS is atomic, so the deliverable is
+  either the old one or the new one. Verified by `kill -9` mid-render: the
+  previous deliverable came back byte-identical.
+- **The rename waits for the temporary to settle.** AVAssetWriter's
+  completion handler having fired does not mean the file has stopped
+  moving: for a fast-start output the framework assembles the movie from
+  its own scratch and puts it at the temporary's path with a replace of
+  its own, which under the sandbox goes through a shim. Measured on the
+  release build, one render in twelve found the temporary momentarily not
+  there and failed with *could not replace*. `CommitOutput` therefore
+  retries the rename for up to half a second in 25 ms run-loop turns —
+  a wait, not a hope — and 50 consecutive renders then passed. A
+  temporary still missing after that is genuinely missing, and the error
+  carries the errno and whether the file exists, because those two facts
+  are the whole diagnosis.
+- **The scratch is swept by the render itself, not only at launch.**
+  `setShouldOptimizeForNetworkUse` is what makes a rendered file
+  fast-start (`ftyp moov mdat`), and AVAssetWriter cannot know how big
+  `moov` will be until the media is written — so it writes the media to a
+  scratch beside the output, which under the sandbox is
+  `<output>.sb-<token>` with a fresh token every time. Measured with the
+  flag on: one full-size shadow per render, accumulating (11.1 MB after
+  three renders of a 3.7 MB deliverable); with it off: no shadow, and no
+  fast start. The flag stays on and the render sweeps its own temporary
+  name plus everything beside it the instant the rename succeeds, and on
+  every failure path. Three successive re-exports leave an empty
+  directory. `SweepRenderTemporaries` in the recovery pass stays as
+  launch-time insurance for whatever a killed render left, because that
+  is the one case the render cannot clean up after itself.
+
+**What it costs.** Measured on this machine (M-series, release build) at
+3600×2338 (a 1800×1169 display at 2×), 30 fps, 20-second takes, with both
+zoom and pointer applied: **0.35× realtime** on ordinary screen content
+and **0.38×** on a deliberately noise-filled source that decodes and
+re-encodes far harder than any screen. So a minute of recording renders in
+about twenty seconds, and the render runs automatically on every stop. The
+status item counts it out while it does.
+
+**One `TExportEffects`, three sinks.** The same record reaches the MP4
+render, the GIF encoder and the APNG encoder, so a GIF exported from a
+take moves the way the movie beside it moves. `knips render` and
+`knips export --effects=` both speak the same comma-separated list, and it
+is what the playback window's Effects control writes into
+`KnipsEffectZoom` and `KnipsEffectCursor`.
+
+**The zoom needs an untouched framing, and that is checked.** The crop is
+taken against the recording's *base* rectangle, so any capture that moved
+its own `sourceRect` — a live zoom, a Follow Mouse pan, or a composited
+window recording's poll — shows a different rectangle in every frame and
+the crop would land on one the pixels are not showing. `HasUntouchedFraming`
+is that question and `AvailableExportEffects` asks it; before it did, a
+Follow Mouse take rendered 36 silently mis-cropped frames. A pointer
+already baked into the pixels does *not* close the zoom — it is part of
+the picture and scales with the crop exactly as the live effect's would
+have — which is why the test is `HasUntouchedFraming` and not
+`IsRawTake`, and why an ordinary `knips record` take can still be zoomed
+after the fact.
+
+**Post-hoc Zoom on Click is a replay, not a new effect.** It is built out
+of `Knips.Recording.LiveMath` — the same smoothstep, the same 2× factor,
+the same 0.30 s in / 0.80 s hold / 0.45 s out, the same
+`ZoomedSourceRect` clamp — driven by the sidecar's click track instead of
+by a polled mouse button. Three things differ, and each is something the
+live effect cannot have: a click lands at its exact time rather than on
+the next 30 Hz tick; the curve is evaluated at each frame's own
+presentation stamp rather than at the ~20 Hz ScreenCaptureKit can be
+reconfigured at; and the pointer's position is transformed by the crop,
+which is what `TCursorFrameMapping` was left open for. Verified against an
+independent replay of the curve by measuring the grid spacing in the
+rendered frames: the zoom factor agrees to within 0.21 %, and the residual
+is the whole-pixel rounding of the crop.
+
+**One feel parameter genuinely differs, and it is the pointer's size.**
+The live effect captured the *real* pointer, so it grew with the content;
+the render draws a sprite sized once from the recording's base geometry,
+so at full zoom it is half the relative size the live one had. That is the
+same trade Big Cursor already documents and states out loud — a drawn
+pointer that keeps its size while the content zooms under it reads as
+deliberate rather than broken, and rescaling it per frame is work in the
+inner loop. It is the one place where "the same feel" is a claim about the
+motion rather than about every pixel.
+
+**Naming.** The capture writes `<name>-raw.mp4`, the render writes
+`<name>.mp4` beside it, and the sidecar's own extension rule puts
+`<name>-raw.knips.jsonl` and `<name>.knips.jsonl` under each. The
+deliverable keeps the name the user sees; the raw take takes the suffix.
+Both sidecars are real and they say different things — see
+[Two sidecars](event-sidecar.md#two-sidecars-the-raw-takes-and-the-deliverables).
+
+**A render that fails is not a lost recording.** The raw take is on disk
+and is a perfectly good movie (with no pointer in it); the failure is
+reported on the menu's *Last error* line and the playback window opens on
+the take instead, with its Effects control off and the reason on show.
 
 ## The export pipeline
 
@@ -709,23 +895,32 @@ machine:
 
   asIdle ──Audio ▸ System Audio─▶ asIdle  (a self-transition: the command
          ──Audio ▸ Microphone──▶           is legal only where the stream
-         ──Behaviour ▸ Zoom────▶           configuration is not yet fixed)
-         ──Behaviour ▸ Follow──▶
+         ──Follow Mouse────────▶           configuration is not yet fixed)
 ```
 
-**Three submenus, not eleven loose lines.** *Camera* (Show Camera,
-Circular Camera, Blur Background), *Behaviour* (Zoom on Click, Follow
-Mouse) and *Audio* (System Audio, Microphone) each gather the checkboxes
-that are one setting between them: what the picture-in-picture does, what
-the recording does while it runs, what it listens to. The root menu is
-the five *Record*/*Stop* commands, those three, the recordings folder,
-the error line and Quit. Nothing about the state machine or the
-persistence changed with the grouping — each checkbox keeps its own
-command, its own selector and its own defaults key — and the two
-Behaviour items stay idle-only for the reason the audio pair is, while
-all three Camera items stay legal in every state for the reason the
-camera toggle always was: the camera is a passive window the recorder
-knows nothing about.
+**Two submenus and one loose checkbox.** *Camera* (Show Camera, Circular
+Camera, Blur Background) and *Audio* (System Audio, Microphone) each
+gather the checkboxes that are one setting between them: what the
+picture-in-picture does, what the recording listens to. *Follow Mouse
+(region)* sits between them on its own, because it is the last thing left
+of what used to be the *Behaviour* submenu.
+
+Zoom on Click, Big Cursor and Smooth Cursor left it for the playback
+window's Effects control when takes became raw, and the reason is not
+tidiness: all three are decisions about a recording, and the menu bar is
+the one place in this app that never has a recording in front of it.
+Follow Mouse could not go with them — a pan changes which pixels are read
+off the screen, so it has to be chosen before the reading starts — and one
+item is not a submenu.
+
+The root menu is the five *Record*/*Stop* commands, *Camera ▸*, *Follow
+Mouse*, *Audio ▸*, the recordings folder, the error line and Quit.
+Nothing about the state machine or the persistence changed with the move —
+Follow Mouse keeps its own command, its own selector and its own defaults
+key, and stays idle-only for the reason the audio pair is, while all three
+Camera items stay legal in every state for the reason the camera toggle
+always was: the camera is a passive window the recorder knows nothing
+about.
 
 `Knips.App.State` owns the transition table, the status-item title, the
 `~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4` naming, the selection maths,
@@ -832,11 +1027,13 @@ business.
 
 **Remembered settings.** All in `NSUserDefaults`: `KnipsAudioSystem` and
 `KnipsAudioMicrophone` (the Audio submenu's two checkboxes,
-[below](#the-audio-submenu)), `KnipsZoomOnClick` and `KnipsFollowMouse`
-(the Behaviour submenu's two; both off by default, which is what
-`boolForKey:` answers for a key that was never written, so nothing
+[below](#the-audio-submenu)), `KnipsFollowMouse` (off by default, which is
+what `boolForKey:` answers for a key that was never written, so nothing
 registers defaults; see
 [Live effects](#live-effects-zoom-on-click-and-follow-mouse)),
+`KnipsEffectZoom` and `KnipsEffectCursor` (the saved effect defaults the
+render applies and the playback window's control shows — see
+[The effect defaults](#the-effect-defaults)),
 `KnipsCameraVisible`, `KnipsCameraShape` and `KnipsCameraBlur` (the
 Camera submenu's three), and `KnipsLastRegion*` (the display id and
 rectangle behind *Record Last Region*). The region is
@@ -846,18 +1043,19 @@ through `SanitizeStoredRegion`, because `defaults write` is a public
 interface and these keys are not private state: a negative origin would
 otherwise land in ScreenCaptureKit's `sourceRect` unexamined.
 
-**Each toggle writes its own key, and only its own.** The three checkbox
-fields are read once, at `Setup`, and never read again, so a procedure
-that wrote `KnipsZoomOnClick` and `KnipsFollowMouse` together — as one
-did — wrote one value the user had just chosen and one that was however
-old the process was. Anything that had changed the other key meanwhile
+**Each toggle writes its own key, and only its own.** The checkbox fields
+are read once, at `Setup`, and never read again, so a procedure that wrote
+`KnipsZoomOnClick` and `KnipsFollowMouse` together — as one did, back when
+both were menu items — wrote one value the user had just chosen and one
+that was however old the process was. Anything that had changed the other key meanwhile
 was silently reverted by the next toggle of its neighbour: the
 `defaults write` the paragraph above already treats as a public
 interface, or a second Knips, which is not exotic at all — the installed
-bundle and a development build both answer to `org.knips.app`. Measured:
-with the paired write, an external `KnipsFollowMouse=1` is back to `0`
-one *Zoom on Click* click later; with `StoreZoomOnClick` and
-`StoreFollowMouse` separate, it survives. What that looked like from
+bundle and a development build both answer to `org.knips.app`. Measured at the
+time: with the paired write, an external `KnipsFollowMouse=1` was back to
+`0` one *Zoom on Click* click later; with the two writers separate, it
+survived. (Zoom on Click has since become an effect and its writer is
+`StoreEffectZoom`; the rule it produced governs all five keys.) What that looked like from
 outside was a preference that would not stay switched on — and, because
 Follow Mouse then really was off, a region recording that did not pan.
 
@@ -1881,8 +2079,16 @@ instead of aborting. `CGSessionCopyCurrentDictionary` returning NULL is
 the question being asked.
 ### Live effects: Zoom on Click and Follow Mouse
 
-Two menu checkboxes change what a recording *shows* while it runs, and
-both are the same one idea. The file's dimensions are fixed the moment
+**Only Follow Mouse is still live.** Zoom on Click ran here first and now
+runs at render time instead (`Knips.Export.ZoomTrack`, replaying exactly
+the arithmetic below from the sidecar's click track), because a crop of
+pixels that are already in the file can be decided late and a pan cannot.
+Everything in this section still describes the machinery both were built
+on, and the composition below is what the post-hoc zoom reduces to with
+Follow off: `window` = `base`.
+
+Follow Mouse changes what a recording *shows* while it runs, and it is one
+idea with the zoom. The file's dimensions are fixed the moment
 `AVAssetWriter` opens and nothing may move them; what can move is the
 rectangle ScreenCaptureKit reads from the screen —
 `SCStreamConfiguration.sourceRect`, in the display's own points — through
@@ -2129,6 +2335,50 @@ here**; its arithmetic is unit-tested and its two inputs
 (`pressedMouseButtons`, `mouseLocation`) were read on device, but nobody
 has clicked a mouse into this code.
 
+### The effect defaults
+
+Two keys, `KnipsEffectZoom` (a Boolean) and `KnipsEffectCursor` (a word:
+`as-recorded`, `none`, `smooth` or `big`), read once at launch and written
+by the playback window's Effects control. One reader and one writer each,
+which is the rule from *Each toggle writes its own key* below.
+
+**The cursor is a word, not a pair of Booleans**, and that is the point:
+the three cursor effects are one setting, and two Booleans are exactly the
+shape that can hold a contradiction. Big Cursor and Smooth Cursor were two
+Booleans, `ValidateRecordingOptions` refused the pair outright, and
+`LoadPreferences` had to carry code to resolve a state the app could not
+reach but a `defaults write` could.
+
+**The default draws the pointer.** A raw take has no pointer in its pixels
+at all, so a default of "no cursor" would hand every new user a cursorless
+deliverable and look like a bug rather than a setting. Zoom is off,
+because a zoom nobody asked for is a surprise in a way a pointer is not.
+
+**The migration is one-way and runs once.** `KnipsBigCursor` becomes
+`big`, `KnipsSmoothCursor` becomes `smooth`, neither ticked becomes
+`smooth` (those takes had the system pointer in their frames, and a raw
+take with the pointer drawn back is the nearest thing to what they had),
+and `KnipsZoomOnClick` becomes `KnipsEffectZoom`. The old keys are read
+and never written — `defaults` is a public interface and a downgrade
+should still find what it wrote — and the new keys are written through on
+the first launch that finds them absent, so the migration is over after
+one launch rather than waiting for the user to change something.
+`MigratedEffectZoom` and `MigratedEffectCursor` are neutral and tested;
+verified on device by seeding the legacy keys, launching the app, and
+reading `KnipsEffectCursor = big` back out.
+
+**The control itself** is an `NSPopUpButton` pull-down in the playback
+window's bar, whose three items carry their own selectors on the same one
+runtime-built `KnipsAppTarget`. Each item is enabled from
+`AvailableExportEffects` asked of the **raw take's** sidecar — the
+deliverable's own sidecar would answer "none of them", which is true of
+the deliverable and beside the point — and a disabled item carries the
+reason as its tooltip, with the same reason on an inert last line of the
+menu. Ticking Smooth Cursor unticks Big Cursor; clicking the one already
+ticked turns the pointer off, which is the only way a two-item control can
+reach "no pointer". *Re-export* renders the deliverable again from the raw
+take, in place, behind the same `Busy` lockout the GIF export uses.
+
 ## Timing and the writer session
 
 `AVAssetWriterInput.appendSampleBuffer:` uses the buffer's own PTS.
@@ -2278,13 +2528,19 @@ does start handing back a surface it has not recomposited, the symptom is
 a trail of pointers standing still in the video, and the fix is to
 composite into a copy.
 
-**The toggle** is one menu item next to Zoom on Click and Follow Mouse,
-with its own defaults key (`KnipsBigCursor`), its own reader and its own
-writer — the rule from "Each toggle writes its own key" below. It is
-idle-only, like the other two, for the plainest version of the same
-reason: the drawn pointer replaces ScreenCaptureKit's own, which is part
-of the configuration the capture started with, and the sprite is rendered
-before the first frame arrives.
+**The toggle is gone; the sprite is not.** Big Cursor was a menu checkbox
+that had to be ticked *before* a recording, because the drawn pointer
+replaces ScreenCaptureKit's own and that is part of the configuration the
+capture started with. Raw takes removed the constraint rather than the
+feature: the pointer is now always out of the pixels, so the same sprite,
+the same `CursorFramePoint` mapping and the same premultiplied blit are
+applied at **render** time from the sidecar's track, and *Big Cursor* is
+one item in the playback window's Effects control — choosable, and
+re-choosable, after the take exists.
+
+The record-time path below is still exactly what `knips record
+--big-cursor` does, and the capture-queue rules it is written to still
+apply there. What changed is who asks for it.
 
 A sprite that cannot be made is never a reason to fail a recording. The
 geometry's `ShowsCursor` is put back before the stream configuration is
@@ -2439,19 +2695,61 @@ sweep reaching 6.4x and 8x reductions found the same trend continuing to
 grow at the far end, still second-order against a content offset. Beyond
 fourfold the model is extrapolating.
 
-**The band is a measured spread, not a bound.** The worst residual across
-those sixteen is 2.19x (and 1.50x across six APNG exports). The reported
-band is **3x** — wider than the calibration set, because a band that only
-just contains its own sample is a band fitted to it. The previous 2x band,
-set from five exports that were all halvings, was exceeded the first time
-somebody exported content unlike those five. Sixteen exports of one
-person's screen is still not the space of screen content, so the wording
-in the output says "roughly" and the in-flight projection replaces the
-whole guess inside the first hundred frames.
+**The band is a measured spread, not a bound.** The worst GIF residual
+across those sixteen is 2.19x. The reported band is **3x** — wider than
+the calibration set, because a band that only just contains its own sample
+is a band fitted to it. The previous 2x band, set from five exports that
+were all halvings, was exceeded the first time somebody exported content
+unlike those five. Sixteen exports of one person's screen is still not the
+space of screen content, so the wording in the output says "roughly" and
+the in-flight projection replaces the whole guess inside the first hundred
+frames.
 
-Two secondary constants, both measured: `--no-dither` lands at 0.61 of the
-dithered size (0.525 and 0.694 on two takes), and APNG at **59** rather
-than GIF's 14.9 — truecolour zlib against palette LZW.
+`--no-dither` lands at 0.61 of the dithered size (0.525 and 0.694 on two
+takes).
+
+**APNG needed its own constant and its own band.** It used to share the
+GIF's 3x band with a `K` of 59 and a claim that "six exports over five
+takes fit within 1.5x" — which was a property of those six exports rather
+than of APNG. Refitted over **twenty-eight** exports of fourteen real
+takes (Retina UI, near-blank screens, region and whole-display captures,
+each at its own width capped at 1200 px and again at 600 px):
+
+| | ratio |
+| --- | --- |
+| geometric mean (the new `K`) | **33** |
+| range across the 28 | 2.6 to 302 — a factor of **117** |
+| worst residual against `K` | **12.7x** |
+| the old constant's worst residual | 22.8x |
+
+Both ends are content and both are real. A nearly blank screen (three
+takes, 2.6 to 5.5) costs H.264 a keyframe and a fragment header every
+couple of seconds while zlib gets the same picture almost free, so the
+*movie* is large relative to the APNG. A Retina whole-display take reduced
+threefold (220 to 302) is the opposite: H.264 is extremely efficient per
+pixel-frame at 3600×2338, and the reduction concentrates all of that
+detail into a quarter of the pixels.
+
+A downscale term was fitted for this too, and is not here for the same
+reason it is not on the GIF path: over the same twenty-eight exports
+`(sourcePixels/outputPixels)^a` bottoms out at `a = 0.3` and moves the
+worst residual from 12.8x to 11.7x. It buys a tenth of the error for a
+term nobody can check by eye. The effect itself is real and small —
+exporting the same take at 600 px rather than at its own width raises the
+ratio by 25 % to 56 %, consistently, on every one of the fourteen takes.
+
+The reported APNG band is **8x**, which covers 23 of the 28. Six covers
+21 and thirteen covers all 28; thirteen is not chosen precisely because it
+would cover all 28, and the five it misses at eight are the two named
+content extremes rather than a scatter. It is a measured spread, not a
+bound, and that sentence applies harder here than it does to the GIF.
+
+The flat prior for a source whose size is not known was refitted with the
+same set: APNG's own bytes per output pixel-frame have a geometric mean of
+**0.085**, against the 0.45 that constant used to hold. It is a far worse
+model than the content-aware one either way — worst residual 84x against
+12.7x — which is why `DescribeEstimate` says so out loud whenever that
+path is taken.
 
 ## Was there actually any sound?
 

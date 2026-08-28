@@ -12,13 +12,29 @@
   camera window that gets recorded along with everything else —
   optionally with **Camera ▸ Blur Background**, which keeps you sharp and
   blurs the room behind you.
-- **Behaviour ▸** holds three checkboxes that change what a recording
-  shows while it runs — **Zoom on Click** (a click zooms the recording
-  around it), **Follow Mouse** (a region recording pans with the pointer)
-  and **Big Cursor** (an enlarged pointer drawn into the recording
-  instead of the captured system one, so it survives into a GIF or an
-  APNG; also `knips record --big-cursor`). None of them changes the
-  file's dimensions.
+- **The app records raw and renders what you get.** The take is captured
+  with no pointer in its pixels and no zoom in its framing; on stop, Knips
+  renders the movie you asked for from it — the pointer drawn back, Zoom
+  on Click applied — with the audio copied across untouched. The raw take
+  stays beside it as `<name>-raw.mp4`, so the playback window's
+  **Effects** control and its **Re-export** button can produce the file
+  again with a different choice, as often as you like.
+- **That means a take is normally two movies and two sidecars, and Knips
+  never deletes any of them.** `~/Movies/knips/` grows at roughly twice
+  the rate it used to; the raw take is what makes the effects changeable
+  afterwards, and deleting it is a decision only you can make (delete
+  `<name>-raw.mp4` and `<name>-raw.knips.jsonl` together — the playback
+  window then greys its Effects out and says why). A **window** recording
+  is the exception: nothing can be applied to it after the fact, so it is
+  written once, as a single movie and a single sidecar.
+- **Follow Mouse** is the one recording setting left in the menu, because
+  a pan decides which pixels are read off the screen and cannot be undone
+  afterwards. Zoom on Click, Smooth Cursor and Big Cursor moved into the
+  Effects control.
+- `./build/knips render --in=demo-raw.mp4 --effects=zoom,big-cursor` is
+  the same render from a script. `knips record` is unchanged: it still
+  bakes the system pointer in, and `--big-cursor` / `--smooth-cursor`
+  still mean what they meant.
 - `./build/knips export --in=demo.mp4 --out=demo.gif` turns the
   recording into an animated GIF, optionally trimmed and scaled;
   `--out=demo.apng` writes truecolour APNG instead, and `--out=cut.mp4
@@ -84,7 +100,7 @@ A `◉` appears in the menu bar. Clicking it opens:
 | Stop Recording | Enabled only while recording, and shows **⌘⇧2** — the system-wide shortcut below. |
 | Cancel selection | Enabled only while selecting. The overlay covers the menu bar, so this only matters if the overlay failed to open. |
 | Camera ▸ | Three checkboxes about the picture-in-picture window, all available in every state, recording included. **Show Camera** puts it on screen. **Circular Camera** makes it a circle instead of a rounded rectangle. **Blur Background** blurs the room behind you and leaves you sharp. All three apply straight away and are remembered between launches. |
-| Behaviour ▸ | Three checkboxes that change what a recording *shows* while it runs, none of them changeable mid-recording and all remembered between launches. **Zoom on Click**: a click inside the recorded area zooms the *recording* to 2× around the click, holds for 0.8 s after the last click, and eases back — nothing on screen moves, only what the file shows. **Follow Mouse (region)**: a **region** recording pans to keep the pointer inside the middle third of the frame and the red frame moves with it; whole-display and window recordings ignore it, since a display has nowhere to pan. **Big Cursor**: the pointer is drawn into the recording at two and a half times its size and the system one is left out, so a GIF or APNG export keeps it; window recordings ignore it. |
+| Follow Mouse (region) | The one effect that has to be chosen before a recording, because it decides which pixels are read off the screen at all: a **region** recording pans to keep the pointer inside the middle third of the frame, and the red frame moves with it. Whole-display and window recordings ignore it, since a display has nowhere to pan. Not changeable mid-recording; remembered between launches. Zoom on Click, Smooth Cursor and Big Cursor used to sit beside it and are now in the playback window's **Effects** control, where they can be chosen — and changed — after the take exists. |
 | Audio ▸ | Two independent checkboxes, **System Audio** and **Microphone**. Tick either, both, or neither: each ticked source becomes its own AAC track in the file. Remembered between launches; not changeable mid-recording. |
 | Recordings folder | Opens `~/Movies/knips/` in Finder. |
 | Last error: … | Only visible after a failure, and after anything that switched a recording setting off for one recording; the full text is in `~/Library/Logs/Knips.log`. |
@@ -210,9 +226,11 @@ Starting any recording closes the playback window first, so the app's own
 Dock tile and menu bar are never in the frame — the whole reason Knips is
 a menu-bar-only process the rest of the time.
 
-| Button | What it does |
+| Control | What it does |
 | --- | --- |
-| Export as GIF… | Writes `<recording>.gif` beside the movie at 20 fps and reveals it in Finder. Retina recordings export at their **point** size (pixel width ÷ capture scale — an exact 2:1 reduction, which is what keeps small text readable); scale-1 recordings cap at 800 px. A large result is noted on the `Last error:` line. Use `knips export --width=N` for anything else. |
+| Effects ▾ | **Zoom on Click**, **Smooth Cursor**, **Big Cursor**. What is ticked here is what the movie was rendered with, and what *Re-export* and *Export as GIF…* will use. The two cursor items are one setting — ticking one unticks the other, and clicking the ticked one turns the pointer off. An item the take cannot take is greyed out with the reason as its tooltip: a window recording's frames have no fixed relationship to the screen its pointer was measured against, a take where nothing was clicked has nothing to zoom to, and a recording made before this existed has no raw take beside it. Your choice becomes the default for the next recording. |
+| Re-export | Renders the movie again from the raw take with what Effects now says, replacing it in place. The title counts it out; the player reloads when it is done. |
+| Export as GIF… | Writes `<recording>.gif` beside the movie at 20 fps and reveals it in Finder, from the **raw** take and with the same Effects selection — so the GIF moves the way the movie beside it moves. Retina recordings export at their **point** size (pixel width ÷ capture scale — an exact 2:1 reduction, which is what keeps small text readable); scale-1 recordings cap at 800 px. A large result is noted on the `Last error:` line. Use `knips export --width=N` for anything else. |
 | Reveal in Finder | Shows the `.mp4`. |
 | Close | Closes the window and releases the player. |
 
@@ -227,14 +245,21 @@ button's
 defaults do not cover — a different rate, a width, a trim — use
 `knips export` (below).
 
-**Remembered settings.** The two Audio checkboxes, the three Behaviour
-checkboxes, the camera's three and the last region live in
+**Remembered settings.** The two Audio checkboxes, Follow Mouse, the
+saved effect defaults, the camera's three and the last region live in
 `NSUserDefaults` under `KnipsAudioSystem`, `KnipsAudioMicrophone`,
-`KnipsZoomOnClick`, `KnipsFollowMouse`, `KnipsBigCursor`,
+`KnipsFollowMouse`, `KnipsEffectZoom`, `KnipsEffectCursor`,
 `KnipsCameraVisible`, `KnipsCameraShape`, `KnipsCameraBlur`,
 `KnipsCameraOriginX`/`Y` and `KnipsLastRegion*`. `KnipsRecordSystemAudio` is
 the key the single old checkbox used; it is read once, only when
 `KnipsAudioSystem` has never been written, and is never written again.
+`KnipsZoomOnClick`, `KnipsBigCursor` and `KnipsSmoothCursor` are the three
+menu toggles the effects replaced, and are read the same way: once, only
+where the new key is absent, and never written again — a ticked Big Cursor
+becomes `KnipsEffectCursor = big`, a ticked Smooth Cursor becomes
+`smooth`, and neither ticked becomes `smooth` as well, because those takes
+had the system pointer in their frames and a drawn one is the nearest
+thing a raw take can offer.
 The bare binary and `Knips.app` keep separate domains (`knips` versus the
 bundle identifier), so a setting made in one is not seen by the other:
 

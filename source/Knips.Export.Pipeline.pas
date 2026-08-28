@@ -46,7 +46,10 @@ uses
   Knips.Export.MovieReader,
   Knips.Export.SizeEstimate,
   Knips.Export.Timing,
+  Knips.Export.ZoomTrack,
   Knips.Options,
+  Knips.Recording.LiveMath,
+  Knips.Recording.Sidecar,
   MacOSAll;
 
 const
@@ -105,6 +108,14 @@ type
     SmoothCursor: Boolean;
     SmoothCursorFrames: Int64;
     SmoothCursorNote: string;
+    // Post-hoc Zoom on Click (Knips.Export.ZoomTrack), applied to the
+    // decoded frames before they are scaled — the same effect, from the
+    // same click track, the MP4 render applies, so a GIF and the movie
+    // beside it move together.
+    ZoomOnClick: Boolean;
+    ZoomedFrames: Int64;
+    ZoomClicks: Integer;
+    ZoomNote: string;
     // What the size was expected to be before a byte was written, and how
     // many output frames that was over. Kept in the report so the caller
     // can say afterwards how close it came — which is the only way the
@@ -179,6 +190,14 @@ type
     // is chosen from scaled frames, and a palette that had never seen the
     // pointer would quantise it into whatever was nearest.
     FCursorEffect: TExportCursor;
+    // The post-hoc zoom's own state. The log is loaded a second time
+    // rather than borrowed from FCursorEffect: the cursor effect is
+    // absent whenever no pointer was asked for, and a zoom does not
+    // depend on a pointer.
+    FZoomLog: TSidecarLog;
+    FZoomClicks: TZoomClickArray;
+    FZoomWalker: TZoomWalker;
+    FZoomBase: TLiveRect;
     // The source movie's bytes per pixel-frame — H.264's own verdict on
     // how busy the content is, and the only content signal the size
     // estimate has that costs nothing to get
@@ -207,6 +226,7 @@ type
     function NextEmittedFrame(out AFrame: TMovieReaderFrame): Boolean;
     procedure EnsureTargetSize(ASourceWidth, ASourceHeight: Integer);
     procedure PrepareSmoothCursor;
+    procedure PrepareZoom;
     function ScaleFrame(const AFrame: TMovieReaderFrame;
       var ADestination: TBgraImage; out AError: string): Boolean;
     function RangeSeconds: Double;
@@ -362,6 +382,7 @@ destructor TExportSession.Destroy;
 begin
   FreeAndNil(FReader);
   FreeAndNil(FCursorEffect);
+  FreeAndNil(FZoomLog);
   inherited Destroy;
 end;
 
@@ -370,6 +391,13 @@ begin
   FEmitted := 0;
   FBaseSeconds := 0;
   FLastSlot := 0;
+  // A GIF walks the movie twice and the walker only goes forwards, so
+  // the second pass starts the zoom over. Without this the encode pass
+  // would find the walk already at the end of the movie and every frame
+  // would come out unzoomed — while the palette pass had seen the zoom.
+  if FReport.ZoomOnClick then
+    FZoomWalker := ZoomWalkerStart(FZoomBase, FOptions.Effects.ZoomFactor,
+      FOptions.Effects.ZoomHoldSeconds);
 end;
 
 function TExportSession.NextEmittedFrame(
@@ -430,6 +458,49 @@ begin
   BgraImageResize(FScaled, FReport.PixelWidth, FReport.PixelHeight);
   BgraImageResize(FPending, FReport.PixelWidth, FReport.PixelHeight);
   PrepareSmoothCursor;
+  PrepareZoom;
+end;
+
+// The post-hoc zoom, when it was asked for and the take can take it.
+// Every refusal is a note rather than a failure, exactly as the cursor's
+// are: an export whose zoom could not be applied is still the right
+// animation, and it is the crop that is missing.
+procedure TExportSession.PrepareZoom;
+var
+  Available: TSidecarEffectAvailability;
+  Error: string;
+begin
+  if not FOptions.Effects.ZoomOnClick or (FZoomLog <> nil) then
+    Exit;
+  FZoomLog := TSidecarLog.Create;
+  if not FZoomLog.LoadFromFile(SidecarPathFor(FOptions.InputPath), Error) then
+  begin
+    FReport.ZoomNote := 'there is no event sidecar for this recording';
+    FreeAndNil(FZoomLog);
+    Exit;
+  end;
+  Available := AvailableExportEffects(FZoomLog);
+  if not Available.CanZoomOnClick then
+  begin
+    // The zoom's own reason; see the same line in Knips.Export.Render.
+    FReport.ZoomNote := Available.ZoomReason;
+    FreeAndNil(FZoomLog);
+    Exit;
+  end;
+  FZoomClicks := ZoomClicksFromLog(FZoomLog);
+  FReport.ZoomClicks := Length(FZoomClicks);
+  if FReport.ZoomClicks = 0 then
+  begin
+    FReport.ZoomNote := 'nothing was clicked inside the recorded '
+      + 'rectangle, so there was nothing to zoom to';
+    FreeAndNil(FZoomLog);
+    Exit;
+  end;
+  FZoomBase := LiveRect(FZoomLog.Header.BaseX, FZoomLog.Header.BaseY,
+    FZoomLog.Header.BaseWidth, FZoomLog.Header.BaseHeight);
+  FReport.ZoomOnClick := True;
+  FZoomWalker := ZoomWalkerStart(FZoomBase, FOptions.Effects.ZoomFactor,
+    FOptions.Effects.ZoomHoldSeconds);
 end;
 
 // The synthetic pointer, if the movie is one that was recorded waiting for
@@ -469,6 +540,9 @@ var
   Base: Pointer;
   Stride, SourceWidth, SourceHeight: Integer;
   Status: CVReturn;
+  Crop: TZoomCrop;
+  Source: TLiveRect;
+  HasCrop: Boolean;
 begin
   Result := False;
   AError := '';
@@ -492,13 +566,43 @@ begin
         [AFrame.Seconds]);
       Exit;
     end;
-    BgraResample(PByte(Base), Stride, SourceWidth, SourceHeight,
-      ADestination, FScratch);
+    HasCrop := False;
+    Source := Default(TLiveRect);
+    Crop := Default(TZoomCrop);
+    if FReport.ZoomOnClick then
+    begin
+      FZoomWalker := ZoomWalkerAdvance(FZoomWalker, FZoomClicks,
+        AFrame.Seconds);
+      Source := ZoomWalkerSourceRect(FZoomWalker);
+      Crop := ZoomFrameCrop(SourceWidth, SourceHeight, FZoomBase, Source);
+      HasCrop := True;
+      if not Crop.Identity then
+        Inc(FReport.ZoomedFrames);
+    end;
+    // The crop is applied by handing the resampler a smaller rectangle of
+    // the same buffer: the stride is the frame's, the origin is the
+    // crop's. One resample does the crop and the scale together, so a
+    // zoomed export costs no more per frame than an unzoomed one.
+    if HasCrop then
+      BgraResample(PByte(Base) + PtrInt(Crop.Y) * Stride
+        + PtrInt(Crop.X) * BgraBytesPerPixel, Stride, Crop.Width,
+        Crop.Height, ADestination, FScratch)
+    else
+      BgraResample(PByte(Base), Stride, SourceWidth, SourceHeight,
+        ADestination, FScratch);
     // After the resample, into the scaled frame: the sprite was rendered
     // at the OUTPUT's scale, so drawing it before would shrink it with
-    // the picture and soften its edges twice over.
+    // the picture and soften its edges twice over. With a crop in force
+    // the frame no longer shows what the capture was reading, so the
+    // pointer is placed against the crop instead.
     if FCursorEffect <> nil then
-      FCursorEffect.DrawInto(ADestination, AFrame.Seconds);
+    begin
+      if HasCrop then
+        FCursorEffect.DrawIntoCropped(ADestination, AFrame.Seconds, Source.X,
+          Source.Y, Source.Width, Source.Height)
+      else
+        FCursorEffect.DrawInto(ADestination, AFrame.Seconds);
+    end;
     Result := True;
   finally
     CVPixelBufferUnlockBaseAddress(AFrame.PixelBuffer,
@@ -760,7 +864,9 @@ begin
   Result := False;
   FReport.FramesRead := 0;
   // The palette pass has already drawn the pointer into every frame it
-  // sampled; only this pass's frames end up in the file.
+  // sampled, and cropped every frame it scaled; only this pass's frames
+  // end up in the file, so both counters start again here.
+  FReport.ZoomedFrames := 0;
   if FCursorEffect <> nil then
     FCursorEffect.ResetCounters;
   if not FReader.StartPass(FStartSeconds, FRangeSeconds, AError) then

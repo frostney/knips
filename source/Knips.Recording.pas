@@ -256,6 +256,63 @@ const
   RunLoopSliceSeconds = 1 / DefaultSidecarSampleHz;
   ProgressEverySlices = 2 * DefaultSidecarSampleHz;
 
+// How much of the top of one display belongs to the menu bar, in that
+// display's own points, for the sidecar's header.
+//
+// Two sources and the larger wins, exactly as Knips.App.Live computes it
+// for the live effect: NSStatusBar's thickness (22 everywhere so far) and
+// the screen's real top inset, `frame` minus `visibleFrame` measured from
+// the top — which on a notched Mac is 39. Only the top inset is used; the
+// Dock, the other thing visibleFrame excludes, never sits there.
+//
+// Asked only when AppKit is already running, and it usually is: the
+// menu-bar app obviously, but `knips record` from a shell as well —
+// something on the ScreenCaptureKit path leaves `NSApp` standing before
+// the sidecar's header is written, and a plain `knips record` was
+// measured writing 39.000 (the real notch inset) rather than 0. The guard
+// stays because nothing here may *depend* on that: an AppKit that has not
+// been started is not something to start from inside a recording, and the
+// field's documented zero means "not measured", which is a fine answer.
+function MenuBarInsetForDisplay(ADisplayID: UInt32): Double;
+var
+  Bounds: CGRect;
+  Screens: NSArray;
+  Screen: NSScreen;
+  Frame, Visible: NSRect;
+  Inset: Double;
+  I: Integer;
+begin
+  Result := 0;
+  if (NSApp = nil) or (ADisplayID = 0) then
+    Exit;
+  Result := NSStatusBar.systemStatusBar.thickness;
+  Bounds := CGDisplayBounds(ADisplayID);
+  Screens := NSScreen.screens;
+  if Screens = nil then
+    Exit;
+  for I := 0 to Integer(Screens.count) - 1 do
+  begin
+    Screen := NSScreen(Screens.objectAtIndex(I));
+    Frame := Screen.frame;
+    // Matched on the origin's x and the size rather than on the origin's
+    // y: AppKit measures y upwards from the primary screen's bottom-left
+    // and CoreGraphics downwards from its top-left, so the two disagree
+    // about y for every screen but agree about x and about size.
+    if (Abs(Frame.origin.x - Bounds.origin.x) > 1)
+      or (Abs(Frame.size.width - Bounds.size.width) > 1)
+      or (Abs(Frame.size.height - Bounds.size.height) > 1) then
+      Continue;
+    Visible := Screen.visibleFrame;
+    Inset := (Frame.origin.y + Frame.size.height)
+      - (Visible.origin.y + Visible.size.height);
+    if Inset > Result then
+      Result := Inset;
+    Break;
+  end;
+  if Result < 0 then
+    Result := 0;
+end;
+
 { TRecordingSession }
 
 constructor TRecordingSession.Create(const AOptions: TRecordingOptions);
@@ -692,6 +749,9 @@ begin
   Header.BaseY := FBaseRect.origin.y;
   Header.BaseWidth := FBaseRect.size.width;
   Header.BaseHeight := FBaseRect.size.height;
+  // What a post-recording Zoom on Click must not treat as content: the
+  // click that stops a recording is a click on the status item.
+  Header.MenuBarInset := MenuBarInsetForDisplay(FDisplayID);
   // Three states, and the movie looks different in each: Big Cursor drew
   // its own pointer, ScreenCaptureKit drew the system one, or nothing did.
   if FReport.BigCursor then

@@ -18,8 +18,6 @@ type
     procedure TestIdleStartsWindowOrLastRegion;
     procedure TestAudioTogglesOnlyWhileIdle;
     procedure TestLiveEffectsToggleOnlyWhileIdle;
-    procedure TestBigCursorTogglesOnlyWhileIdle;
-    procedure TestSmoothCursorTogglesOnlyWhileIdle;
     procedure TestToggleDefaultsKeysAreDistinct;
     procedure TestIdleRejectsStop;
     procedure TestSelectingCommitsOrCancels;
@@ -157,6 +155,18 @@ type
     procedure TestProgressTitleClamps;
   end;
 
+  TEffectDefaultsTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestTheDefaultDrawsThePointer;
+    procedure TestZoomMigratesFromTheOldToggle;
+    procedure TestCursorMigratesFromTheOldToggles;
+    procedure TestANewKeyWinsOverTheOldOnes;
+    procedure TestTheTwoCursorEffectsAreOneSetting;
+    procedure TestRenderProgressIsClamped;
+    procedure TestTheUnavailableLineStaysNarrow;
+  end;
+
   TWindowMenuTests = class(TTestSuite)
   public
     procedure SetupTests; override;
@@ -180,12 +190,8 @@ begin
     TestIdleStartsWindowOrLastRegion);
   Test('the two audio checkboxes only toggle while idle',
     TestAudioTogglesOnlyWhileIdle);
-  Test('the two live-effect checkboxes only toggle while idle',
+  Test('the Follow Mouse checkbox only toggles while idle',
     TestLiveEffectsToggleOnlyWhileIdle);
-  Test('the big-cursor checkbox only toggles while idle',
-    TestBigCursorTogglesOnlyWhileIdle);
-  Test('smooth cursor toggles only while idle',
-    TestSmoothCursorTogglesOnlyWhileIdle);
   Test('no two remembered toggles share a defaults key',
     TestToggleDefaultsKeysAreDistinct);
   Test('idle rejects stop', TestIdleRejectsStop);
@@ -254,81 +260,47 @@ begin
     .ToBe(False);
 end;
 
-// Zoom on Click and Follow Mouse move the stream's sourceRect, which only
-// exists because the capture was *started* with one. That is settled when
-// the recording begins, so like the audio checkbox they are legal in
-// exactly one state and leave it where they found it.
+// Follow Mouse moves the stream's sourceRect, which only exists because
+// the capture was *started* with one. That is settled when the recording
+// begins, so like the audio checkboxes it is legal in exactly one state
+// and leaves it where it found it.
+//
+// It is the only one of the four record-time toggles left: Zoom on Click,
+// Big Cursor and Smooth Cursor became render-time effects and stopped
+// being commands at all, which is why there is nothing here for them.
 procedure TTransitionTests.TestLiveEffectsToggleOnlyWhileIdle;
 var
   Next: TAppState;
 begin
   Next := asRecording;
-  Expect<Boolean>(NextAppState(asIdle, acToggleZoomOnClick, Next)).ToBe(True);
-  Expect<Integer>(Ord(Next)).ToBe(Ord(asIdle));
   Expect<Boolean>(NextAppState(asIdle, acToggleFollowMouse, Next)).ToBe(True);
   Expect<Integer>(Ord(Next)).ToBe(Ord(asIdle));
-  Expect<Boolean>(NextAppState(asRecording, acToggleZoomOnClick, Next))
-    .ToBe(False);
   Expect<Boolean>(NextAppState(asRecording, acToggleFollowMouse, Next))
-    .ToBe(False);
-  Expect<Boolean>(NextAppState(asSelecting, acToggleZoomOnClick, Next))
     .ToBe(False);
   Expect<Boolean>(NextAppState(asSelecting, acToggleFollowMouse, Next))
     .ToBe(False);
-  Expect<Boolean>(IsCommandEnabled(asIdle, acToggleZoomOnClick)).ToBe(True);
   Expect<Boolean>(IsCommandEnabled(asIdle, acToggleFollowMouse)).ToBe(True);
   Expect<Boolean>(IsCommandEnabled(asRecording, acToggleFollowMouse))
     .ToBe(False);
 end;
 
-// Big Cursor is settled at the same moment and for a plainer reason: the
-// drawn pointer replaces ScreenCaptureKit's own, which is part of the
-// configuration the capture started with, and its sprite is rendered
-// before the first frame arrives.
-procedure TTransitionTests.TestBigCursorTogglesOnlyWhileIdle;
-var
-  Next: TAppState;
-begin
-  Next := asRecording;
-  Expect<Boolean>(NextAppState(asIdle, acToggleBigCursor, Next)).ToBe(True);
-  Expect<Integer>(Ord(Next)).ToBe(Ord(asIdle));
-  Expect<Boolean>(NextAppState(asRecording, acToggleBigCursor, Next))
-    .ToBe(False);
-  Expect<Boolean>(NextAppState(asSelecting, acToggleBigCursor, Next))
-    .ToBe(False);
-  Expect<Boolean>(IsCommandEnabled(asIdle, acToggleBigCursor)).ToBe(True);
-  Expect<Boolean>(IsCommandEnabled(asRecording, acToggleBigCursor))
-    .ToBe(False);
-  Expect<Boolean>(IsCommandEnabled(asSelecting, acToggleBigCursor))
-    .ToBe(False);
-end;
-
-// Smooth Cursor is the same showsCursor decision made the other way, so
-// it is settled at the same moment and refused at the same two.
-procedure TTransitionTests.TestSmoothCursorTogglesOnlyWhileIdle;
-var
-  Next: TAppState;
-begin
-  Next := asRecording;
-  Expect<Boolean>(NextAppState(asIdle, acToggleSmoothCursor, Next)).ToBe(True);
-  Expect<Integer>(Ord(Next)).ToBe(Ord(asIdle));
-  Expect<Boolean>(NextAppState(asRecording, acToggleSmoothCursor, Next))
-    .ToBe(False);
-  Expect<Boolean>(NextAppState(asSelecting, acToggleSmoothCursor, Next))
-    .ToBe(False);
-  Expect<Boolean>(IsCommandEnabled(asIdle, acToggleSmoothCursor)).ToBe(True);
-  Expect<Boolean>(IsCommandEnabled(asRecording, acToggleSmoothCursor))
-    .ToBe(False);
-  Expect<Boolean>(IsCommandEnabled(asSelecting, acToggleSmoothCursor))
-    .ToBe(False);
-end;
-
-// Pins the big-cursor key's value and that it collides with none of the
-// established toggle keys. (This cannot catch a writer touching a
+// Pins the remembered keys' values and that no two of them collide —
+// including the two the effect defaults added and the three legacy ones
+// the migration still reads. (This cannot catch a writer touching a
 // neighbour's key — that guarantee lives in the per-key store shape in
 // Knips.App.pas, one reader and one writer per key.)
 procedure TTransitionTests.TestToggleDefaultsKeysAreDistinct;
 begin
+  Expect<string>(EffectZoomDefaultsKey).ToBe('KnipsEffectZoom');
+  Expect<string>(EffectCursorDefaultsKey).ToBe('KnipsEffectCursor');
+  Expect<Boolean>(EffectZoomDefaultsKey = EffectCursorDefaultsKey)
+    .ToBe(False);
+  Expect<Boolean>(EffectZoomDefaultsKey = ZoomOnClickDefaultsKey).ToBe(False);
+  Expect<Boolean>(EffectCursorDefaultsKey = BigCursorDefaultsKey).ToBe(False);
+  Expect<Boolean>(EffectCursorDefaultsKey = SmoothCursorDefaultsKey)
+    .ToBe(False);
+  Expect<Boolean>(EffectCursorDefaultsKey = FollowMouseDefaultsKey)
+    .ToBe(False);
   Expect<string>(BigCursorDefaultsKey).ToBe('KnipsBigCursor');
   Expect<Boolean>(BigCursorDefaultsKey = ZoomOnClickDefaultsKey).ToBe(False);
   Expect<Boolean>(BigCursorDefaultsKey = FollowMouseDefaultsKey).ToBe(False);
@@ -1891,6 +1863,118 @@ begin
   Expect<Double>(Rect.Y).ToBe(1269);
 end;
 
+{ TEffectDefaultsTests }
+
+procedure TEffectDefaultsTests.SetupTests;
+begin
+  Test('a fresh install draws the pointer and does not zoom',
+    TestTheDefaultDrawsThePointer);
+  Test('Zoom on Click migrates out of the old menu toggle',
+    TestZoomMigratesFromTheOldToggle);
+  Test('the cursor effect migrates out of the two old menu toggles',
+    TestCursorMigratesFromTheOldToggles);
+  Test('once the new key exists the old ones are never consulted again',
+    TestANewKeyWinsOverTheOldOnes);
+  Test('the two cursor effects are one setting',
+    TestTheTwoCursorEffectsAreOneSetting);
+  Test('render progress is clamped to 0..100',
+    TestRenderProgressIsClamped);
+  Test('the Effects menu''s reason line stays narrow',
+    TestTheUnavailableLineStaysNarrow);
+end;
+
+procedure TEffectDefaultsTests.TestTheDefaultDrawsThePointer;
+var
+  Effects: TExportEffects;
+begin
+  Effects := DefaultAppEffects;
+  // A raw take has no pointer in its pixels at all, so this is the one
+  // default that decides whether a first recording looks broken.
+  Expect<string>(ExportCursorModeName(Effects.Cursor)).ToBe('smooth');
+  Expect<Boolean>(Effects.ZoomOnClick).ToBe(False);
+end;
+
+procedure TEffectDefaultsTests.TestZoomMigratesFromTheOldToggle;
+begin
+  Expect<Boolean>(MigratedEffectZoom(False, False, True)).ToBe(True);
+  Expect<Boolean>(MigratedEffectZoom(False, False, False)).ToBe(False);
+end;
+
+procedure TEffectDefaultsTests.TestCursorMigratesFromTheOldToggles;
+begin
+  Expect<string>(ExportCursorModeName(
+    MigratedEffectCursor(False, '', True, False))).ToBe('big');
+  Expect<string>(ExportCursorModeName(
+    MigratedEffectCursor(False, '', False, True))).ToBe('smooth');
+  // Neither ticked is the ordinary upgrade: those takes had the system
+  // pointer in their frames, and the nearest thing a raw take can offer
+  // is the pointer drawn back.
+  Expect<string>(ExportCursorModeName(
+    MigratedEffectCursor(False, '', False, False))).ToBe('smooth');
+  // A preferences file with both — which the recorder refused outright,
+  // so the app could never produce it — resolves rather than guesses.
+  Expect<string>(ExportCursorModeName(
+    MigratedEffectCursor(False, '', True, True))).ToBe('big');
+end;
+
+procedure TEffectDefaultsTests.TestANewKeyWinsOverTheOldOnes;
+begin
+  Expect<Boolean>(MigratedEffectZoom(True, False, True)).ToBe(False);
+  Expect<string>(ExportCursorModeName(
+    MigratedEffectCursor(True, 'none', True, True))).ToBe('none');
+  // A new key holding something unreadable falls back to the migration
+  // rather than to a mode nobody chose.
+  Expect<string>(ExportCursorModeName(
+    MigratedEffectCursor(True, 'enormous', True, False))).ToBe('big');
+end;
+
+procedure TEffectDefaultsTests.TestTheTwoCursorEffectsAreOneSetting;
+begin
+  // Ticking one unticks the other.
+  Expect<string>(ExportCursorModeName(ToggledEffectCursor(ecmSmooth,
+    ecmBig))).ToBe('big');
+  Expect<string>(ExportCursorModeName(ToggledEffectCursor(ecmBig,
+    ecmSmooth))).ToBe('smooth');
+  // Clicking the one already ticked turns the pointer off, which is the
+  // only way a two-item control can reach "no pointer".
+  Expect<string>(ExportCursorModeName(ToggledEffectCursor(ecmSmooth,
+    ecmSmooth))).ToBe('none');
+  Expect<string>(ExportCursorModeName(ToggledEffectCursor(ecmNone,
+    ecmSmooth))).ToBe('smooth');
+end;
+
+// An NSMenu is as wide as its widest item, and the reasons are whole
+// sentences; the tooltip keeps them in full, this line does not.
+procedure TEffectDefaultsTests.TestTheUnavailableLineStaysNarrow;
+var
+  Long: string;
+begin
+  Expect<string>(EffectsUnavailableTitle('')).ToBe('');
+  Expect<string>(EffectsUnavailableTitle('   ')).ToBe('');
+  Expect<string>(EffectsUnavailableTitle('nothing was clicked'))
+    .ToBe('Unavailable: nothing was clicked');
+  Long := 'a window recording''s frames have no fixed relationship to the '
+    + 'screen its pointer was measured against';
+  Expect<Boolean>(Length(EffectsUnavailableTitle(Long))
+    <= Length(EffectsUnavailablePrefix) + MaxEffectsReasonLength).ToBe(True);
+  Expect<Boolean>(Pos('a window recording',
+    EffectsUnavailableTitle(Long)) > 0).ToBe(True);
+end;
+
+procedure TEffectDefaultsTests.TestRenderProgressIsClamped;
+begin
+  Expect<Integer>(RenderPercent(0, 100)).ToBe(0);
+  Expect<Integer>(RenderPercent(50, 100)).ToBe(50);
+  Expect<Integer>(RenderPercent(100, 100)).ToBe(100);
+  // The total is an estimate from the movie's duration and its nominal
+  // rate, so the count really can run past it.
+  Expect<Integer>(RenderPercent(140, 100)).ToBe(100);
+  Expect<Integer>(RenderPercent(10, 0)).ToBe(0);
+  Expect<string>(RenderProgressTitle(150)).ToBe('Rendering… 100%');
+  Expect<string>(RenderProgressTitle(-3)).ToBe('Rendering… 0%');
+  Expect<Boolean>(Pos('%', RenderStatusItemTitle(42)) > 0).ToBe(True);
+end;
+
 begin
   TestRunnerProgram.AddSuite(TTransitionTests.Create('NextAppState'));
   TestRunnerProgram.AddSuite(TTitleTests.Create('StatusItemTitle'));
@@ -1907,6 +1991,8 @@ begin
   TestRunnerProgram.AddSuite(TAudioMenuTests.Create('the Audio submenu'));
   TestRunnerProgram.AddSuite(TExportTests.Create('one-click GIF export'));
   TestRunnerProgram.AddSuite(TWindowMenuTests.Create('Record Window submenu'));
+  TestRunnerProgram.AddSuite(TEffectDefaultsTests.Create(
+    'saved effect defaults'));
   TestRunnerProgram.Run;
   ExitCode := TestResultToExitCode;
 end.

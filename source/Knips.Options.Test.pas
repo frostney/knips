@@ -113,6 +113,20 @@ type
     procedure TestCursorModeNamesRoundTrip;
     procedure TestAnEffectOnAPassthroughTrimIsRefused;
     procedure TestAnEffectOnAGifIsAccepted;
+    procedure TestEffectListsRoundTrip;
+    procedure TestEffectListNoneIsTheWholeAnswer;
+    procedure TestOneCursorEffectAtATime;
+    procedure TestUnknownEffectsAreNamed;
+    procedure TestZoomOnAPassthroughTrimIsRefused;
+  end;
+
+  TRawTakePathTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestTheSuffixGoesBeforeTheExtension;
+    procedure TestTheRoundTrip;
+    procedure TestRecognisingARawTake;
+    procedure TestATakeAlreadyCalledRawCollides;
   end;
 
   TExportFormatTests = class(TTestSuite)
@@ -883,6 +897,123 @@ begin
     TestAnEffectOnAGifIsAccepted);
   Test('a movie output refuses a range that is the whole movie',
     TestMovieOutputRefusesAWholeMovieRange);
+  Test('an effects list survives a round trip through its own text',
+    TestEffectListsRoundTrip);
+  Test('--effects=none is the whole answer, not a word among words',
+    TestEffectListNoneIsTheWholeAnswer);
+  Test('the cursor effects are one setting and refuse to be named twice',
+    TestOneCursorEffectAtATime);
+  Test('an unknown effect is named back to the caller',
+    TestUnknownEffectsAreNamed);
+  Test('a post-hoc zoom on a passthrough trim is refused',
+    TestZoomOnAPassthroughTrimIsRefused);
+end;
+
+// The list is the interface three things speak — the CLI's --effects, the
+// playback window's control, and the saved defaults — so what matters is
+// that writing it and reading it back are inverses.
+procedure TExportValidationTests.TestEffectListsRoundTrip;
+var
+  Effects, Parsed: TExportEffects;
+  Error: string;
+begin
+  Effects := DefaultExportEffects;
+  // 'as-recorded', not 'none': the two mean opposite things and the
+  // default is not "no pointer".
+  Expect<string>(DescribeExportEffects(Effects)).ToBe('as-recorded');
+  Parsed := DefaultExportEffects;
+  Parsed.Cursor := ecmBig;
+  Expect<Boolean>(ParseExportEffects(DescribeExportEffects(Effects), Parsed,
+    Error)).ToBe(True);
+  Expect<string>(DescribeExportEffects(Parsed)).ToBe('as-recorded');
+  Effects.ZoomOnClick := True;
+  Effects.Cursor := ecmSmooth;
+  Expect<string>(DescribeExportEffects(Effects)).ToBe('zoom,smooth-cursor');
+  Parsed := DefaultExportEffects;
+  Expect<Boolean>(ParseExportEffects('zoom,smooth-cursor', Parsed, Error))
+    .ToBe(True);
+  Expect<string>(DescribeExportEffects(Parsed)).ToBe('zoom,smooth-cursor');
+  // Case and spacing are the caller's business, not the format's.
+  Parsed := DefaultExportEffects;
+  Expect<Boolean>(ParseExportEffects(' ZOOM , Big-Cursor ', Parsed, Error))
+    .ToBe(True);
+  Expect<string>(DescribeExportEffects(Parsed)).ToBe('zoom,big-cursor');
+  // An empty list changes nothing, which is what an absent flag means.
+  Parsed := DefaultExportEffects;
+  Parsed.ZoomOnClick := True;
+  Expect<Boolean>(ParseExportEffects('', Parsed, Error)).ToBe(True);
+  Expect<Boolean>(Parsed.ZoomOnClick).ToBe(True);
+end;
+
+procedure TExportValidationTests.TestEffectListNoneIsTheWholeAnswer;
+var
+  Effects: TExportEffects;
+  Error: string;
+begin
+  Effects := DefaultExportEffects;
+  Effects.ZoomOnClick := True;
+  Expect<Boolean>(ParseExportEffects('none', Effects, Error)).ToBe(True);
+  Expect<Boolean>(Effects.ZoomOnClick).ToBe(False);
+  Expect<string>(ExportCursorModeName(Effects.Cursor)).ToBe('none');
+  // Mixed with a request it says two opposite things at once.
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ParseExportEffects('none,zoom', Effects, Error)).ToBe(False);
+  Expect<Boolean>(Error <> '').ToBe(True);
+  // But a trailing comma combines it with nothing at all, which is not a
+  // combination. Counting the split parts got this wrong.
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ParseExportEffects('none,', Effects, Error)).ToBe(True);
+  Expect<string>(ExportCursorModeName(Effects.Cursor)).ToBe('none');
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ParseExportEffects(' , none , ', Effects, Error))
+    .ToBe(True);
+  Expect<string>(ExportCursorModeName(Effects.Cursor)).ToBe('none');
+end;
+
+procedure TExportValidationTests.TestOneCursorEffectAtATime;
+var
+  Effects: TExportEffects;
+  Error: string;
+begin
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ParseExportEffects('smooth-cursor,big-cursor', Effects,
+    Error)).ToBe(False);
+  Expect<Boolean>(Error <> '').ToBe(True);
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ParseExportEffects('as-recorded,no-cursor', Effects,
+    Error)).ToBe(False);
+end;
+
+procedure TExportValidationTests.TestUnknownEffectsAreNamed;
+var
+  Effects: TExportEffects;
+  Error: string;
+begin
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ParseExportEffects('zoom,sparkles', Effects, Error))
+    .ToBe(False);
+  Expect<Boolean>(Pos('sparkles', Error) > 0).ToBe(True);
+  // The zoom before it still took effect on AEffects; that is deliberate
+  // and harmless, because a caller that got False must not use the
+  // record at all. What matters is that the caller is told which word.
+  Expect<Boolean>(Pos('sparkles', Error) > 0).ToBe(True);
+end;
+
+procedure TExportValidationTests.TestZoomOnAPassthroughTrimIsRefused;
+var
+  Options: TExportOptions;
+  Error: string;
+begin
+  Options := DefaultExportOptions;
+  Options.InputPath := 'in.mp4';
+  Options.OutputPath := 'out.mp4';
+  Options.HasTrim := True;
+  Options.TrimStartSeconds := 1;
+  Options.HasTrimEnd := True;
+  Options.TrimEndSeconds := 2;
+  Options.Effects.ZoomOnClick := True;
+  Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(False);
+  Expect<Boolean>(Pos('render', Error) > 0).ToBe(True);
 end;
 
 procedure TExportValidationTests.TestDefaultsPlusPathsAreValid;
@@ -1203,6 +1334,70 @@ begin
   Expect<Boolean>(ValidateExportOptions(Options, Error)).ToBe(True);
 end;
 
+{ TRawTakePathTests }
+
+procedure TRawTakePathTests.SetupTests;
+begin
+  Test('the suffix goes before the extension, not after it',
+    TestTheSuffixGoesBeforeTheExtension);
+  Test('a deliverable name survives the trip through the raw name',
+    TestTheRoundTrip);
+  Test('only a stem ending in the suffix is a raw take',
+    TestRecognisingARawTake);
+  Test('a take the user already called "-raw" collides, as documented',
+    TestATakeAlreadyCalledRawCollides);
+end;
+
+procedure TRawTakePathTests.TestTheSuffixGoesBeforeTheExtension;
+begin
+  Expect<string>(RawTakePathFor('/m/demo.mp4')).ToBe('/m/demo-raw.mp4');
+  Expect<string>(RawTakePathFor('/m/demo.mov')).ToBe('/m/demo-raw.mov');
+  // A directory with dots in it must not be mistaken for an extension.
+  Expect<string>(RawTakePathFor('/m/a.b/demo.mp4'))
+    .ToBe('/m/a.b/demo-raw.mp4');
+  Expect<string>(RawTakePathFor('')).ToBe('');
+end;
+
+procedure TRawTakePathTests.TestTheRoundTrip;
+begin
+  Expect<string>(DeliverablePathFor(RawTakePathFor('/m/demo.mp4')))
+    .ToBe('/m/demo.mp4');
+  Expect<string>(DeliverablePathFor(RawTakePathFor('/m/2026-08-27 18-26.mov')))
+    .ToBe('/m/2026-08-27 18-26.mov');
+  // A path that is not a raw take comes back untouched rather than
+  // having its last four characters removed.
+  Expect<string>(DeliverablePathFor('/m/demo.mp4')).ToBe('/m/demo.mp4');
+end;
+
+procedure TRawTakePathTests.TestRecognisingARawTake;
+begin
+  Expect<Boolean>(IsRawTakePath('/m/demo-raw.mp4')).ToBe(True);
+  Expect<Boolean>(IsRawTakePath('/m/demo.mp4')).ToBe(False);
+  // The suffix has to be the END of the stem, not anywhere in it.
+  Expect<Boolean>(IsRawTakePath('/m/raw-demo.mp4')).ToBe(False);
+  Expect<Boolean>(IsRawTakePath('/m/demo-rawish.mp4')).ToBe(False);
+  // And the stem has to be longer than the suffix: a file actually
+  // called `-raw.mp4` has no deliverable name left underneath it.
+  Expect<Boolean>(IsRawTakePath('/m/-raw.mp4')).ToBe(False);
+  Expect<Boolean>(IsRawTakePath('')).ToBe(False);
+end;
+
+// Documented behaviour rather than a defect, pinned so a change to it is
+// a decision: `knips render --in=demo-raw.mp4` with no --out derives
+// `demo.mp4`, and if the user's own file was already called
+// `demo-raw.mp4` with a `demo.mp4` beside it, that `demo.mp4` is
+// replaced — which is what every knips output path does.
+procedure TRawTakePathTests.TestATakeAlreadyCalledRawCollides;
+begin
+  Expect<string>(DeliverablePathFor('/m/demo-raw.mp4')).ToBe('/m/demo.mp4');
+  // Nesting is not special-cased either: rendering a raw take twice
+  // would want two different names, and knips only ever makes one.
+  Expect<string>(RawTakePathFor('/m/demo-raw.mp4'))
+    .ToBe('/m/demo-raw-raw.mp4');
+  Expect<Boolean>(IsRawTakePath(RawTakePathFor('/m/demo-raw.mp4')))
+    .ToBe(True);
+end;
+
 { TExportFormatTests }
 
 procedure TExportFormatTests.SetupTests;
@@ -1357,6 +1552,7 @@ begin
   TestRunnerProgram.AddSuite(TTrimTests.Create('ParseTrimRange'));
   TestRunnerProgram.AddSuite(TExportValidationTests.Create(
     'ValidateExportOptions'));
+  TestRunnerProgram.AddSuite(TRawTakePathTests.Create('raw take paths'));
   TestRunnerProgram.AddSuite(TExportFormatTests.Create('ExportFormatForPath'));
   TestRunnerProgram.AddSuite(TLargeExportTests.Create('LargeExportWarning'));
   TestRunnerProgram.AddSuite(TDerivedValueTests.Create('derived values'));

@@ -90,6 +90,13 @@ function RecoverOrphanedTakes(const ADirectory: string;
 // was recovered.
 function DescribeRecoveredTakes(const ATakes: TRecoveredTakes): string;
 
+// Removes the scratch files a killed render left in ADirectory, and
+// answers how many. The render pass renames its temporary into place as
+// its last act (Knips.Export.Render), so one still sitting there is one
+// that died and nothing will ever finish it. Exposed so it can be asked
+// for and tested on its own; RecoverOrphanedTakes runs it first.
+function SweepRenderTemporaries(const ADirectory: string): Integer;
+
 {$ENDIF}
 
 implementation
@@ -365,6 +372,13 @@ begin
   Directory := IncludeTrailingPathDelimiter(ADirectory);
   if not DirectoryExists(Directory) then
     Exit;
+  // Before the takes: the scratch files a killed *render* leaves behind.
+  // They are not takes and nothing will ever finish them — the render
+  // pass renames its temporary into place as its last act, so one that
+  // is still here is one that died (Knips.Export.Render). Swept rather
+  // than reported: a render can always be run again from the raw take,
+  // which is the file this directory keeps for exactly that reason.
+  SweepRenderTemporaries(Directory);
   if FindFirst(Directory + '*' + SidecarExtension, faAnyFile, Search) <> 0 then
     Exit;
   try
@@ -383,6 +397,38 @@ begin
       SetLength(ATakes, Result + 1);
       ATakes[Result] := Take;
       Inc(Result);
+    until FindNext(Search) <> 0;
+  finally
+    FindClose(Search);
+  end;
+end;
+
+function SweepRenderTemporaries(const ADirectory: string): Integer;
+var
+  Search: TSearchRec;
+  Directory: string;
+begin
+  Result := 0;
+  if ADirectory = '' then
+    Exit;
+  Directory := IncludeTrailingPathDelimiter(ADirectory);
+  if not DirectoryExists(Directory) then
+    Exit;
+  // Trailing '*' as well as leading: AVAssetWriter under the macOS
+  // sandbox writes a shadow file beside its output named
+  // `<output>.sb-<token>`, so a killed render leaves both
+  // `x.mp4.knips-render-tmp` and `x.mp4.knips-render-tmp.sb-…`. Both are
+  // ours and both are dead; the suffix in the middle is what keeps the
+  // pattern from ever matching a real take.
+  if FindFirst(Directory + '*' + RenderTemporarySuffix + '*', faAnyFile,
+    Search) <> 0 then
+    Exit;
+  try
+    repeat
+      if (Search.Attr and faDirectory) <> 0 then
+        Continue;
+      if DeleteFile(Directory + Search.Name) then
+        Inc(Result);
     until FindNext(Search) <> 0;
   finally
     FindClose(Search);

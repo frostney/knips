@@ -57,6 +57,7 @@ uses
   Knips.Capture.ShareableContent,
   Knips.Capture.Stream,
   Knips.Export.MovieWriter,
+  Knips.Export.Render,
   Knips.ObjC.Runtime,
   Knips.Options,
   Knips.Recording,
@@ -133,14 +134,11 @@ const
   ToggleCameraShapeSelector = 'toggleCameraShape:';
   ToggleCameraBlurSelector = 'toggleCameraBlur:';
   RestoreCameraSelector = 'restoreCamera:';
-  ToggleZoomOnClickSelector = 'toggleZoomOnClick:';
   ToggleFollowMouseSelector = 'toggleFollowMouse:';
-  ToggleBigCursorSelector = 'toggleBigCursor:';
-  ToggleSmoothCursorSelector = 'toggleSmoothCursor:';
   RecoverTakesSelector = 'recoverTakes:';
-  // The live animator's 30 Hz tick while a recording with Zoom on Click
-  // or Follow Mouse is running. On the same target as everything else, so
-  // the feature adds no runtime-built class of its own.
+  // The live animator's 30 Hz tick while a Follow Mouse recording is
+  // running. On the same target as everything else, so the feature adds
+  // no runtime-built class of its own.
   LiveTickSelector = 'liveTick:';
   // The camera ride's own tick, and only for a WINDOW recording. A region
   // recording rides on the live animator's tick instead, because the
@@ -215,8 +213,12 @@ const
   LegacySystemAudioKey = LegacySystemAudioDefaultsKey;
   ZoomOnClickKey = ZoomOnClickDefaultsKey;
   FollowMouseKey = FollowMouseDefaultsKey;
+  // The three legacy keys, read once by the effect migration and never
+  // written again — see Knips.App.State for what each became.
   BigCursorKey = BigCursorDefaultsKey;
   SmoothCursorKey = SmoothCursorDefaultsKey;
+  EffectZoomKey = EffectZoomDefaultsKey;
+  EffectCursorKey = EffectCursorDefaultsKey;
   LastRegionDisplayKey = 'KnipsLastRegionDisplay';
   LastRegionLeftKey = 'KnipsLastRegionLeft';
   LastRegionTopKey = 'KnipsLastRegionTop';
@@ -291,13 +293,8 @@ type
     FAudioMenu: NSMenu;
     FSystemAudioItem: NSMenuItem;
     FMicrophoneItem: NSMenuItem;
-    // The Behaviour submenu and the two live effects inside it.
-    FBehaviourItem: NSMenuItem;
-    FBehaviourMenu: NSMenu;
-    FZoomOnClickItem: NSMenuItem;
+    // The one record-time effect left in the menu; see BuildMenu.
     FFollowMouseItem: NSMenuItem;
-    FBigCursorItem: NSMenuItem;
-    FSmoothCursorItem: NSMenuItem;
     FStopItem: NSMenuItem;
     FCancelItem: NSMenuItem;
     FRevealItem: NSMenuItem;
@@ -360,14 +357,25 @@ type
     // an SCStreamConfiguration to ask — and it decides whether the
     // Microphone checkbox can be ticked at all.
     FSupportsMicrophone: Boolean;
-    FZoomOnClick: Boolean;
     FFollowMouse: Boolean;
-    FBigCursor: Boolean;
-    // Mutually exclusive with FBigCursor — see CommandToggleSmoothCursor.
-    FSmoothCursor: Boolean;
+    // The saved effect defaults: what the render applies on every stop,
+    // and what the playback window's Effects control comes up showing.
+    // Persisted per key like every other preference
+    // (Knips.App.State.EffectZoomDefaultsKey and its neighbour).
+    FEffects: TExportEffects;
+    // True while the deliverable is being rendered off the raw take on
+    // the main thread. Part of the same global lockout the GIF export
+    // uses: the render turns the run loop over so its progress can be
+    // drawn, which is exactly when a menu click could otherwise arrive.
+    FRendering: Boolean;
+    FRenderPercent: Integer;
     FHasLastRegion: Boolean;
     FLastRegionDisplayID: UInt32;
     FLastRegion: TCaptureRegion;
+    // Where the deliverable will go once the raw take has been rendered.
+    // Settled at the start rather than at the stop so the two names are
+    // decided together and by one timestamp.
+    FPendingDeliverablePath: string;
     // What StartPending will record. 0 selects the main display.
     FPendingDisplayID: UInt32;
     FPendingHasRegion: Boolean;
@@ -393,7 +401,6 @@ type
     procedure BuildWindowMenu;
     procedure BuildAudioMenu;
     procedure BuildCameraMenu;
-    procedure BuildBehaviourMenu;
     procedure AddInertItem(AMenu: NSMenu; const ATitle: string);
     function WindowEntriesFresh: Boolean;
     procedure RefreshWindowEntries;
@@ -402,10 +409,21 @@ type
     procedure LoadPreferences;
     procedure StoreSystemAudio;
     procedure StoreMicrophone;
-    procedure StoreZoomOnClick;
     procedure StoreFollowMouse;
-    procedure StoreBigCursor;
-    procedure StoreSmoothCursor;
+    // One writer per key, as everything else here has: the cursor is a
+    // word and the zoom is a Boolean, and neither procedure touches the
+    // other's key. See the note above StoreFollowMouse for the incident.
+    procedure StoreEffectZoom;
+    procedure StoreEffectCursor;
+    // Renders the deliverable off the raw take with the saved effect
+    // defaults, showing progress on the status item. False with the
+    // reason when the render could not run; the raw take is then what the
+    // playback window opens, because a take nobody can see is worse than
+    // one that is missing its effects.
+    function RenderDeliverable(const ARawPath, ADeliverablePath: string;
+      out AError: string): Boolean;
+    procedure HandleRenderProgress(AFramesDone, AFramesTotal: Int64);
+    procedure HandleEffectsChanged(const AEffects: TExportEffects);
     procedure StoreLastRegion;
     procedure ClearPending;
     // Starts the live animator and its timer for the recording that has
@@ -455,7 +473,7 @@ type
     // touch either: they ride the live animator's tick.
     procedure StartCameraRide(AWindowID: Cardinal);
     procedure StopCameraRide;
-    procedure ShowPlayback(const APath: string; APixelWidth,
+    procedure ShowPlayback(const APath, ARawPath: string; APixelWidth,
       APixelHeight, AScale: Integer);
     procedure HandlePlaybackError(const AMessage: string);
     // The playback window is the only thing in this app that puts the
@@ -500,10 +518,13 @@ type
     procedure CommandRecordLastRegion;
     procedure CommandToggleSystemAudio;
     procedure CommandToggleMicrophone;
-    procedure CommandToggleZoomOnClick;
     procedure CommandToggleFollowMouse;
-    procedure CommandToggleBigCursor;
-    procedure CommandToggleSmoothCursor;
+    // The playback window's Effects control, forwarded on. The window
+    // owns the selection; the controller owns the saved default.
+    procedure CommandToggleEffectZoom;
+    procedure CommandToggleEffectSmoothCursor;
+    procedure CommandToggleEffectBigCursor;
+    procedure CommandReexport;
     procedure CommandStop;
     procedure CommandCancelSelection;
     // What to append to the Stop item's title: '' when no audio source is
@@ -774,22 +795,6 @@ begin
   end;
 end;
 
-procedure TargetToggleZoomOnClick(ASelf: id; ACommand: SEL;
-  ASender: id); cdecl;
-var
-  Controller: TAppController;
-begin
-  Controller := nil;
-  try
-    Controller := ControllerOf(ASelf);
-    if Controller <> nil then
-      Controller.CommandToggleZoomOnClick;
-  except
-    on E: Exception do
-      HandleBodyException(Controller, ToggleZoomOnClickSelector, E);
-  end;
-end;
-
 procedure TargetToggleFollowMouse(ASelf: id; ACommand: SEL;
   ASender: id); cdecl;
 var
@@ -803,22 +808,6 @@ begin
   except
     on E: Exception do
       HandleBodyException(Controller, ToggleFollowMouseSelector, E);
-  end;
-end;
-
-procedure TargetToggleBigCursor(ASelf: id; ACommand: SEL;
-  ASender: id); cdecl;
-var
-  Controller: TAppController;
-begin
-  Controller := nil;
-  try
-    Controller := ControllerOf(ASelf);
-    if Controller <> nil then
-      Controller.CommandToggleBigCursor;
-  except
-    on E: Exception do
-      HandleBodyException(Controller, ToggleBigCursorSelector, E);
   end;
 end;
 
@@ -838,22 +827,6 @@ begin
   except
     on E: Exception do
       HandleBodyException(Controller, RecoverTakesSelector, E);
-  end;
-end;
-
-procedure TargetToggleSmoothCursor(ASelf: id; ACommand: SEL;
-  ASender: id); cdecl;
-var
-  Controller: TAppController;
-begin
-  Controller := nil;
-  try
-    Controller := ControllerOf(ASelf);
-    if Controller <> nil then
-      Controller.CommandToggleSmoothCursor;
-  except
-    on E: Exception do
-      HandleBodyException(Controller, ToggleSmoothCursorSelector, E);
   end;
 end;
 
@@ -901,6 +874,72 @@ begin
   except
     on E: Exception do
       HandleBodyException(Controller, MenuNeedsUpdateSelector, E);
+  end;
+end;
+
+// The Effects control and Re-export, on the same one runtime-built
+// target as everything else. Each forwards to the controller, which
+// forwards to the playback window that owns the selection.
+procedure TargetToggleEffectZoom(ASelf: id; ACommand: SEL;
+  ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandToggleEffectZoom;
+  except
+    on E: Exception do
+      HandleBodyException(Controller, ToggleEffectZoomSelector, E);
+  end;
+end;
+
+procedure TargetToggleEffectSmoothCursor(ASelf: id; ACommand: SEL;
+  ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandToggleEffectSmoothCursor;
+  except
+    on E: Exception do
+      HandleBodyException(Controller, ToggleEffectSmoothCursorSelector, E);
+  end;
+end;
+
+procedure TargetToggleEffectBigCursor(ASelf: id; ACommand: SEL;
+  ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandToggleEffectBigCursor;
+  except
+    on E: Exception do
+      HandleBodyException(Controller, ToggleEffectBigCursorSelector, E);
+  end;
+end;
+
+procedure TargetReexport(ASelf: id; ACommand: SEL; ASender: id); cdecl;
+var
+  Controller: TAppController;
+begin
+  Controller := nil;
+  try
+    Controller := ControllerOf(ASelf);
+    if Controller <> nil then
+      Controller.CommandReexport;
+  except
+    on E: Exception do
+      HandleBodyException(Controller, ReexportSelector, E);
   end;
 end;
 
@@ -1193,14 +1232,15 @@ begin
     AddTargetMethod(Builder, ToggleSystemAudioSelector,
       @TargetToggleSystemAudio);
     AddTargetMethod(Builder, ToggleMicrophoneSelector, @TargetToggleMicrophone);
-    AddTargetMethod(Builder, ToggleZoomOnClickSelector,
-      @TargetToggleZoomOnClick);
     AddTargetMethod(Builder, ToggleFollowMouseSelector,
       @TargetToggleFollowMouse);
-    AddTargetMethod(Builder, ToggleBigCursorSelector,
-      @TargetToggleBigCursor);
-    AddTargetMethod(Builder, ToggleSmoothCursorSelector,
-      @TargetToggleSmoothCursor);
+    AddTargetMethod(Builder, ToggleEffectZoomSelector,
+      @TargetToggleEffectZoom);
+    AddTargetMethod(Builder, ToggleEffectSmoothCursorSelector,
+      @TargetToggleEffectSmoothCursor);
+    AddTargetMethod(Builder, ToggleEffectBigCursorSelector,
+      @TargetToggleEffectBigCursor);
+    AddTargetMethod(Builder, ReexportSelector, @TargetReexport);
     AddTargetMethod(Builder, RecoverTakesSelector, @TargetRecoverTakes);
     AddTargetMethod(Builder, LiveTickSelector, @TargetLiveTick);
     AddTargetMethod(Builder, CameraRideSelector, @TargetCameraRideTick);
@@ -1662,38 +1702,6 @@ begin
       + 'not have'));
 end;
 
-{ The Behaviour submenu: the two live effects, which are the settings
-  that change what a recording *shows* while it runs rather than what it
-  captures. Both are idle-only, for the reason the audio checkboxes are:
-  what the stream is configured to do is fixed when the capture starts,
-  and a switch flipped mid-take would silently do nothing. }
-
-procedure TAppController.BuildBehaviourMenu;
-
-  function AddBehaviourItem(const ATitle, ASelector: string): NSMenuItem;
-  begin
-    Result := NSMenuItem(NSMenuItem.alloc.initWithTitle_action_keyEquivalent(
-      PascalToNSString(ATitle), SelectorNamed(ASelector),
-      PascalToNSString('')));
-    Result.setTarget(FTarget);
-    FBehaviourMenu.addItem(Result);
-    Result.release;
-  end;
-
-begin
-  FBehaviourMenu := NSMenu(NSMenu.alloc.initWithTitle(
-    PascalToNSString(BehaviourMenuTitle)));
-  FBehaviourMenu.setAutoenablesItems(False);
-  FZoomOnClickItem := AddBehaviourItem(ZoomOnClickMenuTitle,
-    ToggleZoomOnClickSelector);
-  FFollowMouseItem := AddBehaviourItem(FollowMouseMenuTitle,
-    ToggleFollowMouseSelector);
-  FBigCursorItem := AddBehaviourItem(BigCursorMenuTitle,
-    ToggleBigCursorSelector);
-  FSmoothCursorItem := AddBehaviourItem(SmoothCursorMenuTitle,
-    ToggleSmoothCursorSelector);
-end;
-
 procedure TAppController.BuildMenu;
 begin
   FMenu := NSMenu(NSMenu.alloc.initWithTitle(PascalToNSString(MenuTitle)));
@@ -1722,17 +1730,22 @@ begin
   // covers the menu bar, and inside it Esc or a stray click cancel.
   FCancelItem := AddMenuItem(CancelSelectionTitle, CancelSelectionSelector);
   FMenu.addItem(NSMenuItem.separatorItem);
-  // Three submenus rather than eight loose checkboxes. Each one is a
-  // single question — what the picture-in-picture does, what the
-  // recording does while it runs, what it listens to — and a submenu item
-  // carries no action of its own, exactly like Record Window; the
-  // checkboxes inside carry their own selectors.
+  // Two submenus and one loose checkbox. Each submenu is a single
+  // question — what the picture-in-picture does, what the recording
+  // listens to — and a submenu item carries no action of its own, exactly
+  // like Record Window; the checkboxes inside carry their own selectors.
   FCameraItem := AddMenuItem(CameraMenuTitle, '');
   BuildCameraMenu;
   FCameraItem.setSubmenu(FCameraMenu);
-  FBehaviourItem := AddMenuItem(BehaviourMenuTitle, '');
-  BuildBehaviourMenu;
-  FBehaviourItem.setSubmenu(FBehaviourMenu);
+  // Where the Behaviour submenu used to be, and now a single checkbox.
+  // Zoom on Click, Big Cursor and Smooth Cursor left it for the playback
+  // window's Effects control — they are things done to a take, and a take
+  // is the one thing the menu bar does not have in front of it. Follow
+  // Mouse stays because it cannot leave: a pan decides which pixels are
+  // read off the screen, so it has to be chosen before the reading
+  // starts. One item is not a submenu, so it is not one any more.
+  FFollowMouseItem := AddMenuItem(FollowMouseMenuTitle,
+    ToggleFollowMouseSelector);
   FAudioItem := AddMenuItem(AudioMenuTitle, '');
   BuildAudioMenu;
   FAudioItem.setSubmenu(FAudioMenu);
@@ -1962,6 +1975,7 @@ procedure TAppController.LoadPreferences;
 var
   Defaults: NSUserDefaults;
   Stored: TCaptureRegion;
+  HasZoomKey, HasCursorKey: Boolean;
 begin
   Defaults := NSUserDefaults.standardUserDefaults;
   // objectForKey: separates "never written" from a legitimate False,
@@ -1984,22 +1998,36 @@ begin
   // audio, which is macOS 13 like the project floor, is untouched.
   if not FSupportsMicrophone then
     FMicrophone := False;
-  // Both default to False, which is what boolForKey: answers for a key
-  // that has never been written — no registerDefaults: needed.
-  FZoomOnClick := Defaults.boolForKey(PascalToNSString(ZoomOnClickKey));
+  // Defaults to False, which is what boolForKey: answers for a key that
+  // has never been written — no registerDefaults: needed.
   FFollowMouse := Defaults.boolForKey(PascalToNSString(FollowMouseKey));
-  FBigCursor := Defaults.boolForKey(PascalToNSString(BigCursorKey));
-  FSmoothCursor := Defaults.boolForKey(PascalToNSString(SmoothCursorKey));
-  // A pair of defaults that both say yes is a preferences file somebody
-  // edited, or one written by a future version with a rule this one does
-  // not have. Either way the recorder would refuse the combination, so it
-  // is resolved here — the newer feature yields to the older, and the
-  // menu then shows what the app will actually do.
-  if FSmoothCursor and FBigCursor then
-  begin
-    FSmoothCursor := False;
-    StoreSmoothCursor;
-  end;
+  // The effect defaults, migrated once out of the three menu toggles they
+  // replaced. objectForKey: separates "never written" from a legitimate
+  // False, exactly as the audio migration does, and the old keys are read
+  // rather than written: an upgrade keeps what was ticked, and a
+  // downgrade still finds what it wrote.
+  FEffects := DefaultAppEffects;
+  HasZoomKey := Defaults.objectForKey(PascalToNSString(EffectZoomKey)) <> nil;
+  HasCursorKey :=
+    Defaults.objectForKey(PascalToNSString(EffectCursorKey)) <> nil;
+  FEffects.ZoomOnClick := MigratedEffectZoom(HasZoomKey,
+    Defaults.boolForKey(PascalToNSString(EffectZoomKey)),
+    Defaults.boolForKey(PascalToNSString(ZoomOnClickKey)));
+  FEffects.Cursor := MigratedEffectCursor(HasCursorKey,
+    NSStringToPascal(Defaults.stringForKey(
+    PascalToNSString(EffectCursorKey))),
+    Defaults.boolForKey(PascalToNSString(BigCursorKey)),
+    Defaults.boolForKey(PascalToNSString(SmoothCursorKey)));
+  // Written through on the first launch that finds no new key, rather
+  // than left to the first time the user changes something. The
+  // migration is then over after one launch: the legacy keys are never
+  // read again, and `defaults read` shows what the app is actually going
+  // to do. They are still not *deleted* — a downgrade should find what it
+  // wrote.
+  if not HasZoomKey then
+    StoreEffectZoom;
+  if not HasCursorKey then
+    StoreEffectCursor;
   FLastRegionDisplayID := UInt32(Defaults.integerForKey(
     PascalToNSString(LastRegionDisplayKey)));
   Stored.Left := Integer(Defaults.integerForKey(
@@ -2026,7 +2054,7 @@ begin
 end;
 
 // One key each, and deliberately not one procedure writing both — see
-// the note on StoreZoomOnClick below for the incident that rule comes
+// the note on StoreFollowMouse below for the incident that rule comes
 // from. The Boolean these replaced is read exactly once, by the
 // migration in LoadPreferences and only when KnipsAudioSystem has never
 // been written, so writing it back here would be writing a value nothing
@@ -2054,12 +2082,6 @@ end;
 // treats as a public interface to these keys — is silently reverted by
 // the next toggle of its neighbour, and what the user sees is a
 // preference that would not stay switched on.
-procedure TAppController.StoreZoomOnClick;
-begin
-  NSUserDefaults.standardUserDefaults.setBool_forKey(ObjCBOOL(FZoomOnClick),
-    PascalToNSString(ZoomOnClickKey));
-end;
-
 procedure TAppController.StoreFollowMouse;
 begin
   NSUserDefaults.standardUserDefaults.setBool_forKey(ObjCBOOL(FFollowMouse),
@@ -2068,16 +2090,22 @@ end;
 
 // Its own key and its own writer, for the third time and for the same
 // incident. Nothing here reads or writes any other preference.
-procedure TAppController.StoreBigCursor;
+// The effect defaults, one key each and one writer each — the fourth and
+// fifth application of the rule, and the two that replaced Big Cursor and
+// Smooth Cursor. The cursor is stored as a word rather than as a pair of
+// Booleans because the three cursor effects are one setting, and two
+// Booleans are exactly the shape that can hold a contradiction.
+procedure TAppController.StoreEffectZoom;
 begin
-  NSUserDefaults.standardUserDefaults.setBool_forKey(ObjCBOOL(FBigCursor),
-    PascalToNSString(BigCursorKey));
+  NSUserDefaults.standardUserDefaults.setBool_forKey(
+    ObjCBOOL(FEffects.ZoomOnClick), PascalToNSString(EffectZoomKey));
 end;
 
-procedure TAppController.StoreSmoothCursor;
+procedure TAppController.StoreEffectCursor;
 begin
-  NSUserDefaults.standardUserDefaults.setBool_forKey(ObjCBOOL(FSmoothCursor),
-    PascalToNSString(SmoothCursorKey));
+  NSUserDefaults.standardUserDefaults.setObject_forKey(
+    PascalToNSString(ExportCursorModeName(FEffects.Cursor)),
+    PascalToNSString(EffectCursorKey));
 end;
 
 procedure TAppController.StoreLastRegion;
@@ -2099,6 +2127,7 @@ end;
 
 procedure TAppController.ClearPending;
 begin
+  FPendingDeliverablePath := '';
   FPendingDisplayID := 0;
   FPendingHasRegion := False;
   FPendingRegion := Default(TCaptureRegion);
@@ -2169,7 +2198,8 @@ end;
   poll that already moves the camera, and TRecordingSession.UpdateSourceRect.
 
   **Live effects stay off.** ResolveLiveEffects gives a window recording
-  neither Zoom on Click nor Follow Mouse, and that answer does not change
+  no Follow Mouse (and no live zoom, back when there was one), and that
+  answer does not change
   because the capture underneath is now a display: a click has no fixed
   meaning in a window the user is free to move, and two owners for one
   source rectangle — the animator and this poll — is a rectangle that
@@ -2490,8 +2520,8 @@ begin
   FCamera.RideTo(Rect);
 end;
 
-procedure TAppController.ShowPlayback(const APath: string; APixelWidth,
-  APixelHeight, AScale: Integer);
+procedure TAppController.ShowPlayback(const APath, ARawPath: string;
+  APixelWidth, APixelHeight, AScale: Integer);
 var
   Shown: Boolean;
 begin
@@ -2500,6 +2530,7 @@ begin
     FPlayback := TPlaybackWindow.Create;
     FPlayback.OnError := HandlePlaybackError;
     FPlayback.OnClosed := HandlePlaybackClosed;
+    FPlayback.OnEffectsChanged := HandleEffectsChanged;
   end;
   // A stop click that arrived while a GIF export owned the main thread
   // can reach this far: the Busy lockout refuses the transition, but the
@@ -2525,8 +2556,8 @@ begin
   PromoteForPlayback;
   Shown := False;
   try
-    Shown := FPlayback.Show(FTarget, APath, APixelWidth, APixelHeight,
-      AScale);
+    Shown := FPlayback.Show(FTarget, APath, ARawPath, APixelWidth,
+      APixelHeight, AScale, FEffects);
   finally
     // False *or* a raise — Show can throw EObjCRuntime out of
     // EnsurePlaybackClasses — and either way there is no window. A
@@ -2617,8 +2648,17 @@ begin
     Exit;
   Button := FStatusItem.button;
   if Button <> nil then
-    Button.setTitle(PascalToNSString(StatusItemTitle(FState,
-      ElapsedSeconds)));
+  begin
+    // The render happens after the state machine is back at idle, so the
+    // idle glyph would be the honest answer and the wrong one: the app is
+    // busy for several seconds with nothing to show for it. The
+    // percentage is the only thing on screen that says so.
+    if FRendering then
+      Button.setTitle(PascalToNSString(RenderStatusItemTitle(FRenderPercent)))
+    else
+      Button.setTitle(PascalToNSString(StatusItemTitle(FState,
+        ElapsedSeconds)));
+  end;
 
   FRegionItem.setEnabled(IsCommandEnabled(FState, acRecordRegion));
   FDisplayItem.setEnabled(IsCommandEnabled(FState, acRecordDisplay));
@@ -2637,21 +2677,8 @@ begin
   FMicrophoneItem.setEnabled(IsCommandEnabled(FState, acToggleMicrophone)
     and FSupportsMicrophone);
   FMicrophoneItem.setState(MenuCheckState(FMicrophone));
-  // Behaviour's parent follows its three children, exactly as Audio's
-  // does: enabled while any of them could be.
-  FBehaviourItem.setEnabled(IsCommandEnabled(FState, acToggleZoomOnClick)
-    or IsCommandEnabled(FState, acToggleFollowMouse)
-    or IsCommandEnabled(FState, acToggleBigCursor)
-    or IsCommandEnabled(FState, acToggleSmoothCursor));
-  FZoomOnClickItem.setEnabled(IsCommandEnabled(FState, acToggleZoomOnClick));
-  FZoomOnClickItem.setState(MenuCheckState(FZoomOnClick));
   FFollowMouseItem.setEnabled(IsCommandEnabled(FState, acToggleFollowMouse));
   FFollowMouseItem.setState(MenuCheckState(FFollowMouse));
-  FBigCursorItem.setEnabled(IsCommandEnabled(FState, acToggleBigCursor));
-  FBigCursorItem.setState(MenuCheckState(FBigCursor));
-  FSmoothCursorItem.setEnabled(IsCommandEnabled(FState,
-    acToggleSmoothCursor));
-  FSmoothCursorItem.setState(MenuCheckState(FSmoothCursor));
   FStopItem.setEnabled(IsCommandEnabled(FState, acStopRecording));
   // The audio assurance, and it lives here rather than in the menu bar on
   // purpose: a level indicator in the menu bar would be a second moving
@@ -2768,7 +2795,11 @@ end;
 
 function TAppController.Busy: Boolean;
 begin
-  Result := (FPlayback <> nil) and FPlayback.Exporting;
+  // Three things own the main thread for seconds at a time and turn the
+  // run loop over while they do it: the GIF export, the re-export from
+  // the playback window (both FPlayback.Exporting), and the render that
+  // follows every stop. All three have to lock every command out.
+  Result := FRendering or ((FPlayback <> nil) and FPlayback.Exporting);
 end;
 
 function TAppController.Transition(ACommand: TAppCommand): Boolean;
@@ -3039,18 +3070,9 @@ begin
   RefreshStatusItem;
 end;
 
-// Both toggles are idle-only for the same reason as the audio submenu:
-// the effects move the stream's sourceRect, and whether the stream has
-// one at all is decided when the capture starts.
-procedure TAppController.CommandToggleZoomOnClick;
-begin
-  if not Transition(acToggleZoomOnClick) then
-    Exit;
-  FZoomOnClick := not FZoomOnClick;
-  StoreZoomOnClick;
-  RefreshStatusItem;
-end;
-
+// Idle-only for the same reason as the audio submenu: the pan moves the
+// stream's sourceRect, and whether the stream has one at all is decided
+// when the capture starts.
 procedure TAppController.CommandToggleFollowMouse;
 begin
   if not Transition(acToggleFollowMouse) then
@@ -3060,56 +3082,115 @@ begin
   RefreshStatusItem;
 end;
 
-// Idle-only too, and for the plainest version of the same reason: the
-// drawn pointer replaces ScreenCaptureKit's own, which is settled in the
-// configuration the capture started with, and its sprite is rendered
-// before the first frame arrives.
-procedure TAppController.CommandToggleBigCursor;
+// One turn of the render's progress onto the status item. Same shape as
+// the playback window's: drain what is waiting, set the title, give the
+// run loop one zero-timeout slice so the CoreAnimation commit that draws
+// it actually runs. Everything it dispatches is inert behind Busy.
+procedure TAppController.HandleRenderProgress(AFramesDone,
+  AFramesTotal: Int64);
+var
+  Percent: Integer;
 begin
-  if not Transition(acToggleBigCursor) then
+  Percent := RenderPercent(AFramesDone, AFramesTotal);
+  if Percent = FRenderPercent then
     Exit;
-  FBigCursor := not FBigCursor;
-  StoreBigCursor;
-  // The two are mutually exclusive: both switch ScreenCaptureKit's own
-  // pointer off, and they disagree about what happens next. Switching one
-  // on switches the other off, rather than greying it out — a checkbox
-  // that goes grey when you tick its neighbour tells you less than one
-  // that visibly unticks.
-  if FBigCursor and FSmoothCursor then
-  begin
-    FSmoothCursor := False;
-    StoreSmoothCursor;
-    LogMessage('Smooth Cursor is off: Big Cursor bakes the pointer into '
-      + 'the movie, and the two cannot both have it');
-  end;
+  FRenderPercent := Percent;
   RefreshStatusItem;
+  CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, True);
 end;
 
-// Idle-only for exactly the reason Big Cursor is: this is the same
-// showsCursor decision, and it is settled in the configuration the
-// capture started with.
-//
-// The movie itself comes out with NO pointer in it — that is the whole
-// mechanism — and the pointer appears only in a GIF or an APNG exported
-// from it. The menu title says so, and the log says so again the moment
-// it is switched on, because it is the one setting whose effect is
-// invisible until somebody opens the MP4 and finds nothing there.
-procedure TAppController.CommandToggleSmoothCursor;
+function TAppController.RenderDeliverable(const ARawPath,
+  ADeliverablePath: string; out AError: string): Boolean;
+var
+  Session: TRenderSession;
+  Pool: NSAutoreleasePool;
 begin
-  if not Transition(acToggleSmoothCursor) then
-    Exit;
-  FSmoothCursor := not FSmoothCursor;
-  StoreSmoothCursor;
-  if FSmoothCursor and FBigCursor then
-  begin
-    FBigCursor := False;
-    StoreBigCursor;
-  end;
-  if FSmoothCursor then
-    LogMessage('Smooth Cursor is on: the recorded movie will have no '
-      + 'pointer in it, and a smoothed one is drawn into GIF and APNG '
-      + 'exports from the event sidecar');
+  Result := False;
+  AError := '';
+  FRendering := True;
+  FRenderPercent := -1;
+  // Detached while the render owns the thread, for the same reason the
+  // GIF export detaches it: opening an NSMenu starts a tracking loop
+  // inside sendEvent that does not return until the menu is dismissed,
+  // and this code turns the run loop over.
   RefreshStatusItem;
+  try
+    Pool := NSAutoreleasePool(NSAutoreleasePool.alloc.init);
+    try
+      Session := TRenderSession.Create(ARawPath, ADeliverablePath, FEffects);
+      try
+        // No console under an app bundle.
+        Session.Verbose := False;
+        Session.OnProgress := HandleRenderProgress;
+        Result := Session.Run(AError);
+        // An effect that was asked for and could not be applied is not a
+        // failure — the deliverable is right without it — but it is the
+        // only explanation the user will get for a Zoom on Click that
+        // did nothing.
+        if Result and (Session.Report.Note <> '') then
+          RecordError(Session.Report.Note);
+      finally
+        Session.Free;
+      end;
+    finally
+      Pool.release;
+    end;
+  finally
+    FRendering := False;
+    RefreshStatusItem;
+  end;
+end;
+
+// The playback window owns the selection while it is open; this is where
+// it becomes the default the next recording renders with. One writer per
+// key, so a change to the cursor never rewrites the zoom's key with a
+// value this process happened to be holding.
+procedure TAppController.HandleEffectsChanged(const AEffects: TExportEffects);
+begin
+  if FEffects.ZoomOnClick <> AEffects.ZoomOnClick then
+  begin
+    FEffects.ZoomOnClick := AEffects.ZoomOnClick;
+    StoreEffectZoom;
+  end;
+  if FEffects.Cursor <> AEffects.Cursor then
+  begin
+    FEffects.Cursor := AEffects.Cursor;
+    StoreEffectCursor;
+  end;
+end;
+
+procedure TAppController.CommandToggleEffectZoom;
+begin
+  if FPlayback <> nil then
+    FPlayback.CommandToggleEffectZoom;
+end;
+
+procedure TAppController.CommandToggleEffectSmoothCursor;
+begin
+  if FPlayback <> nil then
+    FPlayback.CommandToggleEffectSmoothCursor;
+end;
+
+procedure TAppController.CommandToggleEffectBigCursor;
+begin
+  if FPlayback <> nil then
+    FPlayback.CommandToggleEffectBigCursor;
+end;
+
+// The same menu-detaching dance CommandExportGif does, and for the same
+// reason: the re-export owns the main thread and drains events, so an
+// attached status menu would stall it indefinitely.
+procedure TAppController.CommandReexport;
+begin
+  if FPlayback = nil then
+    Exit;
+  if FStatusItem <> nil then
+    FStatusItem.setMenu(nil);
+  try
+    FPlayback.CommandReexport;
+  finally
+    RefreshStatusItem;
+  end;
 end;
 
 procedure TAppController.CommandExportGif;
@@ -3198,7 +3279,9 @@ begin
     TargetKind := ctkWindow
   else
     TargetKind := ctkDisplay;
-  if not ResolveLiveEffects(TargetKind, FPendingHasRegion, FZoomOnClick,
+  // False for the zoom, always: it is a render-time effect now, so
+  // nothing here may move the capture's own rectangle for it.
+  if not ResolveLiveEffects(TargetKind, FPendingHasRegion, False,
     FFollowMouse, Zoom, Follow) then
     Exit;
   if not FSession.SupportsLiveUpdate then
@@ -3208,7 +3291,7 @@ begin
     // happen", and the user has no other way to find that out. None of
     // them touches the state machine — the recording is fine.
     RecordError('this ScreenCaptureKit has no updateConfiguration:, so '
-      + 'Zoom on Click and Follow Mouse are off for this recording');
+      + 'Follow Mouse is off for this recording');
     Exit;
   end;
 
@@ -3249,8 +3332,8 @@ begin
     DisplayID := CGMainDisplayID;
   if not ScreenFrameForDisplayID(DisplayID, ScreenFrame) then
   begin
-    RecordError('the recorded display has no NSScreen, so Zoom on Click '
-      + 'and Follow Mouse are off for this recording');
+    RecordError('the recorded display has no NSScreen, so Follow Mouse '
+      + 'is off for this recording');
     Exit;
   end;
 
@@ -3422,11 +3505,11 @@ begin
     Options.WindowID := FPendingWindowID;
   end;
   Options.AudioMode := AudioModeFromToggles(FSystemAudio, FMicrophone);
-  // Zoom on Click and Follow Mouse move the stream's sourceRect, so the
-  // capture has to be started with one even for a whole display, which
-  // otherwise goes without. Asked for only when an effect is actually
-  // going to apply — ResolveLiveEffects is the single place that
-  // decides, and StartLive asks it again for the same answer.
+  // Follow Mouse moves the stream's sourceRect, so the capture has to be
+  // started with one even for a whole display, which otherwise goes
+  // without. Asked for only when the effect is actually going to apply —
+  // ResolveLiveEffects is the single place that decides, and StartLive
+  // asks it again for the same answer.
   if FCompositedWindowID <> 0 then
   begin
     // A window recording gets neither effect — ResolveLiveEffects says so
@@ -3444,49 +3527,51 @@ begin
   end
   else
   begin
-    ResolveLiveEffects(Options.TargetKind, Options.HasRegion, FZoomOnClick,
+    // Zoom on Click is deliberately False here, not FEffects.ZoomOnClick:
+    // it is a render-time effect now, and a capture that zoomed would
+    // bake the crop into the pixels where nothing could take it out
+    // again. Follow Mouse is the one live effect left, because a pan
+    // decides which pixels are read off the screen at all.
+    ResolveLiveEffects(Options.TargetKind, Options.HasRegion, False,
       FFollowMouse, LiveZoom, LiveFollow);
     Options.LiveSourceRect := LiveZoom or LiveFollow;
   end;
   // The RESOLVED answers, not the preferences: what goes into the event
   // sidecar's header is what the capture actually did, because that is
-  // what decides which effects a later export can still apply. A window
-  // recording with Zoom on Click ticked is not a zoomed recording.
+  // what decides which effects a later render can still apply. Both are
+  // False for a zoom now — the app never runs one live — and
+  // LiveFollowMouse is the one that can still be True.
   Options.LiveZoomOnClick := LiveZoom;
   Options.LiveFollowMouse := LiveFollow;
-  // Big Cursor, resolved rather than passed straight through: the
-  // preference is global and a window recording cannot have one, and
-  // ValidateRecordingOptions *refuses* that combination rather than
-  // ignoring it — so handing it over unresolved would turn a checkbox
-  // the user left ticked into a recording that will not start.
+  // **Every take the app records is raw.** No pointer in the pixels, no
+  // zoom in the framing: the movie is what the screen looked like, and
+  // everything a viewer is meant to see is put in afterwards by the
+  // render (Knips.Export.Render) from the event sidecar. That is what
+  // makes the effects changeable for as long as the raw take is kept,
+  // and it is why Big Cursor is never asked for here — the enlarged
+  // pointer is drawn at render time now, from the same track.
   //
-  // Resolved against what the USER asked for, not against the filter
-  // this path happens to build. A composited window recording is a
-  // display capture underneath (FCompositedWindowID <> 0, see
+  // Resolved against what the USER asked for rather than against the
+  // filter this path happens to build. A composited window recording is
+  // a display capture underneath (FCompositedWindowID <> 0, see
   // CompositeWindowForPending) and the pointer's screen position would
-  // in fact map onto it correctly — but *Record Window* must not mean
-  // two different things depending on whether the camera happens to be
-  // up. Same command, same answer, camera or no camera.
+  // in fact map onto it correctly — but *Record Window* must not mean two
+  // different things depending on whether the camera happens to be up.
+  // Same command, same answer, camera or no camera.
+  Options.BigCursor := False;
   if FCompositedWindowID <> 0 then
-    Options.BigCursor := ResolveBigCursor(ctkWindow, FBigCursor)
+    Options.SmoothCursor := ResolveSmoothCursor(ctkWindow, True)
   else
-    Options.BigCursor := ResolveBigCursor(Options.TargetKind, FBigCursor);
-  if FBigCursor and not Options.BigCursor then
-    LogMessage('Big Cursor is off for this recording: a window capture '
-      + 'has no fixed relationship to the screen the pointer is '
-      + 'measured against');
-  // Same question, same answer, and resolved against what the USER asked
-  // for rather than the filter this path happens to build — see the
-  // comment above Options.BigCursor.
-  if FCompositedWindowID <> 0 then
-    Options.SmoothCursor := ResolveSmoothCursor(ctkWindow, FSmoothCursor)
-  else
-    Options.SmoothCursor := ResolveSmoothCursor(Options.TargetKind,
-      FSmoothCursor);
-  if FSmoothCursor and not Options.SmoothCursor then
-    LogMessage('Smooth Cursor is off for this recording: a window capture '
-      + 'has no fixed relationship to the screen the pointer is '
-      + 'measured against');
+    Options.SmoothCursor := ResolveSmoothCursor(Options.TargetKind, True);
+  // A window capture is the one target that cannot be raw: its frames
+  // have no fixed relationship to the screen the pointer is measured
+  // against, so the pointer cannot be drawn back into them and the
+  // system one has to stay. Said out loud, because it is the one case
+  // where the effects a user has chosen will not reach the deliverable.
+  if not Options.SmoothCursor then
+    LogMessage('this recording keeps the system pointer: a window '
+      + 'capture has no fixed relationship to the screen the pointer is '
+      + 'measured against, so it cannot be drawn back in afterwards');
   // The frame is stroked outside the region either way, so a failed
   // exclusion still cannot reach the file while the region stands still;
   // it is a *moving* region that needs this list to have worked.
@@ -3495,7 +3580,7 @@ begin
     SetLength(Options.ExcludedWindowIDs, 1);
     Options.ExcludedWindowIDs[0] := BorderWindowID;
   end;
-  if not PrepareOutputPath(Options.OutputPath, Error) then
+  if not PrepareOutputPath(FPendingDeliverablePath, Error) then
   begin
     HideBorder;
     Transition(acCaptureFailed);
@@ -3503,6 +3588,25 @@ begin
     RefreshStatusItem;
     Exit;
   end;
+  // The capture writes the RAW take; the render writes the deliverable
+  // beside it on the stop. The deliverable keeps the name the user will
+  // see in Finder, and the raw take takes the suffix — see
+  // Knips.Options.RawTakePathFor.
+  //
+  // Unless there is nothing to render, in which case the take IS the
+  // deliverable and is written straight to its own name. That is a
+  // window recording: its frames have no fixed relationship to the
+  // screen its pointer was measured against, so the pointer cannot be
+  // drawn back and the framing cannot be re-cropped — and splitting it
+  // would leave two byte-identical movies and two sidecars on disk for
+  // ever, which is a cost with no benefit at all. Options.SmoothCursor
+  // is exactly that question already answered: ResolveSmoothCursor said
+  // no for the one target that cannot be raw. FinishRecording reads the
+  // same fact back off the path (IsRawTakePath) and skips the render.
+  if Options.SmoothCursor then
+    Options.OutputPath := RawTakePathFor(FPendingDeliverablePath)
+  else
+    Options.OutputPath := FPendingDeliverablePath;
   if not ValidateRecordingOptions(Options, Error) then
   begin
     HideBorder;
@@ -3545,10 +3649,10 @@ begin
   // effect to animate.
   StartRecordingTick;
 
-  // A sprite that could not be made costs the user the checkbox they
-  // ticked, so it is said out loud rather than logged: the recording is
-  // running and keeps the ordinary system pointer, which is a good
-  // outcome and an invisible one.
+  // Reachable only from the CLI's own --big-cursor path today — the app
+  // never asks the recorder to draw a pointer any more — and kept
+  // because the session still can, and a sprite that could not be made
+  // must not be silent if it ever is.
   if FSession.Report.BigCursorError <> '' then
     RecordError('Big Cursor is off for this recording: '
       + FSession.Report.BigCursorError);
@@ -3666,8 +3770,8 @@ end;
 
 procedure TAppController.FinishRecording(AShowPlayback: Boolean);
 var
-  Error, Path, Silence, PlaybackNote: string;
-  Finished, MicrophoneAsked: Boolean;
+  Error, Path, RawPath, Deliverable, Silence, PlaybackNote: string;
+  Finished, MicrophoneAsked, Rendered: Boolean;
   PixelWidth, PixelHeight, Scale: Integer;
 begin
   PlaybackNote := '';
@@ -3683,7 +3787,18 @@ begin
   // The frame goes first: it belongs to the recording, not to the
   // finalisation, and finishing the writer pumps the run loop.
   HideBorder;
-  Path := FSession.Report.OutputPath;
+  RawPath := FSession.Report.OutputPath;
+  // The take is raw; the deliverable is what the render makes of it. A
+  // recording whose output path is not a raw take at all — nothing
+  // produces one today, but a future path might — is its own deliverable
+  // and simply skips the render.
+  Deliverable := FPendingDeliverablePath;
+  if (Deliverable = '') or not IsRawTakePath(RawPath) then
+  begin
+    Deliverable := RawPath;
+    RawPath := '';
+  end;
+  Path := RawPath;
   PixelWidth := FSession.Report.PixelWidth;
   PixelHeight := FSession.Report.PixelHeight;
   // Pixels per point, and so the divisor the one-click GIF export sizes
@@ -3773,6 +3888,42 @@ begin
   UndockCamera;
   FreeAndNil(FSession);
   RefreshStatusItem;
+  // The render, and it is what turns the raw take into the file the user
+  // asked for: the pointer drawn back, the zoom applied, the audio copied
+  // across untouched. It runs on the main thread and takes seconds, so it
+  // holds the Busy lockout and writes its progress onto the status item.
+  //
+  // A render that fails is not a lost recording: the raw take is on disk
+  // and is a perfectly good movie (with no pointer in it), so the failure
+  // is reported and the playback window opens on the take instead.
+  //
+  // Not on the way out. Quit finalises an open recording inline because
+  // terminate: never comes back, and a render is seconds of work with a
+  // dead status item in front of it — the app would look hung at exactly
+  // the moment the user asked it to go away. The raw take and its sidecar
+  // are on disk and `knips render` turns them into the deliverable
+  // whenever anybody wants it, so nothing is lost by not doing it now.
+  // AShowPlayback is the same flag: it is False for exactly the paths
+  // that have nobody to show anything to.
+  Rendered := False;
+  if AShowPlayback and Finished and (RawPath <> '') then
+  begin
+    Rendered := RenderDeliverable(RawPath, Deliverable, Error);
+    if not Rendered then
+    begin
+      RecordError('the deliverable could not be rendered (' + Error
+        + '); the raw take is at ' + RawPath);
+      Deliverable := RawPath;
+    end;
+  end;
+  if not AShowPlayback and Finished and (RawPath <> '') then
+    LogMessage('quitting with a take still to render; the raw take is at '
+      + RawPath + ' and `knips render --in=' + RawPath + '` will finish it');
+  Path := Deliverable;
+  if not Rendered then
+    // Nothing to re-export from: the window opens on the raw take
+    // itself, and its Effects control says why it is off.
+    RawPath := '';
   // Playing the clip back is the "done" signal, and the window is where
   // the GIF export lives; a window that cannot be made falls back to
   // revealing the file in Finder. On the way out there is no signal to
@@ -3781,7 +3932,7 @@ begin
   // noise, not information.
   if AShowPlayback and Finished and (Path <> '') then
   begin
-    ShowPlayback(Path, PixelWidth, PixelHeight, Scale);
+    ShowPlayback(Path, RawPath, PixelWidth, PixelHeight, Scale);
     // The playback window has no message area of its own, and this is the
     // one moment the user is looking straight at the take: a silent track
     // goes on the window's title, beside the file name, where it cannot
@@ -3963,13 +4114,17 @@ end;
 
 procedure TAppController.CommandQuit;
 begin
-  // An export has the main thread and is only reachable here because it
-  // turns the run loop over to draw its progress. Tearing the process
-  // down underneath it would leave a half-written GIF; the user gets a
-  // reason and can quit again when it is done.
+  // An export or a render has the main thread and is only reachable here
+  // because it turns the run loop over to draw its progress. Tearing the
+  // process down underneath it would leave a half-written file; the user
+  // gets a reason and can quit again when it is done.
   if Busy then
   begin
-    RecordError('a GIF export is running; quit once it has finished');
+    if FRendering then
+      RecordError('the recording is still being rendered; quit once it '
+        + 'has finished')
+    else
+      RecordError('a GIF export is running; quit once it has finished');
     RefreshStatusItem;
     Exit;
   end;
