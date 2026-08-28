@@ -46,6 +46,18 @@ const
   // Bumped once per release that changes the CLI surface.
   KnipsVersion = '0.1.0';
 
+  // What the raw take beside a deliverable is called. A recording writes
+  // `<name>-raw.mp4` and the render writes `<name>.mp4` beside it; the
+  // sidecar's own extension rule then puts `<name>-raw.knips.jsonl` and
+  // `<name>.knips.jsonl` under each of them, so a directory of takes
+  // still sorts into pairs.
+  RawTakeSuffix = '-raw';
+  // What a render in progress is called before it is renamed onto the
+  // deliverable's name. Here rather than in the render unit because two
+  // units have to agree on it: the one that writes it, and the crash
+  // recovery pass that sweeps the ones a killed render left behind.
+  RenderTemporarySuffix = '.knips-render-tmp';
+
   // What counts as silence, as a sample magnitude in 0..1. About -60 dBFS.
   // Chosen so a muted source and a source recording a quiet room are told
   // apart: a real room floor measures well above this, and a track that
@@ -185,16 +197,17 @@ type
     // of at record time.
     ecmBig);
 
-  // The post-recording effects an export applies, read from the event
-  // sidecar (Knips.Recording.Sidecar) rather than from the pixels.
+  // The post-recording effects a render or an export applies, read from
+  // the event sidecar (Knips.Recording.Sidecar) rather than from the
+  // pixels.
   //
   // One record rather than a handful of flags on TExportOptions, because
-  // the set is open: post-hoc Zoom on Click is the next member — the
-  // sidecar's click track drives a per-frame crop, and the cursor's
-  // position is transformed by the same crop — and it will arrive as
-  // fields here rather than as a second parameter everywhere. Which
-  // effects a given take can still have is the sidecar's own question;
-  // see Knips.Recording.Sidecar.AvailableExportEffects.
+  // the set is open and because the same record has to reach three
+  // different sinks: the MP4 render (Knips.Export.Render), the GIF
+  // encoder and the APNG encoder (Knips.Export.Pipeline). A caller
+  // chooses effects once and every output agrees. Which effects a given
+  // take can still have is the sidecar's own question; see
+  // Knips.Recording.Sidecar.AvailableExportEffects.
   TExportEffects = record
     Cursor: TExportCursorMode;
     // How much bigger than the system pointer ecmBig draws. Ignored by
@@ -204,6 +217,18 @@ type
     // seconds. 0 takes the default; negative is treated as 0, which is
     // no smoothing at all.
     CursorSmoothingSeconds: Double;
+    // Post-recording Zoom on Click: the sidecar's click track drives a
+    // per-frame crop of the decoded frame, scaled back up to the output's
+    // own size, with the same easing, hold and factor the live effect
+    // uses (Knips.Export.ZoomTrack). Refused for a take whose capture was
+    // already zooming — nothing can take a baked crop out again.
+    ZoomOnClick: Boolean;
+    // How far in the crop goes at a click. 0 takes the live effect's own
+    // LiveClickZoom, which is what makes the two feel the same.
+    ZoomFactor: Double;
+    // Seconds the zoom holds after the *last* click before easing back.
+    // 0 takes the live effect's LiveZoomHoldSeconds.
+    ZoomHoldSeconds: Double;
   end;
 
   TExportOptions = record
@@ -281,6 +306,20 @@ function AudioSilenceWarning(const ASourceName: string; AEnabled: Boolean;
 function ContainerForPath(const APath: string;
   out AContainer: TOutputContainer): Boolean;
 
+// `demo.mp4` -> `demo-raw.mp4`: where the raw take of a deliverable
+// lives. The deliverable keeps the name the user chose and the raw take
+// takes the suffix, rather than the other way round, because the
+// deliverable is the file that gets opened, moved and sent — see
+// docs/architecture.md.
+function RawTakePathFor(const ADeliverablePath: string): string;
+
+// The inverse: `demo-raw.mp4` -> `demo.mp4`. Returns APath unchanged when
+// it does not name a raw take.
+function DeliverablePathFor(const ARawTakePath: string): string;
+
+// True when APath names a raw take rather than a deliverable.
+function IsRawTakePath(const APath: string): Boolean;
+
 // Checks ranges and cross-field rules; fills derived fields (Container,
 // the audio format when audio is on).
 // Returns False with a one-line human message when the options can't
@@ -304,11 +343,38 @@ function DefaultExportOptions: TExportOptions;
 // Whether this effects record asks for a pointer to be drawn at all.
 function EffectsDrawCursor(const AEffects: TExportEffects): Boolean;
 
+// Whether it asks for anything at all beyond what the recording already
+// decided. A render with nothing to apply is a copy, and this is the
+// question that says so.
+function EffectsAreDefault(const AEffects: TExportEffects): Boolean;
+
 function ExportCursorModeName(AMode: TExportCursorMode): string;
 
 // "as-recorded", "none", "smooth", or "big", case-insensitively.
 function ParseExportCursorMode(const AText: string;
   out AMode: TExportCursorMode): Boolean;
+
+// The effects as a comma-separated list, which is both what --effects
+// takes and what a report prints back.
+//
+// The default describes itself as `as-recorded` and NOT as `none`, which
+// is what it used to say and was actively misleading: `--effects=none`
+// means *no pointer and no zoom*, while the default means *whatever the
+// recording decided*, which for a raw take is a pointer. A `knips render`
+// that printed "with none" and then drew a pointer was telling the user
+// the opposite of what it did. Describe and Parse are inverses, so
+// `as-recorded` is a word Parse takes too.
+function DescribeExportEffects(const AEffects: TExportEffects): string;
+
+// The inverse: a comma-separated list of `zoom`, `as-recorded`,
+// `smooth-cursor`, `big-cursor`, `no-cursor` and `none`,
+// case-insensitively, applied on top of AEffects. False with a one-line
+// message naming the offending word.
+//
+// The four cursor words are mutually exclusive because they are one
+// setting; naming two of them is a mistake rather than a last-one-wins.
+function ParseExportEffects(const AText: string;
+  var AEffects: TExportEffects; out AError: string): Boolean;
 
 // Export format from the output path's extension; False for unknown ones.
 function ExportFormatForPath(const APath: string;
@@ -468,6 +534,36 @@ begin
     AContainer := ocMPEG4;
     Result := False;
   end;
+end;
+
+function RawTakePathFor(const ADeliverablePath: string): string;
+begin
+  if ADeliverablePath = '' then
+    Exit('');
+  Result := ChangeFileExt(ADeliverablePath, '') + RawTakeSuffix
+    + ExtractFileExt(ADeliverablePath);
+end;
+
+function IsRawTakePath(const APath: string): Boolean;
+var
+  Stem: string;
+begin
+  Stem := ChangeFileExt(ExtractFileName(APath), '');
+  Result := (Length(Stem) > Length(RawTakeSuffix))
+    and (Copy(Stem, Length(Stem) - Length(RawTakeSuffix) + 1,
+    Length(RawTakeSuffix)) = RawTakeSuffix);
+end;
+
+function DeliverablePathFor(const ARawTakePath: string): string;
+var
+  Extension: string;
+begin
+  Result := ARawTakePath;
+  if not IsRawTakePath(ARawTakePath) then
+    Exit;
+  Extension := ExtractFileExt(ARawTakePath);
+  Result := Copy(ARawTakePath, 1, Length(ARawTakePath) - Length(Extension)
+    - Length(RawTakeSuffix)) + Extension;
 end;
 
 function AlignDimension(AValue: Integer): Integer;
@@ -648,6 +744,11 @@ begin
   Result := AEffects.Cursor in [ecmAsRecorded, ecmSmooth, ecmBig];
 end;
 
+function EffectsAreDefault(const AEffects: TExportEffects): Boolean;
+begin
+  Result := (AEffects.Cursor = ecmAsRecorded) and not AEffects.ZoomOnClick;
+end;
+
 function ExportCursorModeName(AMode: TExportCursorMode): string;
 begin
   case AMode of
@@ -677,6 +778,97 @@ begin
     AMode := ecmBig
   else
     Result := False;
+end;
+
+function DescribeExportEffects(const AEffects: TExportEffects): string;
+begin
+  Result := '';
+  if AEffects.ZoomOnClick then
+    Result := 'zoom';
+  case AEffects.Cursor of
+    ecmNone: Result := Result + ',no-cursor';
+    ecmSmooth: Result := Result + ',smooth-cursor';
+    ecmBig: Result := Result + ',big-cursor';
+  else
+    Result := Result + ',as-recorded';
+  end;
+  if (Result <> '') and (Result[1] = ',') then
+    Delete(Result, 1, 1);
+end;
+
+function ParseExportEffects(const AText: string;
+  var AEffects: TExportEffects; out AError: string): Boolean;
+var
+  Parts: TStringArray;
+  Tokens: TStringArray;
+  Token: string;
+  I, Count: Integer;
+  CursorNamed: Boolean;
+begin
+  Result := False;
+  AError := '';
+  CursorNamed := False;
+  // The non-empty words, gathered first. Counting Parts instead was
+  // wrong in a way nothing noticed: `--effects=none,` splits into two
+  // parts, the second of which is nothing at all, and the "none cannot
+  // be combined" rule fired on a list that combined it with nothing.
+  Parts := AText.Split([',']);
+  SetLength(Tokens, Length(Parts));
+  Count := 0;
+  for I := 0 to High(Parts) do
+  begin
+    Token := LowerCase(Trim(Parts[I]));
+    if Token = '' then
+      Continue;
+    Tokens[Count] := Token;
+    Inc(Count);
+  end;
+
+  for I := 0 to Count - 1 do
+  begin
+    Token := Tokens[I];
+    if Token = 'none' then
+    begin
+      // Not a word among words: it is the whole answer, and mixing it
+      // with a request would say two opposite things at once.
+      if Count > 1 then
+      begin
+        AError := '--effects=none cannot be combined with another effect';
+        Exit;
+      end;
+      AEffects.ZoomOnClick := False;
+      AEffects.Cursor := ecmNone;
+      Exit(True);
+    end
+    else if Token = 'zoom' then
+      AEffects.ZoomOnClick := True
+    else if (Token = 'as-recorded') or (Token = 'smooth-cursor')
+      or (Token = 'big-cursor') or (Token = 'no-cursor') then
+    begin
+      if CursorNamed then
+      begin
+        AError := 'the cursor effects are one setting; name only one of '
+          + 'as-recorded, smooth-cursor, big-cursor, no-cursor';
+        Exit;
+      end;
+      CursorNamed := True;
+      if Token = 'smooth-cursor' then
+        AEffects.Cursor := ecmSmooth
+      else if Token = 'big-cursor' then
+        AEffects.Cursor := ecmBig
+      else if Token = 'no-cursor' then
+        AEffects.Cursor := ecmNone
+      else
+        AEffects.Cursor := ecmAsRecorded;
+    end
+    else
+    begin
+      AError := 'unknown effect "' + Token + '" (use zoom, as-recorded, '
+        + 'smooth-cursor, big-cursor, no-cursor, or none)';
+      Exit;
+    end;
+  end;
+  Result := True;
 end;
 
 function DefaultExportOptions: TExportOptions;
@@ -825,14 +1017,15 @@ begin
     Exit;
   end;
   if (AOptions.Format = efMovie)
-    and (AOptions.Effects.Cursor <> ecmAsRecorded) then
+    and not EffectsAreDefault(AOptions.Effects) then
   begin
     // The scope limit, refused rather than ignored. A passthrough trim
-    // copies coded samples; drawing anything into them would mean
-    // decoding and re-encoding the whole video, which is the one thing
-    // this output format exists not to do.
+    // copies coded samples; drawing or cropping anything in them would
+    // mean decoding and re-encoding the whole video, which is the one
+    // thing this output format exists not to do — and is exactly what
+    // `knips render` is for.
     AError := 'export effects apply to .gif and .apng only, not to a '
-      + 'passthrough trim';
+      + 'passthrough trim; use `knips render` for an MP4 with effects';
     Exit;
   end;
   if AOptions.Format = efMovie then

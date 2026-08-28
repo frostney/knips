@@ -18,15 +18,17 @@ This is a **public format**. It is documented here so that anything — the
 GIF exporter, a script, somebody else's tool — can read a take without
 guessing. Nothing about it is private to knips.
 
-**Its first consumer is knips's own export-time effects.** A recording made
-with `--smooth-cursor` has no pointer in its pixels at all; the pointer in
-the exported GIF is drawn from this file. The same track is what a
-post-recording Zoom on Click will crop by. That is why the header records
-what was **baked into the pixels** as carefully as it records what the
-pointer did: an effect that is already in the movie can never be taken out
-again, so those fields decide what an export is still free to choose. They
-are covered by the stability promise below exactly as the sample records
-are.
+**Its first consumer is knips's own render pass.** The menu-bar app records
+a *raw take* — no pointer in the pixels, no zoom in the framing — and then
+renders the deliverable from it (`knips render`, and
+`Knips.Export.Render`): the pointer is drawn back from the track in this
+file, and Zoom on Click crops each frame by the click track in it. The GIF
+and APNG exporters apply the same effects from the same file. That is why
+the header records what was **baked into the pixels** as carefully as it
+records what the pointer did: an effect that is already in the movie can
+never be taken out again, so those fields decide what a render is still
+free to choose. They are covered by the stability promise below exactly as
+the sample records are.
 
 ## Shape
 
@@ -154,7 +156,8 @@ is not a gesture anybody means to record as a click on the content.
  "target":"display","pixelWidth":3024,"pixelHeight":1964,"scale":2,
  "fps":30,"sampleHz":30.000,"displayId":1,"displayWidth":1512.000,
  "displayHeight":982.000,"baseX":0.000,"baseY":0.000,
- "baseWidth":1512.000,"baseHeight":982.000,"cursor":"baked",
+ "baseWidth":1512.000,"baseHeight":982.000,"menuBarInset":39.000,
+ "cursor":"baked",
  "bakedZoomOnClick":false,"bakedFollowMouse":false,
  "bakedWindowFollow":false,"audio":"none"}
 ```
@@ -177,11 +180,30 @@ specification and the code can be compared line for line.
 | `sampleHz` | the sampler's target rate (see *Sampling*) |
 | `displayId`, `displayWidth`, `displayHeight` | the recorded display; `0`/`0`/`0` for a window target |
 | `baseX`, `baseY`, `baseWidth`, `baseHeight` | the rectangle the recording was sized from, and the source rectangle in force before the first sample that carries one |
+| `menuBarInset` | how much of the top of the recorded display is menu bar, in that display's points; `0` when it was not measured |
 | `pid` | the process that wrote the file; see *Recovery* |
 | `cursor` | how the pointer got into the pixels: `system`, `baked`, `none`, or `smooth` |
 | `bakedZoomOnClick`, `bakedFollowMouse` | whether a live effect zoomed or panned the capture |
 | `bakedWindowFollow` | whether a composited window recording panned it |
 | `audio` | `none`, `system`, `mic`, or `both` |
+
+`menuBarInset` is there because **a click is not always content**. The
+click that stops a recording is a click on knips's own status item, and a
+zoom driven by this file's click track has to leave that band alone or
+every full-screen take would end by zooming into its top corner. The
+number cannot be recovered from the samples: a notched Mac reports 39
+points where an unnotched one reports 22, and an auto-hiding menu bar
+reports 0.
+
+Both writers fill it in. The measurement needs AppKit — `NSScreen`'s
+`frame` minus its `visibleFrame`, floored at `NSStatusBar`'s thickness —
+and `knips record` from a shell turns out to have `NSApp` standing by the
+time the sidecar's header is written (measured: a plain `knips record` on
+this machine writes `39.000`, the real notch inset, not `0`). So the field
+is real for CLI takes too, and `knips render --effects=zoom` on one leaves
+the same band alone. A `0` means the band was genuinely not measured — no
+`NSApp`, a window target, or a menu bar set to auto-hide — and a reader
+should treat it as "no band recorded" rather than as "no menu bar".
 
 `cursor` is the field worth dwelling on, because it is the one thing a
 reader cannot recover from the video — a frame with no pointer in it looks
@@ -307,6 +329,60 @@ The crash itself costs at most one movie fragment (two seconds) and one
 buffer of samples (about a second): the anchor and every button record are
 flushed to disk the moment they are written, and pointer samples are
 flushed about once a second.
+
+## Two sidecars: the raw take's and the deliverable's
+
+A rendered recording is **two movies and two sidecars**:
+
+```text
+~/Movies/knips/2026-08-27 18-26-07-raw.mp4          the raw take
+~/Movies/knips/2026-08-27 18-26-07-raw.knips.jsonl  what the pointer did
+~/Movies/knips/2026-08-27 18-26-07.mp4              the deliverable
+~/Movies/knips/2026-08-27 18-26-07.knips.jsonl      the same, re-headed
+```
+
+The deliverable gets its **own copy**, and the reasons are the two rules
+this format already has.
+
+A sidecar names its movie (`movie`, a bare file name) and travels with it,
+so one file cannot describe two movies. And the two movies no longer say
+the same thing about themselves: the raw take has nothing baked in and
+everything still open, while the deliverable has the pointer in its pixels
+and the crop in its framing. The deliverable's copy therefore carries
+`"cursor":"baked"` and `"bakedZoomOnClick":true` where the render applied
+them, so `AvailableExportEffects` refuses to apply either a second time —
+which is what makes a rendered file safe to hand back to knips.
+
+Everything else is carried across unchanged, and one thing deliberately is
+not:
+
+- **the anchor is still exact.** The render copies each frame's
+  presentation stamp verbatim (`CMTime`, not seconds — a stamp taken
+  through a `Double` and back at a 1/600 s timescale lands up to 1.7 ms
+  out, which was measured and is why it is not done that way). The
+  deliverable's timeline *is* the raw take's timeline, so `event.t −
+  anchor.host` means the same on both files;
+- **the samples' source rectangles are rewritten** where a zoom was
+  applied. A sample's `sx`/`sy`/`sw`/`sh` say what the capture was
+  reading; what the deliverable's frames show at that instant is the
+  crop, so the crop is what the deliverable's copy records. Anything
+  mapping a pointer into the deliverable's pixels then gets the right
+  answer from the ordinary arithmetic under *Coordinates*.
+
+**A take that cannot be rendered is never split in the first place.** The
+app asks before it names the file: a window recording's frames have no
+fixed relationship to the screen its pointer was measured against, so
+neither effect can ever apply to it, and it is written straight to the
+deliverable's own name with one sidecar — exactly as every `knips record`
+take is. Splitting it would have left two byte-identical movies and two
+sidecars on disk for ever.
+
+`knips render` answers the same question the same way: a take with
+nothing that can be applied after the fact is **refused**, with the
+reason, rather than copied into a duplicate. A take that *can* be
+rendered but was asked for nothing (`--effects=none`) still copies —
+that is a real request for the raw pixels as the deliverable — and does
+produce the pair.
 
 ## Reading one
 

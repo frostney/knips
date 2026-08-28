@@ -84,6 +84,8 @@ type
     procedure TestABakedCursorClosesTheChoice;
     procedure TestAWindowTakeCanHaveNothing;
     procedure TestZoomNeedsClicksAndAnUnzoomedCapture;
+    procedure TestZoomRefusesEveryPannedFraming;
+    procedure TestABakedPointerDoesNotCloseTheZoom;
     procedure TestNoLogAtAllIsAnswerable;
     procedure TestARawTakeIsFullyRenderable;
     procedure TestACompositedWindowPanCountsAsBaked;
@@ -146,6 +148,9 @@ begin
   Result.BaseY := 50;
   Result.BaseWidth := 640;
   Result.BaseHeight := 400;
+  // A notched Mac's real menu-bar band, which is the number the field
+  // exists for and is not the 22 anybody would guess.
+  Result.MenuBarInset := 39;
   Result.CursorRender := scrBaked;
   Result.BakedZoomOnClick := True;
   Result.BakedFollowMouse := False;
@@ -261,6 +266,7 @@ begin
     Expect<Cardinal>(Log.Header.DisplayID).ToBe(Cardinal(69733382));
     ExpectNear(Log.Header.BaseX, 100, Epsilon, 'baseX');
     ExpectNear(Log.Header.BaseWidth, 640, Epsilon, 'baseWidth');
+    ExpectNear(Log.Header.MenuBarInset, 39, Epsilon, 'menuBarInset');
     Expect<string>(SidecarCursorRenderName(Log.Header.CursorRender))
       .ToBe('baked');
     Expect<Boolean>(Log.Header.BakedZoomOnClick).ToBe(True);
@@ -939,6 +945,10 @@ begin
     TestAWindowTakeCanHaveNothing);
   Test('post-hoc zoom needs clicks and a capture that was not zooming',
     TestZoomNeedsClicksAndAnUnzoomedCapture);
+  Test('post-hoc zoom is refused for every way the framing could pan',
+    TestZoomRefusesEveryPannedFraming);
+  Test('a pointer already in the pixels does not close the zoom',
+    TestABakedPointerDoesNotCloseTheZoom);
   Test('no sidecar at all still answers', TestNoLogAtAllIsAnswerable);
   Test('a take with nothing baked into it is fully renderable',
     TestARawTakeIsFullyRenderable);
@@ -960,13 +970,17 @@ begin
     Available := AvailableExportEffects(Log);
     Expect<Boolean>(Available.CanDrawCursor).ToBe(True);
     Expect<Boolean>(Available.CursorAlreadyBaked).ToBe(False);
-    Expect<Boolean>(Available.CanZoomOnClick).ToBe(True);
-    // The fixture header pans (bakedFollowMouse), so this take is not
-    // fully renderable — and that must come with a reason rather than an
-    // empty string, which is the state this branch exists to close.
+    // The fixture header pans (bakedFollowMouse). The pointer can still
+    // be drawn — every sample carries the rectangle the capture was
+    // reading at that instant, so the mapping follows the pan — but the
+    // crop cannot, because it is taken against the fixed base rectangle.
+    Expect<Boolean>(Available.CanZoomOnClick).ToBe(False);
     Expect<Boolean>(Available.FullyRenderable).ToBe(False);
     Expect<Boolean>(Pos('panned by the capture', Available.Reason) > 0)
       .ToBe(True);
+    Expect<Boolean>(Pos('panned by the capture', Available.ZoomReason) > 0)
+      .ToBe(True);
+    Expect<string>(Available.CursorReason).ToBe('');
   finally
     Log.Free;
   end;
@@ -979,6 +993,104 @@ begin
     Available := AvailableExportEffects(Log);
     Expect<Boolean>(Available.FullyRenderable).ToBe(True);
     Expect<string>(Available.Reason).ToBe('');
+  finally
+    Log.Free;
+  end;
+end;
+
+// A header with exactly the four fields these tests vary, so a scenario
+// reads as what it is rather than as three nested StringReplaces.
+function AvailabilityHeader(const ACursor: string; AZoom, AFollow,
+  AWindowFollow: Boolean): string;
+begin
+  Result := '{"k":"header","format":"knips-events","version":1,'
+    + '"knips":"0.1.0","movie":"demo.mp4",'
+    + '"created":"2026-08-27T09:15:00Z","target":"display","pid":0,'
+    + '"pixelWidth":1280,"pixelHeight":800,"scale":2,"fps":30,'
+    + '"sampleHz":30,"displayId":1,"displayWidth":1440,'
+    + '"displayHeight":900,"baseX":10,"baseY":20,"baseWidth":640,'
+    + '"baseHeight":400,"cursor":"' + ACursor + '",'
+    + '"bakedZoomOnClick":' + BoolToStr(AZoom, 'true', 'false')
+    + ',"bakedFollowMouse":' + BoolToStr(AFollow, 'true', 'false')
+    + ',"bakedWindowFollow":' + BoolToStr(AWindowFollow, 'true', 'false')
+    + ',"audio":"none"}';
+end;
+
+// One sample and one click, which is the least a take needs before the
+// availability question is about the framing rather than about the track.
+function AvailabilityBody: string;
+begin
+  Result := LineEnding + FixtureAnchor + LineEnding
+    + '{"k":"cursor","t":100.0,"x":1,"y":2,"b":0}' + LineEnding
+    + '{"k":"button","t":100.1,"x":1,"y":2,"n":0,"d":true}';
+end;
+
+// The regression this exists for: the crop is computed against the
+// recording's BASE rectangle, so a capture that moved its own source
+// rectangle shows something else in every frame and the crop lands on a
+// rectangle the pixels are not showing. All three ways of moving it are
+// pinned, because only the first was checked before and the other two
+// rendered silently wrong — measured, 36 mis-cropped frames on a Follow
+// Mouse take.
+procedure TAvailabilityTests.TestZoomRefusesEveryPannedFraming;
+var
+  Log: TSidecarLog;
+
+  procedure ExpectRefused(const AWhat, AHeader: string);
+  var
+    Log: TSidecarLog;
+    Available: TSidecarEffectAvailability;
+  begin
+    Log := LoadText(AHeader + AvailabilityBody);
+    try
+      Available := AvailableExportEffects(Log);
+      Expect<string>(AWhat + ' -> zoom '
+        + BoolToStr(Available.CanZoomOnClick, 'offered', 'refused'))
+        .ToBe(AWhat + ' -> zoom refused');
+      Expect<Boolean>(Available.ZoomReason <> '').ToBe(True);
+    finally
+      Log.Free;
+    end;
+  end;
+
+begin
+  ExpectRefused('bakedZoomOnClick',
+    AvailabilityHeader('smooth', True, False, False));
+  ExpectRefused('bakedFollowMouse',
+    AvailabilityHeader('smooth', False, True, False));
+  ExpectRefused('bakedWindowFollow',
+    AvailabilityHeader('smooth', False, False, True));
+  // And the control: nothing panned, so the zoom is offered.
+  Log := LoadText(AvailabilityHeader('smooth', False, False, False)
+    + AvailabilityBody);
+  try
+    Expect<Boolean>(AvailableExportEffects(Log).CanZoomOnClick).ToBe(True);
+  finally
+    Log.Free;
+  end;
+end;
+
+// The other half of the same rule, and the reason this is
+// HasUntouchedFraming rather than IsRawTake: a pointer that is already in
+// the pixels is part of the picture and scales with the crop exactly as
+// the live effect's would have. An ordinary `knips record` take can still
+// be zoomed after the fact.
+procedure TAvailabilityTests.TestABakedPointerDoesNotCloseTheZoom;
+var
+  Log: TSidecarLog;
+  Available: TSidecarEffectAvailability;
+begin
+  Log := LoadText(AvailabilityHeader('system', False, False, False)
+    + AvailabilityBody);
+  try
+    Available := AvailableExportEffects(Log);
+    Expect<Boolean>(Available.CanDrawCursor).ToBe(False);
+    Expect<Boolean>(Available.CanZoomOnClick).ToBe(True);
+    Expect<string>(Available.ZoomReason).ToBe('');
+    Expect<Boolean>(Available.CursorReason <> '').ToBe(True);
+    // The summary carries the most limiting fact, which here is the
+    // pointer; the per-effect reason is what a zoom caller must read.
+    Expect<string>(Available.Reason).ToBe(Available.CursorReason);
   finally
     Log.Free;
   end;

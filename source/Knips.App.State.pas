@@ -80,6 +80,12 @@ const
   // put anything at all into.
   MaxStoredRegionExtent = 32768;
   ExportingTitlePrefix = 'Exporting… ';
+  // The status item while the deliverable is being rendered off the raw
+  // take, and the playback window's title while a re-export is running.
+  // A glyph rather than a word for the status item: the menu bar is
+  // narrow and the item is a few characters wide the rest of the time.
+  RenderingGlyph = '◐';
+  RenderingTitlePrefix = 'Rendering… ';
 
   // The camera picture-in-picture window. Points, not pixels: the window
   // is placed in screen coordinates and the layer scales itself.
@@ -147,7 +153,6 @@ const
   // change what a recording *shows* while it runs. Same argument as
   // Audio and Camera — one setting between them, and the root menu is
   // shorter for it.
-  BehaviourMenuTitle = 'Behaviour';
   // NSControlStateValueOn / Off (NSCell.h). Spelled out rather than taken
   // from CocoaAll, which is where the wrong NSWindowLevel values live.
   MenuItemStateOn = 1;
@@ -172,8 +177,25 @@ const
   // Knips.Recording.LiveMath.ResolveLiveEffects.
   ZoomOnClickMenuTitle = 'Zoom on Click';
   FollowMouseMenuTitle = 'Follow Mouse (region)';
+  // Read once, by the migration below, and never written again: Zoom on
+  // Click is an *effect* now, applied to the raw take at render time
+  // rather than to ScreenCaptureKit's source rectangle while the take
+  // runs. The key is left where it is rather than deleted — `defaults`
+  // is a public interface and a downgrade should still find it.
   ZoomOnClickDefaultsKey = 'KnipsZoomOnClick';
   FollowMouseDefaultsKey = 'KnipsFollowMouse';
+
+  // The saved effect defaults: what the render applies on every stop and
+  // what the playback window's Effects control comes up showing.
+  //
+  // One key per setting and one reader and one writer for each, which is
+  // the rule the whole of this app's preferences obey (docs/architecture.md,
+  // "Each toggle writes its own key"). The cursor is a WORD rather than a
+  // pair of Booleans because the three cursor effects are one setting —
+  // exactly the thing two Booleans could express contradictorily, and did
+  // when Big Cursor and Smooth Cursor were separate menu items.
+  EffectZoomDefaultsKey = 'KnipsEffectZoom';
+  EffectCursorDefaultsKey = 'KnipsEffectCursor';
 
   // Big Cursor: the pointer is drawn into the frames instead of being
   // captured, so it can be made bigger than life. Same shape as the two
@@ -185,6 +207,10 @@ const
   // key, for the reason recorded under "Each toggle writes its own key"
   // in docs/architecture.md.
   BigCursorMenuTitle = 'Big Cursor';
+  // Read once, by the migration, for the same reason as
+  // ZoomOnClickDefaultsKey: the enlarged pointer is drawn at render time
+  // now, from the sidecar's track, so it is an effect and not a capture
+  // setting.
   BigCursorDefaultsKey = 'KnipsBigCursor';
 
   // Smooth Cursor, beside it, and mutually exclusive with it: both switch
@@ -195,8 +221,28 @@ const
   // (Knips.Export.CursorEffect). The title says where the pointer turns
   // up, because a mode whose movie has no pointer is exactly the mode
   // somebody would otherwise pick for an MP4 and be surprised by.
-  SmoothCursorMenuTitle = 'Smooth Cursor (GIF/APNG only)';
+  SmoothCursorMenuTitle = 'Smooth Cursor';
+  // Read once, by the migration. Smooth Cursor stopped being a choice the
+  // moment every take became raw: a raw take has no pointer in its pixels
+  // at all, so drawing a smoothed one back is what the default render
+  // does and there is nothing left to tick.
   SmoothCursorDefaultsKey = 'KnipsSmoothCursor';
+
+  // The playback window's Effects control, and the button beside it.
+  EffectsMenuTitle = 'Effects';
+  ReexportTitle = 'Re-export';
+  // Shown as an inert last line of the Effects menu when something in it
+  // is disabled, because a greyed-out item that does not say why is a
+  // support question. The reason itself comes from
+  // Knips.Recording.Sidecar.AvailableExportEffects.
+  EffectsUnavailablePrefix = 'Unavailable: ';
+  // The reasons are whole sentences and an NSMenu is as wide as its
+  // widest item, so the inert line is elided while the tooltip on the
+  // items themselves keeps the reason in full — a tooltip wraps and a
+  // menu does not. A little longer than the menu bar's own error line
+  // (MaxErrorTitleLength), because this menu hangs off a 860-point
+  // window rather than off the menu bar.
+  MaxEffectsReasonLength = 72;
 
   // The Audio submenu: two independent checkboxes, System Audio and
   // Microphone, in the same shape Record System Audio always had and the
@@ -301,27 +347,22 @@ type
     // an audio source switched on mid-take would silently do nothing.
     acToggleSystemAudio,
     acToggleMicrophone,
-    // idle -> idle: the two live-effect checkboxes (Zoom on Click and
-    // Follow Mouse). Idle-only for the same reason as the audio
-    // checkbox, though not quite the same mechanism: the effects move
-    // the stream's sourceRect, which needs the capture to have been
+    // idle -> idle: the Follow Mouse checkbox, and the last of the
+    // record-time effect toggles. Idle-only for the same reason as the
+    // audio checkboxes, though not quite the same mechanism: the pan
+    // moves the stream's sourceRect, which needs the capture to have been
     // started *with* one (TRecordingOptions.LiveSourceRect), and that is
-    // decided when the recording begins. Switching them mid-recording
-    // would work for a region and silently do nothing for a display, and
-    // a toggle that sometimes does nothing is worse than one that is
-    // greyed out.
-    acToggleZoomOnClick,
+    // decided when the recording begins.
+    //
+    // Zoom on Click, Big Cursor and Smooth Cursor used to sit beside it
+    // and no longer do. All three are now *effects*, applied to a raw
+    // take at render time from the event sidecar
+    // (Knips.Export.Render), so they are chosen in the playback window
+    // after the fact rather than promised before it — and none of them
+    // is a state transition any more. Follow Mouse stays here because it
+    // cannot become one: a pan changes which pixels are read off the
+    // screen, so it has to happen while the screen is being read.
     acToggleFollowMouse,
-    // idle -> idle: the Big Cursor checkbox. Idle-only for the plainest
-    // version of the same reason: the drawn pointer replaces
-    // ScreenCaptureKit's own, which is part of the stream configuration
-    // the capture started with, and the sprite is rendered before the
-    // first frame arrives. Neither can be introduced halfway through.
-    acToggleBigCursor,
-    // idle -> idle: the Smooth Cursor checkbox, idle-only for exactly the
-    // reason above — it is the same showsCursor decision, made once when
-    // the stream configuration is built.
-    acToggleSmoothCursor,
     acSelectionCommitted, // selecting -> recording: mouse released
     acSelectionCancelled, // selecting -> idle: Esc or an empty drag
     // selecting -> idle, asked for from the menu rather than from inside
@@ -366,6 +407,11 @@ function ClampSelection(const ASelection: TCaptureRegion;
 function IsSelectionUsable(const ASelection: TCaptureRegion): Boolean;
 
 function ErrorMenuTitle(const AMessage: string): string;
+
+// The Effects control's inert last line: why something above it is
+// greyed out, elided to keep the menu narrow. '' when there is nothing
+// to say, which is what a take with every effect still open gives.
+function EffectsUnavailableTitle(const AReason: string): string;
 
 // NSControlStateValueOn / Off for a checkbox-shaped menu item.
 function MenuCheckState(AChecked: Boolean): Integer;
@@ -618,6 +664,57 @@ function ExportProgressTitle(APercent: Integer): string;
 function ExportProgressTitleWithSize(APercent: Integer;
   const ASize: string): string;
 
+// The effect defaults a fresh install starts from.
+//
+// The pointer is ON, and that is the one choice here worth arguing.
+// Every take is now recorded raw, which means the movie has no pointer in
+// its pixels at all; a default of "no cursor" would therefore hand every
+// user a cursorless deliverable and look like a bug rather than a
+// setting. Drawing the smoothed pointer back is what makes a raw take
+// look like the recording they thought they were making. Zoom is off,
+// because a zoom nobody asked for is a surprise in a way a pointer is
+// not.
+function DefaultAppEffects: TExportEffects;
+
+// The one-way migration from the three menu toggles the effects replaced.
+// Both consult the old key only where the new one has never been written,
+// and neither writes the old one back — the same shape the audio
+// migration uses, and for the same two reasons: an upgrade should keep
+// what the user had ticked, and `defaults` is a public interface a
+// downgrade should still find intact.
+function MigratedEffectZoom(AHasNewKey, ANewValue,
+  ALegacyZoomOnClick: Boolean): Boolean;
+
+// The cursor's is the interesting one, because two Booleans collapse into
+// one word. Big Cursor wins over Smooth Cursor when a preferences file
+// somehow has both — the recorder refused that pair outright, so it was
+// never a state the app could reach, and the enlarged pointer is the more
+// deliberate of the two choices. Neither ticked migrates to *smooth*
+// rather than to none: those users recorded with the system pointer in
+// the frames, and a raw take with the pointer drawn back is the nearest
+// thing to what they had.
+function MigratedEffectCursor(AHasNewKey: Boolean; const ANewValue: string;
+  ALegacyBigCursor, ALegacySmoothCursor: Boolean): TExportCursorMode;
+
+// Clicking one of the two cursor items in the Effects control. The three
+// cursor modes are one setting, so ticking Big Cursor unticks Smooth
+// Cursor without anyone having to remember to; clicking the one already
+// ticked turns the pointer off, which is how a checkbox behaves and is
+// the only way to reach "no pointer" from a control with two items.
+function ToggledEffectCursor(ACurrent, AWanted: TExportCursorMode):
+  TExportCursorMode;
+
+// The render's progress as a percentage. One pass over the movie, so
+// unlike an export there is nothing to weight — but the same clamping,
+// for the same reason: a bar that reads 118% is a bug report.
+function RenderPercent(AFramesDone, AFramesTotal: Int64): Integer;
+
+// The status item while the deliverable is being rendered off the raw
+// take, and the playback window's title while a re-export is running.
+function RenderStatusItemTitle(APercent: Integer): string;
+
+function RenderProgressTitle(APercent: Integer): string;
+
 // A region read back out of NSUserDefaults, made safe to hand to
 // ScreenCaptureKit's sourceRect. `defaults write` is a public interface:
 // anything at all can be sitting under those keys, and a negative origin
@@ -666,8 +763,7 @@ begin
         acRecordRegion: ANext := asSelecting;
         acRecordDisplay, acRecordWindow, acRecordLastRegion:
           ANext := asRecording;
-        acToggleSystemAudio, acToggleMicrophone, acToggleZoomOnClick,
-          acToggleFollowMouse, acToggleBigCursor, acToggleSmoothCursor:
+        acToggleSystemAudio, acToggleMicrophone, acToggleFollowMouse:
           ANext := asIdle;
       else
         Result := False;
@@ -981,6 +1077,94 @@ begin
   Result := ExportProgressTitle(APercent);
   if ASize <> '' then
     Result := Result + ' · ' + ASize;
+end;
+
+function DefaultAppEffects: TExportEffects;
+begin
+  Result := DefaultExportEffects;
+  Result.Cursor := ecmSmooth;
+  Result.ZoomOnClick := False;
+end;
+
+function MigratedEffectZoom(AHasNewKey, ANewValue,
+  ALegacyZoomOnClick: Boolean): Boolean;
+begin
+  if AHasNewKey then
+    Result := ANewValue
+  else
+    Result := ALegacyZoomOnClick;
+end;
+
+function MigratedEffectCursor(AHasNewKey: Boolean; const ANewValue: string;
+  ALegacyBigCursor, ALegacySmoothCursor: Boolean): TExportCursorMode;
+begin
+  if AHasNewKey and ParseExportCursorMode(ANewValue, Result) then
+    Exit;
+  if ALegacyBigCursor then
+    Result := ecmBig
+  else if ALegacySmoothCursor then
+    Result := ecmSmooth
+  else
+    Result := DefaultAppEffects.Cursor;
+end;
+
+function ToggledEffectCursor(ACurrent, AWanted: TExportCursorMode):
+  TExportCursorMode;
+begin
+  if ACurrent = AWanted then
+    Result := ecmNone
+  else
+    Result := AWanted;
+end;
+
+function RenderPercent(AFramesDone, AFramesTotal: Int64): Integer;
+var
+  Fraction: Double;
+begin
+  if AFramesTotal <= 0 then
+    Fraction := 0
+  else
+    Fraction := AFramesDone / AFramesTotal;
+  if Fraction < 0 then
+    Fraction := 0;
+  if Fraction > 1 then
+    Fraction := 1;
+  Result := Round(Fraction * 100);
+end;
+
+function RenderProgressTitle(APercent: Integer): string;
+var
+  Percent: Integer;
+begin
+  Percent := APercent;
+  if Percent < 0 then
+    Percent := 0;
+  if Percent > 100 then
+    Percent := 100;
+  Result := Format('%s%d%%', [RenderingTitlePrefix, Percent]);
+end;
+
+function RenderStatusItemTitle(APercent: Integer): string;
+var
+  Percent: Integer;
+begin
+  Percent := APercent;
+  if Percent < 0 then
+    Percent := 0;
+  if Percent > 100 then
+    Percent := 100;
+  Result := Format('%s %d%%', [RenderingGlyph, Percent]);
+end;
+
+function EffectsUnavailableTitle(const AReason: string): string;
+var
+  Text: string;
+begin
+  Text := Trim(AReason);
+  if Text = '' then
+    Exit('');
+  Result := EffectsUnavailablePrefix + ElideUtf8(Text,
+    MaxEffectsReasonLength);
 end;
 
 function MenuCheckState(AChecked: Boolean): Integer;

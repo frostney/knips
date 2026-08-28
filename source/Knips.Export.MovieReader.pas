@@ -115,6 +115,15 @@ type
     // by the caller.
     PixelBuffer: CVPixelBufferRef;
     Seconds: Double;
+    // The presentation stamp exactly as the container carries it, before
+    // it was divided into a Double. A consumer that only measures the
+    // frame's place in time wants Seconds; one that has to WRITE the same
+    // stamp out again wants this, because seconds are a lossy way to say
+    // a rational number — a stamp round-tripped through Double and back
+    // at a 1/600 s timescale lands up to 1.7 ms from where it started,
+    // which is a tenth of a frame of drift a render has no business
+    // introducing (measured; it is why this field exists).
+    Time: CMTime;
   end;
 
   TMovieReader = class
@@ -393,8 +402,8 @@ begin
     ReleaseSample;
   until False;
   AFrame.PixelBuffer := Image;
-  AFrame.Seconds := CMTimeGetSeconds(
-    CMSampleBufferGetPresentationTimeStamp(FSample));
+  AFrame.Time := CMSampleBufferGetPresentationTimeStamp(FSample);
+  AFrame.Seconds := CMTimeGetSeconds(AFrame.Time);
   Result := True;
 end;
 

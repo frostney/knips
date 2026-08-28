@@ -93,34 +93,74 @@ const
   // which is exactly the runs LZW lives on. Measured on two takes:
   // 0.525 and 0.694 of the dithered size.
   NoDitherFactor = 0.61;
-  // APNG is truecolour zlib rather than palette LZW, and it lands much
-  // higher — and much more consistently: six exports over five takes fit
-  // within 1.5x of this, where the GIF ratios span four to one.
+  // APNG is truecolour zlib rather than palette LZW, and it needs its own
+  // constant AND its own band.
   //
-  // It was 67.0, fitted on two exports. Six is not many either, but two
-  // was few enough to be 14 % out.
-  ApngBytesPerSourceByte = 59.0;
+  // It was 59.0, "much more consistently: six exports over five takes fit
+  // within 1.5x". That was a property of those six exports and not of
+  // APNG. Refitted over **twenty-eight** exports of fourteen real takes —
+  // Retina UI, near-blank screens, region and whole-display captures,
+  // each exported at its own width (capped at 1200) and again at 600 —
+  // the geometric mean is 33 and the ratios span **2.6 to 302**, a factor
+  // of 117. The worst residual against this constant is 12.7x.
+  //
+  // The two ends are content, not arithmetic, and both are real:
+  //
+  //   - a nearly blank screen (three takes, ratios 2.6 to 5.5) costs
+  //     H.264 a keyframe and a fragment header every couple of seconds
+  //     while zlib gets the same picture almost free, so the movie is
+  //     *large* relative to the APNG;
+  //   - a Retina whole-display take reduced threefold (ratio 220 to 302)
+  //     is the opposite: H.264 is extremely efficient per pixel-frame at
+  //     3600x2338, and the reduction concentrates every bit of that
+  //     detail into a quarter of the pixels.
+  //
+  // A downscale term was fitted for this and is not here, for the same
+  // reason it is not on the GIF path: over the same twenty-eight exports
+  // `(sourcePixels/outputPixels)^a` bottoms out at a = 0.3 and moves the
+  // worst residual from 12.8x to 11.7x. It buys about a tenth of the
+  // error and costs a term nobody can check by eye. (The effect itself is
+  // real and small: exporting the same take at 600 rather than at its own
+  // width raises the ratio by 25 to 56 %.)
+  ApngBytesPerSourceByte = 33.0;
   // What the estimate is worth, as a multiplier either way.
   //
-  // The worst residual across the sixteen calibration exports is 2.19x
-  // (GIF) and 1.50x (APNG). Three, not two and a quarter: a band that
-  // only just contains its own calibration set is a band fitted to it,
-  // and the previous 2.0 — set from five exports — was exceeded the first
-  // time somebody exported content that was not in those five.
+  // The worst residual across the sixteen GIF calibration exports is
+  // 2.19x. Three, not two and a quarter: a band that only just contains
+  // its own calibration set is a band fitted to it, and the previous
+  // 2.0 — set from five exports — was exceeded the first time somebody
+  // exported content that was not in those five.
   //
   // **This is a measured spread, not a bound.** Sixteen exports of one
   // person's screen is not the space of screen content, and an export of
   // something unlike any of them can land outside. The wording in
   // DescribeEstimate says "roughly" for that reason, and the in-flight
   // projection replaces the whole guess within the first hundred frames.
-  EstimateBand = 3.0;
+  GifEstimateBand = 3.0;
+  // APNG's own, and it is four times as wide because its residuals are
+  // four times as wide — see ApngBytesPerSourceByte. Eight covers 23 of
+  // the 28 calibration exports; six covers 21 and thirteen covers all
+  // 28. Thirteen is not chosen precisely because it would cover all 28:
+  // a band that exactly contains its calibration set is a band fitted to
+  // it, and the five it misses at eight are the two content extremes
+  // named above rather than a scatter.
+  //
+  // The same sentence applies as for the GIF band, and applies harder:
+  // this is a measured spread, not a bound.
+  ApngEstimateBand = 8.0;
   // The fallback when the source movie's size is not known — a stream, a
   // file that vanished, a caller that has not measured it. Bytes per
   // output pixel, straight. The band on these is much wider than
   // EstimateBand and the caller is told so by AHasSource coming back
   // False.
   FallbackGifBytesPerPixel = 0.15;
-  FallbackApngBytesPerPixel = 0.45;
+  // Refitted with the twenty-eight-export set: the geometric mean of the
+  // APNG's own bytes per output pixel-frame is 0.085, against the 0.45
+  // this used to hold. It is a much worse model than the content-aware
+  // one either way — the worst residual is 84x, against 12.7x — which is
+  // exactly why DescribeEstimate says so out loud when this path is
+  // taken.
+  FallbackApngBytesPerPixel = 0.085;
 
 type
   TExportSizeEstimate = record
@@ -188,7 +228,7 @@ function EstimateExportSize(AFormat: TExportFormat; AWidth, AHeight: Integer;
   AFrames: Int64; ADither: Boolean;
   ASourceBytesPerPixelFrame: Double): TExportSizeEstimate;
 var
-  Pixels, Bytes, Factor: Double;
+  Pixels, Bytes, Factor, Band: Double;
 begin
   Result := Default(TExportSizeEstimate);
   // A passthrough trim writes the source's own bytes; there is nothing to
@@ -227,8 +267,15 @@ begin
     Bytes := Pixels * Factor;
   end;
   Result.Bytes := Round(Bytes);
-  Result.LowBytes := Round(Bytes / EstimateBand);
-  Result.HighBytes := Round(Bytes * EstimateBand);
+  // Per format, because the two encoders' residuals are not the same
+  // size and one band over both would be dishonest about whichever it
+  // was not fitted to.
+  if AFormat = efApng then
+    Band := ApngEstimateBand
+  else
+    Band := GifEstimateBand;
+  Result.LowBytes := Round(Bytes / Band);
+  Result.HighBytes := Round(Bytes * Band);
 end;
 
 function ProjectExportSize(ABytesWritten, AFramesDone,

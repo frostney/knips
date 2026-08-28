@@ -128,6 +128,22 @@ type
     // nothing when the pointer was outside the captured rectangle at that
     // instant, which is a normal thing for it to have been.
     procedure DrawInto(var AImage: TBgraImage; ASeconds: Double);
+    // The same, into a frame that shows a *crop* of the recorded
+    // rectangle rather than the whole of it — which is what a post-hoc
+    // Zoom on Click produces (Knips.Export.ZoomTrack). The rectangle is
+    // in the recorded display's own top-left points, exactly like the
+    // one the sidecar's samples carry, and it replaces the sample's own:
+    // the frame no longer shows what the capture was reading, so the
+    // pointer has to be placed against what it *does* show.
+    procedure DrawIntoCropped(var AImage: TBgraImage; ASeconds: Double;
+      ASourceX, ASourceY, ASourceWidth, ASourceHeight: Double);
+    // The same again, straight into foreign memory — a locked
+    // CVPixelBuffer in the MP4 render pass, which has no TBgraImage to
+    // draw into and no reason to make one. AHasSource False takes the
+    // rectangle the capture was reading, as DrawInto does.
+    procedure DrawIntoPixels(APixels: Pointer; ABytesPerRow, AWidth,
+      AHeight: Integer; ASeconds: Double; AHasSource: Boolean;
+      ASourceX, ASourceY, ASourceWidth, ASourceHeight: Double);
     // Zeroes the frame counters. A GIF export walks the movie twice — the
     // palette has to be chosen before the first frame is written — and
     // both passes draw the pointer, so the encode pass calls this to make
@@ -373,7 +389,13 @@ begin
   Available := AvailableExportEffects(FLog);
   if not Available.CanDrawCursor then
   begin
-    AError := Available.Reason;
+    // The CURSOR's own reason, not the summary. The two are the same
+    // string whenever CanDrawCursor is False — a baked pointer is the
+    // most limiting fact there is, so the summary carries it — but that
+    // is a property of the ordering in AvailableExportEffects rather
+    // than of this call site, and this call site is only ever asking
+    // about the pointer.
+    AError := Available.CursorReason;
     if AError = '' then
       AError := 'this recording cannot have a pointer drawn into it';
     FreeAndNil(FLog);
@@ -432,14 +454,18 @@ begin
   FOffFrameFrames := 0;
 end;
 
-procedure TExportCursor.DrawInto(var AImage: TBgraImage; ASeconds: Double);
+procedure TExportCursor.DrawIntoPixels(APixels: Pointer; ABytesPerRow,
+  AWidth, AHeight: Integer; ASeconds: Double; AHasSource: Boolean;
+  ASourceX, ASourceY, ASourceWidth, ASourceHeight: Double);
 var
   State: TSidecarSample;
   Mapping: TCursorFrameMapping;
   Plan: TCursorBlitPlan;
   X, Y: Double;
 begin
-  if not FReady or (FLog = nil) or (Length(AImage.Pixels) = 0) then
+  if not FReady or (FLog = nil) or (APixels = nil) then
+    Exit;
+  if (AWidth <= 0) or (AHeight <= 0) then
     Exit;
   // The source rectangle from the raw track — it is what the capture was
   // actually reading, and averaging two of them would name a rectangle
@@ -449,8 +475,15 @@ begin
   if not InterpolatePath(FSmoothed, FSmoothedCount,
     FLog.AnchorHost + ASeconds, X, Y) then
     Exit;
-  Mapping := CursorFrameMapping(AImage.Width, AImage.Height, State.SourceX,
-    State.SourceY, State.SourceWidth, State.SourceHeight);
+  if not AHasSource then
+  begin
+    ASourceX := State.SourceX;
+    ASourceY := State.SourceY;
+    ASourceWidth := State.SourceWidth;
+    ASourceHeight := State.SourceHeight;
+  end;
+  Mapping := CursorFrameMapping(AWidth, AHeight, ASourceX, ASourceY,
+    ASourceWidth, ASourceHeight);
   Plan := PlanCursorBlit(Mapping, X, Y, FSpriteWidth, FSpriteHeight,
     FHotSpotX, FHotSpotY);
   if not Plan.Visible then
@@ -458,9 +491,28 @@ begin
     Inc(FOffFrameFrames);
     Exit;
   end;
-  BlitPremultipliedBgra(@AImage.Pixels[0], AImage.BytesPerRow, FPixels,
-    FSpriteBytesPerRow, Plan);
+  BlitPremultipliedBgra(APixels, ABytesPerRow, FPixels, FSpriteBytesPerRow,
+    Plan);
   Inc(FDrawnFrames);
+end;
+
+procedure TExportCursor.DrawInto(var AImage: TBgraImage; ASeconds: Double);
+begin
+  if Length(AImage.Pixels) = 0 then
+    Exit;
+  DrawIntoPixels(@AImage.Pixels[0], AImage.BytesPerRow, AImage.Width,
+    AImage.Height, ASeconds, False, 0, 0, 0, 0);
+end;
+
+procedure TExportCursor.DrawIntoCropped(var AImage: TBgraImage;
+  ASeconds: Double; ASourceX, ASourceY, ASourceWidth,
+  ASourceHeight: Double);
+begin
+  if Length(AImage.Pixels) = 0 then
+    Exit;
+  DrawIntoPixels(@AImage.Pixels[0], AImage.BytesPerRow, AImage.Width,
+    AImage.Height, ASeconds, True, ASourceX, ASourceY, ASourceWidth,
+    ASourceHeight);
 end;
 
 {$ENDIF}

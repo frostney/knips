@@ -147,6 +147,20 @@ type
     BaseY: Double;
     BaseWidth: Double;
     BaseHeight: Double;
+    // How much of the top of the recorded display belongs to the menu
+    // bar, in that display's own points. Zero when it was not measured,
+    // and zero for a window target.
+    //
+    // It is here because a click is not always content. The live Zoom on
+    // Click already carves this band out — the click that stops a
+    // recording is a click on Knips's own status item, and without the
+    // rule every full-screen take would end by zooming into the top
+    // corner — and a post-recording zoom driven by this file's click
+    // track has to carve out exactly the same band or the two effects
+    // stop agreeing. The number cannot be recovered from the samples: a
+    // notched Mac reports 39 points where an unnotched one reports 22,
+    // and an auto-hiding menu bar reports 0.
+    MenuBarInset: Double;
     // What is already in the movie's pixels, and therefore what an export
     // can no longer choose. These three plus CursorRender are the whole
     // "what was baked" record, and they exist for one consumer: the
@@ -184,9 +198,13 @@ type
     // Big Cursor's sprite — so drawing another would show two.
     CursorAlreadyBaked: Boolean;
     // A crop driven by the click track can still be applied: there are
-    // clicks, the capture was not already zooming, and the samples map.
-    // Nothing in this version applies it; the field is what a caller asks
-    // before offering it.
+    // clicks, the samples map, and — the part that is easy to get wrong —
+    // the capture never moved its own source rectangle. The crop is taken
+    // against the recording's BASE rectangle, so a take whose framing
+    // panned (Follow Mouse, or a composited window recording's poll)
+    // shows a different rectangle in every frame and the crop would be
+    // computed against one it is not showing. Measured before this was
+    // fixed: a Follow Mouse take rendered 36 silently mis-cropped frames.
     CanZoomOnClick: Boolean;
     // Nothing at all was baked into this take's pixels: no pointer, no
     // zoom, no pan. Such a movie is a *raw* take, and everything about it
@@ -198,7 +216,16 @@ type
     // and CanZoomOnClick say exactly which parts of it are still open.
     FullyRenderable: Boolean;
     // Why not, when not. '' when everything above is True.
+    //
+    // Reason is the SUMMARY — the most limiting fact, for a caller that
+    // has one line to show. The two below are per effect, and they are
+    // what a caller offering one effect must show: a take with a baked
+    // pointer and a panned framing has two different reasons, and the
+    // summary can only carry one of them. '' when that effect is
+    // available.
     Reason: string;
+    CursorReason: string;
+    ZoomReason: string;
   end;
 
   TSidecarSample = record
@@ -391,6 +418,13 @@ function SidecarCursorRenderName(ARender: TSidecarCursorRender): string;
 
 function ParseSidecarCursorRender(const AText: string;
   out ARender: TSidecarCursorRender): Boolean;
+
+// True when the capture never moved its own source rectangle: no live
+// zoom, no Follow Mouse pan, no composited window follow. This is the
+// exact precondition for anything that crops against the recording's base
+// rectangle, which is why it is a named question rather than three
+// `and not`s at each call site.
+function HasUntouchedFraming(const AHeader: TSidecarHeader): Boolean;
 
 // True when nothing was baked into this take's pixels — no pointer, no
 // zoom, no pan. The header alone answers it, so a caller with only the
@@ -648,6 +682,7 @@ begin
     + ',"baseY":' + Number(AHeader.BaseY, PointDecimals)
     + ',"baseWidth":' + Number(AHeader.BaseWidth, PointDecimals)
     + ',"baseHeight":' + Number(AHeader.BaseHeight, PointDecimals)
+    + ',"menuBarInset":' + Number(AHeader.MenuBarInset, PointDecimals)
     + ',"cursor":' + QuoteJsonString(SidecarCursorRenderName(AHeader.CursorRender))
     + ',"bakedZoomOnClick":' + Bool(AHeader.BakedZoomOnClick)
     + ',"bakedFollowMouse":' + Bool(AHeader.BakedFollowMouse)
@@ -808,6 +843,9 @@ begin
     FHeader.BaseY := AObject.Get('baseY', TJSONFloat(0));
     FHeader.BaseWidth := AObject.Get('baseWidth', TJSONFloat(0));
     FHeader.BaseHeight := AObject.Get('baseHeight', TJSONFloat(0));
+    // Absent in a sidecar written before the field existed, which reads
+    // as "not measured" and is exactly what a zero means anyway.
+    FHeader.MenuBarInset := AObject.Get('menuBarInset', TJSONFloat(0));
     if ParseSidecarCursorRender(AObject.Get('cursor', 'system'), Render) then
       FHeader.CursorRender := Render;
     FHeader.BakedZoomOnClick := AObject.Get('bakedZoomOnClick', False);
@@ -1067,11 +1105,16 @@ begin
   AY := ASamples[Low].Y + (ASamples[High].Y - ASamples[Low].Y) * Fraction;
 end;
 
+function HasUntouchedFraming(const AHeader: TSidecarHeader): Boolean;
+begin
+  Result := not AHeader.BakedZoomOnClick and not AHeader.BakedFollowMouse
+    and not AHeader.BakedWindowFollow;
+end;
+
 function IsRawTake(const AHeader: TSidecarHeader): Boolean;
 begin
   Result := (AHeader.CursorRender in [scrNone, scrSmooth])
-    and not AHeader.BakedZoomOnClick and not AHeader.BakedFollowMouse
-    and not AHeader.BakedWindowFollow;
+    and HasUntouchedFraming(AHeader);
 end;
 
 function AvailableExportEffects(
@@ -1107,32 +1150,53 @@ begin
   end;
   Result.CanDrawCursor := not Result.CursorAlreadyBaked;
   Result.FullyRenderable := IsRawTake(ALog.Header);
-  // A capture that was already zooming moved its own source rectangle;
-  // cropping it again at export would compound two zooms into one that
-  // nobody chose.
+  // The crop is taken against the BASE rectangle, so every way the
+  // capture could have moved its own source rectangle closes it: a live
+  // zoom (which would compound into one nobody chose), a Follow Mouse
+  // pan, and a composited window recording's poll. The last two are the
+  // ones this used to miss, and missing them was not a refusal that never
+  // came — it was a crop computed against a rectangle the frames were not
+  // showing.
+  //
+  // A pointer already baked into the pixels does NOT close it: that
+  // pointer is part of the picture and scales with the crop exactly as
+  // the live effect's would have. So this is HasUntouchedFraming and not
+  // IsRawTake — an ordinary `knips record` take can still be zoomed.
   Result.CanZoomOnClick := (ALog.ButtonCount > 0)
-    and not ALog.Header.BakedZoomOnClick;
-  // Ordered by consequence, most limiting first, because one string can
-  // only carry one fact. A pointer already in the pixels closes the most;
-  // a framing the capture baked in closes the next; "nothing was clicked"
-  // is last because it is a fact about the CONTENT rather than a limit on
-  // what may be done to it — a take with no clicks is otherwise
-  // completely open.
+    and HasUntouchedFraming(ALog.Header);
+
+  // Per effect first, because each has exactly one answer.
   if not Result.CanDrawCursor then
-    Result.Reason := 'the pointer is already in this recording''s pixels'
+    Result.CursorReason := 'the pointer is already in this recording''s '
+      + 'pixels';
+  if ALog.Header.BakedZoomOnClick then
+    Result.ZoomReason := 'this recording already zooms: the capture '
+      + 'itself followed the clicks'
+  else if not HasUntouchedFraming(ALog.Header) then
+    Result.ZoomReason := 'this recording''s framing was panned by the '
+      + 'capture, so it cannot be re-framed from scratch'
+  else if ALog.ButtonCount = 0 then
+    Result.ZoomReason := 'nothing was clicked during this recording';
+
+  // Then the summary, ordered by consequence, most limiting first,
+  // because one string can only carry one fact. A pointer already in the
+  // pixels closes the most; a framing the capture baked in closes the
+  // next; "nothing was clicked" is last because it is a fact about the
+  // CONTENT rather than a limit on what may be done to it — a take with
+  // no clicks is otherwise completely open.
+  if Result.CursorReason <> '' then
+    Result.Reason := Result.CursorReason
   else if ALog.Header.BakedZoomOnClick then
-    Result.Reason := 'this recording already zooms: the capture itself '
-      + 'followed the clicks'
+    Result.Reason := Result.ZoomReason
   else if not Result.FullyRenderable then
     // Reachable on its own: a take whose pointer can still be drawn and
     // whose clicks are still usable, but whose framing was panned by the
-    // capture — by Follow Mouse, or by a composited window recording's
-    // poll. Without this branch it came back not-fully-renderable with no
-    // reason at all.
+    // capture. Without this branch it came back not-fully-renderable with
+    // no reason at all.
     Result.Reason := 'this recording''s framing was panned by the capture, '
       + 'so it cannot be re-framed from scratch'
-  else if not Result.CanZoomOnClick then
-    Result.Reason := 'nothing was clicked during this recording';
+  else
+    Result.Reason := Result.ZoomReason;
 end;
 
 function SmoothSidecarPath(const ASamples: TSidecarSampleArray;

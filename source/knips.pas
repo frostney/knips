@@ -7,9 +7,14 @@ program knips;
 //                 [--fps=30] [--scale=auto|1|2] [--no-cursor] [--bitrate=N]
 //                 [--audio=none|system|mic|both]
 //                 [--big-cursor | --smooth-cursor]
+//   knips render --in=demo-raw.mp4 [--out=demo.mp4]
+//                 [--effects=zoom,as-recorded|smooth-cursor|big-cursor|
+//                            no-cursor|none]
+//                               raw take -> deliverable; audio copied, not
+//                               re-encoded; presentation stamps unchanged
 //   knips export --in=demo.mp4 --out=demo.gif|.apng [--fps=20] [--width=N]
 //                 [--trim=start,end] [--no-dither]
-//                 [--cursor=as-recorded|none|smooth|big]
+//                 [--cursor=as-recorded|none|smooth|big] [--effects=…]
 //   knips export --in=demo.mp4 --out=cut.mp4 --trim=1.5,3.5
 //                               passthrough trim: no decode, no re-encode
 //   knips displays              list capturable displays
@@ -49,6 +54,7 @@ uses
   Knips.Export.MovieTrim,
   Knips.Export.MovieWriter,
   Knips.Export.Pipeline,
+  Knips.Export.Render,
   Knips.Export.SizeEstimate,
   Knips.ObjC.Runtime,
   Knips.Recording,
@@ -174,13 +180,19 @@ begin
     DefaultGifFramesPerSecond);
   AExport.Width := IntegerValue(AOptions, 'width', GifWidthFromSource);
   AExport.Dither := not FlagPresent(AOptions, 'no-dither');
-  // The export-effects list, of which the cursor is the first member.
+  // The export-effects record, which the GIF sink, the APNG sink and the
+  // MP4 render all take. --cursor names one member of it; --effects names
+  // the set, and is what the playback window's control and `knips render`
+  // both speak.
   if not ParseExportCursorMode(StringValue(AOptions, 'cursor', ''),
     AExport.Effects.Cursor) then
   begin
     AError := '--cursor must be as-recorded, none, smooth, or big';
     Exit;
   end;
+  if not ParseExportEffects(StringValue(AOptions, 'effects', ''),
+    AExport.Effects, AError) then
+    Exit;
 
   Trim := StringValue(AOptions, 'trim', '');
   if Trim <> '' then
@@ -462,6 +474,9 @@ begin
     if Session.Report.SmoothCursor then
       Palette := Palette + Format(', export cursor on %d frames',
         [Session.Report.SmoothCursorFrames]);
+    if Session.Report.ZoomOnClick then
+      Palette := Palette + Format(', zoom on %d frames from %d clicks',
+        [Session.Report.ZoomedFrames, Session.Report.ZoomClicks]);
     WriteLn(Format('wrote %s: %dx%d, %d frames, %.1fs, %d kB%s',
       [Session.Report.OutputPath, Session.Report.PixelWidth,
       Session.Report.PixelHeight, Session.Report.FramesWritten,
@@ -475,6 +490,15 @@ begin
       Flush(Output);
       WriteLn(ErrOutput, ProgramName, ' export: no cursor drawn (',
         Session.Report.SmoothCursorNote, ')');
+      Flush(ErrOutput);
+    end;
+    // The same shape for the zoom: asked for, could not be applied, and
+    // never a reason to fail the export.
+    if Session.Report.ZoomNote <> '' then
+    begin
+      Flush(Output);
+      WriteLn(ErrOutput, ProgramName, ' export: no zoom applied (',
+        Session.Report.ZoomNote, ')');
       Flush(ErrOutput);
     end;
     // How close the pre-export estimate came. Printed because an estimate
@@ -497,6 +521,89 @@ begin
     if Warning <> '' then
     begin
       WriteLn(ErrOutput, ProgramName, ' export: ', Warning);
+      Flush(ErrOutput);
+    end;
+    Result := ExitOk;
+  finally
+    Session.Free;
+  end;
+end;
+
+// `knips render` — the scriptable face of the render pass the menu-bar app
+// runs on every stop. A raw take plus its sidecar in, the deliverable out;
+// audio copied rather than re-encoded.
+function HandleRender(const APositionals: TStringList;
+  const AOptions: TOptionArray): Integer;
+var
+  Effects: TExportEffects;
+  Session: TRenderSession;
+  InputPath, OutputPath, Error, Applied: string;
+begin
+  InputPath := StringValue(AOptions, 'in', '');
+  OutputPath := StringValue(AOptions, 'out', '');
+  if InputPath = '' then
+  begin
+    WriteLn(ProgramName, ' render: an input take is required '
+      + '(--in=demo-raw.mp4)');
+    Exit(ExitUsage);
+  end;
+  if OutputPath = '' then
+  begin
+    // The obvious answer when the input is a raw take: the deliverable is
+    // the same name without the suffix. Anything else has to be named.
+    if not IsRawTakePath(InputPath) then
+    begin
+      WriteLn(ProgramName, ' render: an output path is required '
+        + '(--out=demo.mp4)');
+      Exit(ExitUsage);
+    end;
+    OutputPath := DeliverablePathFor(InputPath);
+  end;
+  Effects := DefaultExportEffects;
+  if not ParseExportEffects(StringValue(AOptions, 'effects', ''), Effects,
+    Error) then
+  begin
+    WriteLn(ProgramName, ' render: ', Error);
+    Exit(ExitUsage);
+  end;
+  Session := TRenderSession.Create(InputPath, OutputPath, Effects);
+  try
+    if not Session.Run(Error) then
+    begin
+      WriteLn(ProgramName, ' render: ', Error);
+      Exit(ExitFailure);
+    end;
+    Applied := '';
+    if Session.Report.ZoomApplied then
+      Applied := Format(', zoom on %d of %d frames from %d clicks',
+        [Session.Report.ZoomedFrames, Session.Report.FramesWritten,
+        Session.Report.UsableClicks]);
+    if Session.Report.CursorDrawn then
+      Applied := Applied + Format(', pointer on %d frames',
+        [Session.Report.CursorFrames]);
+    if Session.Report.AudioTracks > 0 then
+      Applied := Applied + Format(', %d audio track(s) copied (%d samples)',
+        [Session.Report.AudioTracks, Session.Report.AudioSamples]);
+    if Session.Report.Copied then
+      WriteLn(Format('wrote %s: nothing to render, so the take was copied '
+        + 'unchanged (%d kB)', [Session.Report.OutputPath,
+        Session.Report.OutputBytes div 1024]))
+    else
+      WriteLn(Format('wrote %s: %dx%d, %d frames, %.1fs, %d kB%s',
+        [Session.Report.OutputPath, Session.Report.PixelWidth,
+        Session.Report.PixelHeight, Session.Report.FramesWritten,
+        Session.Report.SourceDurationSeconds,
+        Session.Report.OutputBytes div 1024, Applied]));
+    // The number that decides whether this can run on every stop.
+    WriteLn(Format('  %.2fs of work for %.2fs of take (%.2fx realtime)',
+      [Session.Report.ElapsedSeconds, Session.Report.SourceDurationSeconds,
+      Session.Report.RealtimeFactor]));
+    // An effect that was asked for and could not be applied. Never a
+    // failure — the deliverable is correct without it — and never silent.
+    if Session.Report.Note <> '' then
+    begin
+      Flush(Output);
+      WriteLn(ErrOutput, ProgramName, ' render: ', Session.Report.Note);
       Flush(ErrOutput);
     end;
     Result := ExitOk;
@@ -593,7 +700,7 @@ const
   // Every action AppKit will dispatch on the target: the menu items, the
   // status-item button, the deferred one-shots, the playback window's
   // buttons, and the Record Window submenu's delegate callback.
-  TargetSelectors: array[0..27] of string = (
+  TargetSelectors: array[0..28] of string = (
     'recordRegion:', 'recordDisplay:', 'recordWindow:', 'recordLastRegion:',
     'toggleSystemAudio:', 'toggleMicrophone:', 'stopRecording:',
     'cancelSelection:',
@@ -601,8 +708,9 @@ const
     'stopPending:', 'menuNeedsUpdate:', 'exportGif:', 'revealRecording:',
     'closePlayback:', 'toggleCamera:', 'toggleCameraShape:',
     'toggleCameraBlur:',
-    'restoreCamera:', 'toggleZoomOnClick:', 'toggleFollowMouse:',
-    'toggleBigCursor:', 'toggleSmoothCursor:', 'recoverTakes:',
+    'restoreCamera:', 'toggleFollowMouse:', 'toggleEffectZoom:',
+    'toggleEffectSmoothCursor:', 'toggleEffectBigCursor:',
+    'reexportRecording:', 'recoverTakes:',
     'liveTick:', 'cameraRideTick:');
   // The camera window's own drag, and the snap ease's timer callback.
   // Without the three mouse methods the window still appears and still
@@ -1099,7 +1207,7 @@ end;
 
 function ExportOptions: TOptionArray;
 begin
-  SetLength(Result, 7);
+  SetLength(Result, 8);
   Result[0] := TStringOption.Create('in',
     'Input movie; .mp4 or .mov (required)');
   Result[1] := TStringOption.Create('out',
@@ -1118,6 +1226,22 @@ begin
   Result[6] := TStringOption.Create('cursor',
     'Pointer in the animation: as-recorded, none, smooth, or big — '
     + 'drawn from the event sidecar; .gif/.apng only');
+  Result[7] := TStringOption.Create('effects',
+    'Comma-separated post-recording effects: zoom, as-recorded, '
+    + 'smooth-cursor, big-cursor, no-cursor, none; .gif/.apng only');
+end;
+
+function RenderOptions: TOptionArray;
+begin
+  SetLength(Result, 3);
+  Result[0] := TStringOption.Create('in',
+    'The raw take to render; .mp4 or .mov (required)');
+  Result[1] := TStringOption.Create('out',
+    'The deliverable to write (default: the take''s name without "-raw")');
+  Result[2] := TStringOption.Create('effects',
+    'Comma-separated: zoom, as-recorded, smooth-cursor, big-cursor, '
+    + 'no-cursor, none (default as-recorded — whatever the take asked '
+    + 'for, which for a raw take is its pointer)');
 end;
 
 // The cli package's top-level help carries lwpt's own tagline, so the
@@ -1195,6 +1319,10 @@ begin
       'Convert a recording to a GIF or APNG, or trim it without re-encoding',
       '--in=<movie> --out=<file.gif|.apng|.mp4> [--fps=N] [--width=N] [--trim=start,end]',
       @HandleExport, ExportOptions));
+    Registry.Add(TSubcommand.Create('render',
+      'Render a raw take into the deliverable with its effects applied',
+      '--in=<take> [--out=<file>] [--effects=zoom,smooth-cursor]',
+      @HandleRender, RenderOptions));
     Registry.Add(TSubcommand.Create('displays',
       'List capturable displays', '', @HandleDisplays, NoOptions));
     Registry.Add(TSubcommand.Create('windows',
@@ -1217,6 +1345,10 @@ begin
       'Convert a recording to a GIF or APNG, or trim it (macOS only)',
       '--in=<movie> --out=<file.gif|.apng|.mp4> [--fps=N] [--width=N] [--trim=start,end]',
       @HandleExportUnsupported, ExportOptions));
+    Registry.Add(TSubcommand.Create('render',
+      'Render a raw take into the deliverable (macOS only)',
+      '--in=<take> [--out=<file>] [--effects=zoom,smooth-cursor]',
+      @HandleUnsupported, RenderOptions));
     Registry.Add(TSubcommand.Create('displays',
       'List capturable displays (macOS only)', '', @HandleUnsupported,
       NoOptions));
