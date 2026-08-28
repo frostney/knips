@@ -32,6 +32,33 @@ unit Knips.Export.MovieWriter;
 // stream has stopped, so no two threads touch the writer at once.
 // Counters shared with the main thread — and the appends with each
 // other — sit under a pthread mutex (no cthreads in this program).
+//
+// EmitHeartbeatFrame is the one exception to "the main thread only writes
+// when the stream has stopped": it appends while the capture queue may
+// still be delivering. That raises two separate hazards, and only one of
+// them is about the lock.
+//
+// **Concurrency.** AVAssetWriterInput is not safe for two callers at
+// once, so the whole of EmitHeartbeatFrame — reading the retained last
+// frame, copying it with a new stamp, and the append itself — happens
+// inside the *same* FLock the capture path already takes around its
+// appends. There is no second lock and therefore no ordering to get
+// wrong: every append on every input, from every thread, is serialised by
+// that one mutex, and a heartbeat is just one more of them.
+//
+// **Ordering, which the lock does NOT solve.** Serialising the two
+// appends says nothing about their stamps. ScreenCaptureKit stamps a
+// buffer at capture time and delivers it milliseconds later; a heartbeat
+// stamps at the moment the main thread reads the clock. So a frame
+// captured before a heartbeat and delivered after it arrives with a
+// presentation stamp EARLIER than the one already in the file, and one
+// out-of-order stamp fails AVAssetWriter terminally — the take is lost,
+// reproduced and measured. AppendVideoSample closes that by retiming such
+// a frame forward one tick; its comment is the full account. Nothing
+// about this hazard existed before the heartbeat, because before it every
+// stamp in the file came from ScreenCaptureKit in delivery order.
+//
+// See "The idle heartbeat" in docs/architecture.md.
 
 {$I Knips.inc}
 
@@ -164,6 +191,24 @@ type
     AudioInspected: Int64;
     MicrophonePeak: Double;
     MicrophoneInspected: Int64;
+    // How many of AppendedFrames were idle heartbeats — the last frame
+    // repeated because ScreenCaptureKit had gone quiet — rather than
+    // frames it delivered. Zero for any take whose content kept changing,
+    // which is what makes this the no-regression measurement.
+    HeartbeatFrames: Int64;
+    // Heartbeats that were due and could not be made: the writer was not
+    // ready for more data, or the retained frame had been invalidated
+    // under us. Never a reason to fail a recording — the movie is simply
+    // the length it was before — but the one number that would say the
+    // heartbeat had stopped working.
+    HeartbeatRefused: Int64;
+    // Frames ScreenCaptureKit delivered with a stamp at or before the one
+    // already in the file, moved forward one tick so the track stays
+    // monotonic. Only a heartbeat can put a stamp in the file ahead of
+    // capture time, so this is zero for every take that never went idle —
+    // and a small number, on the transitions back out of idle, for the
+    // ones that did. See AppendVideoSample.
+    RetimedFrames: Int64;
     // True once the writer left Writing state; the recording is dead and
     // the main thread should stop instead of appending into it.
     WriterFailed: Boolean;
@@ -177,6 +222,11 @@ type
     // event time into a time on the movie's own timeline. Meaningless
     // until SessionStarted; see Knips.Recording.Sidecar.
     FirstSampleSeconds: Double;
+    // The same for the *last* appended frame, which is how far the movie
+    // has got on that clock. Comparing it with the clock is the whole of
+    // the idle heartbeat's decision (Knips.Recording.Heartbeat).
+    // Meaningless until SessionStarted.
+    LastSampleSeconds: Double;
   end;
 
   TMovieWriter = class
@@ -215,8 +265,21 @@ type
     FAudioInspected: Int64;
     FMicrophonePeak: Double;
     FMicrophoneInspected: Int64;
+    FHeartbeatFrames: Int64;
+    FHeartbeatRefused: Int64;
+    FRetimedFrames: Int64;
+    // The most recent frame that reached the movie, retained so it can be
+    // appended again when ScreenCaptureKit goes quiet. Exactly one is
+    // held at a time — the new one replaces and releases the old under
+    // FLock — so the stream's buffer pool is down one slot of its queue
+    // depth and no more, and the buffer held is the one AVAssetWriter has
+    // just been given anyway. Nil until the first successful append.
+    FLastVideoSample: CMSampleBufferRef;
     FWriterFailed: Boolean;
     FOpen: Boolean;
+    // Drops the retained frame. Callers hold FLock, or run when no
+    // capture queue is left to race them.
+    procedure ReleaseLastVideoSample;
     function BuildOutputSettings: NSDictionary;
     function BuildAudioOutputSettings: NSDictionary;
     // Adds one AAC input to the writer; the two audio tracks differ only
@@ -252,6 +315,21 @@ type
     function AppendAudioSample(ASampleBuffer: CMSampleBufferRef): Boolean;
     // The same, on ScreenCaptureKit's microphone queue.
     function AppendMicrophoneSample(ASampleBuffer: CMSampleBufferRef): Boolean;
+    // The idle heartbeat: the last delivered frame again, at
+    // AStampSeconds on ScreenCaptureKit's host clock, so a movie whose
+    // content has stopped changing goes on keeping pace with the wall
+    // clock. Whether one is *due* is the caller's decision
+    // (Knips.Recording.Heartbeat); this only carries it out.
+    //
+    // Main thread, and — unlike Finish — while the capture queue may
+    // still be delivering: the append happens under the same FLock every
+    // other append takes, so the two serialise rather than race. See the
+    // threading note at the top of this unit.
+    //
+    // False, and nothing appended, when there is no frame to repeat yet,
+    // when the writer is not ready for more data, or when the stamp would
+    // not be strictly later than the last one. None of those is an error.
+    function EmitHeartbeatFrame(AStampSeconds: Double): Boolean;
     // Main-thread side, after the stream has stopped.
     function Finish(out AError: string): Boolean;
     procedure Cancel;
@@ -314,6 +392,10 @@ destructor TMovieWriter.Destroy;
 begin
   if FOpen then
     Cancel;
+  // After Cancel, and before the inputs go: the capture queue has been
+  // stopped by the session long before a writer is freed, so nothing is
+  // racing this.
+  ReleaseLastVideoSample;
   if FInput <> nil then
     FInput.release;
   if FAudioInput <> nil then
@@ -324,6 +406,14 @@ begin
     FWriter.release;
   PThreadMutexDestroy(FLock);
   inherited Destroy;
+end;
+
+procedure TMovieWriter.ReleaseLastVideoSample;
+begin
+  if FLastVideoSample = nil then
+    Exit;
+  CMSampleBufferRelease(FLastVideoSample);
+  FLastVideoSample := nil;
 end;
 
 procedure TMovieWriter.EnableAudioTracks(ASystem, AMicrophone: Boolean;
@@ -519,6 +609,8 @@ function TMovieWriter.AppendVideoSample(
   ASampleBuffer: CMSampleBufferRef): Boolean;
 var
   Time: CMTime;
+  Previous, Retimed, Appending: CMSampleBufferRef;
+  Timing: CMSampleTimingInfo;
 begin
   Result := False;
   if not FOpen then
@@ -548,14 +640,198 @@ begin
     FFirstTime := Time;
     FSessionStarted := True;
   end;
-  if FInput.appendSampleBuffer(ASampleBuffer) then
+
+  // A frame from BEFORE the last stamp, which the idle heartbeat makes
+  // possible and nothing else does.
+  //
+  // ScreenCaptureKit stamps a buffer when it captured the content and
+  // delivers it some milliseconds later — measured on this machine, up to
+  // 27 ms on a busy 1280x800 take. A heartbeat stamps at the moment the
+  // main thread reads the clock. So a frame captured just before a
+  // heartbeat fired, and delivered just after, arrives here with a
+  // presentation stamp EARLIER than the one already in the file. One
+  // out-of-order stamp fails AVAssetWriter terminally: the writer leaves
+  // Writing state, every later append on every input is rejected, and the
+  // take ends as a moov-less corpse. Reproduced by forcing the heartbeat
+  // interval to 20 ms — "AVAssetWriter finished with status 3", 37 kB, no
+  // recoverable movie — and estimated at roughly one idle-to-busy
+  // transition in twenty at the shipped half-second.
+  //
+  // So the frame is retimed forward rather than trusted or dropped: the
+  // smallest stamp that is strictly later than the last one, which is one
+  // tick in the timescale the last one was in. The pixels are the user's
+  // content and are kept; what moves is a stamp that was at most a few
+  // tens of milliseconds from where it now sits. A whole backlog arriving
+  // at once is retimed a tick apart each — in the written file, measured,
+  // that lands them 1/600 s apart, the movie track's own resolution — so
+  // the worst case is a short burst rather than a lost take, and the queue
+  // depth is 5, so the backlog is small.
+  //
+  // Capture-queue legal, and only in the collision: CMTimeCompare and
+  // CMSampleBufferCreateCopyWithNewTiming are C calls, CMSampleTimingInfo
+  // is a stack record, the copy shares the original's pixels. No managed
+  // type, no exception, no pixel work.
+  Retimed := nil;
+  Appending := ASampleBuffer;
+  if (FAppended > 0) and (CMTimeCompare(Time, FLastTime) <= 0) then
+  begin
+    Timing.duration := CMSampleBufferGetDuration(ASampleBuffer);
+    Timing.presentationTimeStamp.value := FLastTime.value + 1;
+    Timing.presentationTimeStamp.timescale := FLastTime.timescale;
+    Timing.presentationTimeStamp.flags := kCMTimeFlags_Valid;
+    Timing.presentationTimeStamp.epoch := FLastTime.epoch;
+    Timing.decodeTimeStamp := InvalidCMTime;
+    if (CMSampleBufferCreateCopyWithNewTiming(nil, ASampleBuffer, 1,
+      @Timing, @Retimed) <> noErr) or (Retimed = nil) then
+    begin
+      // The one thing that must not happen is appending it anyway. A
+      // frame lost here costs a frame; an out-of-order stamp costs the
+      // recording.
+      Inc(FFailed);
+      PThreadMutexUnlock(FLock);
+      Exit;
+    end;
+    Time := Timing.presentationTimeStamp;
+    Appending := Retimed;
+  end;
+
+  if FInput.appendSampleBuffer(Appending) then
   begin
     Inc(FAppended);
+    if Retimed <> nil then
+      Inc(FRetimedFrames);
     FLastTime := Time;
+    // Hold on to it for the idle heartbeat: exactly one frame of
+    // ScreenCaptureKit's pool is ever held, and the one held is the frame
+    // AVAssetWriter was just handed anyway. Two C calls into
+    // CoreFoundation — no allocation this thread has to account for, no
+    // managed type, nothing that can raise. Retain before release, in
+    // case the new buffer and the old are ever the same object.
+    //
+    // The original, not the retimed copy: the copy exists only to carry a
+    // stamp, and a heartbeat re-times whatever it holds anyway.
+    Previous := FLastVideoSample;
+    FLastVideoSample := CMSampleBufferRetain(ASampleBuffer);
+    if Previous <> nil then
+      CMSampleBufferRelease(Previous);
     Result := True;
   end
   else
     Inc(FFailed);
+  if Retimed <> nil then
+    CMSampleBufferRelease(Retimed);
+  PThreadMutexUnlock(FLock);
+end;
+
+// Everything here runs with FLock held, which is what makes it safe
+// against a frame arriving on the capture queue at the same moment: that
+// append takes the same mutex, so the two serialise. The lock is held
+// across the copy and the append together on purpose — the retained frame
+// must not be swapped out from under the copy — and both are cheap: the
+// copy shares the original's pixels rather than duplicating them, and the
+// append is the same call the capture path makes thirty times a second.
+function TMovieWriter.EmitHeartbeatFrame(AStampSeconds: Double): Boolean;
+var
+  Timing: CMSampleTimingInfo;
+  Beat: CMSampleBufferRef;
+  Ticks, Frame: cint64;
+begin
+  Result := False;
+  if not FOpen then
+    Exit;
+
+  PThreadMutexLock(FLock);
+  // Nothing to repeat: no frame has reached the movie yet, so there is no
+  // timeline to put one on either. Not counted — it is not a refusal, it
+  // is the state every recording starts in.
+  //
+  // This is also the guard that covers a caller who asked because
+  // Statistics said SessionStarted with a LastSampleSeconds of zero — the
+  // session began but the first append failed. See Statistics.
+  if (FLastVideoSample = nil) or not FSessionStarted then
+  begin
+    PThreadMutexUnlock(FLock);
+    Exit;
+  end;
+  if FWriter.status <> AVAssetWriterStatusWriting then
+  begin
+    FWriterFailed := True;
+    PThreadMutexUnlock(FLock);
+    Exit;
+  end;
+  // Back-pressure, the same shape AppendVideoSample handles it in: the
+  // encoder is behind, and a repeated frame is the first thing that
+  // should give way. Counted, because a heartbeat that is always refused
+  // is the failure this feature would have.
+  if not FInput.isReadyForMoreMediaData then
+  begin
+    Inc(FHeartbeatRefused);
+    PThreadMutexUnlock(FLock);
+    Exit;
+  end;
+  // A frame the framework has invalidated has no pixels left to encode.
+  // Checked rather than assumed: ScreenCaptureKit is not documented to
+  // invalidate a buffer the client still holds, and if it ever does, this
+  // is what says so out loud instead of failing the writer for good.
+  if not CMSampleBufferIsValid(FLastVideoSample) then
+  begin
+    Inc(FHeartbeatRefused);
+    ReleaseLastVideoSample;
+    PThreadMutexUnlock(FLock);
+    Exit;
+  end;
+
+  // The movie's own units, not seconds: the stamp is built in the last
+  // frame's timescale and epoch, so every frame in the track is on one
+  // scale and the comparison below is exact rather than floating-point.
+  // Strictly greater is the hard requirement — an out-of-order stamp
+  // fails AVAssetWriter terminally, which would cost the whole take.
+  Ticks := Round(AStampSeconds * FLastTime.timescale);
+  if Ticks <= FLastTime.value then
+    Ticks := FLastTime.value + 1;
+  // One frame at the configured rate, stated rather than left invalid.
+  // Interior samples take their length from the stamp of the next one, so
+  // this only ever describes the *last* frame in the track — and that one
+  // is nearly always a heartbeat, since the closing one is stamped at the
+  // stop. Left invalid, AVAssetWriter gives the final frame the length of
+  // the gap before it, which for a still take is the heartbeat interval:
+  // measured, a 14.005 s take reported a 14.518 s container duration. A
+  // frame's worth is the honest answer.
+  Frame := 0;
+  if FFramesPerSecond > 0 then
+    Frame := FLastTime.timescale div FFramesPerSecond;
+  if Frame < 1 then
+    Frame := 1;
+  Timing.duration.value := Frame;
+  Timing.duration.timescale := FLastTime.timescale;
+  Timing.duration.flags := kCMTimeFlags_Valid;
+  Timing.duration.epoch := 0;
+  Timing.presentationTimeStamp.value := Ticks;
+  Timing.presentationTimeStamp.timescale := FLastTime.timescale;
+  Timing.presentationTimeStamp.flags := kCMTimeFlags_Valid;
+  Timing.presentationTimeStamp.epoch := FLastTime.epoch;
+  // Left to AVAssetWriter: frame reordering is off (BuildOutputSettings),
+  // so decode order is presentation order and there is nothing to say.
+  Timing.decodeTimeStamp := InvalidCMTime;
+
+  Beat := nil;
+  if (CMSampleBufferCreateCopyWithNewTiming(nil, FLastVideoSample, 1,
+    @Timing, @Beat) <> noErr) or (Beat = nil) then
+  begin
+    Inc(FHeartbeatRefused);
+    PThreadMutexUnlock(FLock);
+    Exit;
+  end;
+  if FInput.appendSampleBuffer(Beat) then
+  begin
+    Inc(FAppended);
+    Inc(FHeartbeatFrames);
+    FLastTime := Timing.presentationTimeStamp;
+    Result := True;
+  end
+  else
+    Inc(FFailed);
+  CMSampleBufferRelease(Beat);
   PThreadMutexUnlock(FLock);
 end;
 
@@ -737,6 +1013,11 @@ begin
     FAudioInput.markAsFinished;
   if FMicrophoneInput <> nil then
     FMicrophoneInput.markAsFinished;
+  // The heartbeat's frame goes back to ScreenCaptureKit's pool here: the
+  // inputs are finished, so nothing will be repeated again, and holding
+  // it across finishWriting would keep one buffer of a stopped stream
+  // alive for no reason.
+  ReleaseLastVideoSample;
   PThreadMutexUnlock(FLock);
 
   if not FSessionStarted then
@@ -796,12 +1077,30 @@ begin
   Result.AudioInspected := FAudioInspected;
   Result.MicrophonePeak := FMicrophonePeak;
   Result.MicrophoneInspected := FMicrophoneInspected;
+  Result.HeartbeatFrames := FHeartbeatFrames;
+  Result.HeartbeatRefused := FHeartbeatRefused;
+  Result.RetimedFrames := FRetimedFrames;
   Result.WriterFailed := FWriterFailed;
   Result.SessionStarted := FSessionStarted;
   if FSessionStarted then
     Result.FirstSampleSeconds := CMTimeGetSeconds(FFirstTime)
   else
     Result.FirstSampleSeconds := 0;
+  // SessionStarted and LastSampleSeconds are not the same question, and
+  // the gap between them is one the heartbeat's caller walks into: the
+  // session begins at the first frame that reaches startSessionAtSourceTime,
+  // but FLastTime is only written by an append that SUCCEEDED. A first
+  // append that failed leaves SessionStarted true and this zero, so
+  // HeartbeatDue says yes against a stamp meaning "never" and asks for a
+  // heartbeat at once. What saves it is EmitHeartbeatFrame's own guard:
+  // no successful append means FLastVideoSample is nil, and there is
+  // nothing to repeat, so it returns without appending or counting. The
+  // two are kept in step by that, not by luck — but they are two
+  // conditions, and this is the note that says so.
+  if FSessionStarted and (FAppended > 0) then
+    Result.LastSampleSeconds := CMTimeGetSeconds(FLastTime)
+  else
+    Result.LastSampleSeconds := 0;
   if FSessionStarted and (FAppended > 0) then
     Result.Duration := CMTimeGetSeconds(FLastTime)
       - CMTimeGetSeconds(FFirstTime)

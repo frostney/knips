@@ -442,6 +442,36 @@ function CMAudioFormatDescriptionGetStreamBasicDescription(
 ): PAudioStreamBasicDescription;
   external name '_CMAudioFormatDescriptionGetStreamBasicDescription';
 
+{ The same frame again, at a different moment. ScreenCaptureKit delivers a
+  buffer only when the content changes, so a screen that goes still stops
+  producing frames altogether and the movie's timeline stops with it. The
+  idle heartbeat (Knips.Export.MovieWriter.EmitHeartbeatFrame) re-appends
+  the last delivered frame through this: a copy that shares the original's
+  image buffer and carries nothing new but its presentation stamp.
+
+  The copy retains the original's pixels rather than duplicating them, so
+  this costs a small allocation and no pixel work at all. }
+function CMSampleBufferCreateCopyWithNewTiming(
+  allocator: CFAllocatorRef;
+  originalSBuf: CMSampleBufferRef;
+  numSampleTimingEntries: CMItemCount;
+  sampleTimingArray: Pointer; { ^CMSampleTimingInfo }
+  sampleBufferOut: Pointer { ^CMSampleBufferRef }
+): OSStatus; external name '_CMSampleBufferCreateCopyWithNewTiming';
+
+{ Keeping the last delivered frame alive between heartbeats. Exactly one
+  is ever held (the newest replaces and releases the previous), so the
+  stream's buffer pool loses one slot of its queue depth and no more. }
+function CMSampleBufferRetain(
+  sbuf: CMSampleBufferRef
+): CMSampleBufferRef; external name '_CFRetain';
+
+{ A CMTime that means "no value", for the timing fields a heartbeat frame
+  leaves to AVAssetWriter: a stamp is all it has to say. kCMTimeInvalid is
+  documented as a zeroed structure — no valid flag — which is what this
+  builds, rather than binding one more global. }
+function InvalidCMTime: CMTime;
+
 { ======== Helper to create CMTime inline ======== }
 function MakeCMTime(value: cint64; timescale: cint32): CMTime;
 
@@ -462,6 +492,14 @@ end;
 function HostClockSeconds: Double;
 begin
   Result := CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock));
+end;
+
+function InvalidCMTime: CMTime;
+begin
+  Result.value := 0;
+  Result.timescale := 0;
+  Result.flags := 0;
+  Result.epoch := 0;
 end;
 
 {$ENDIF}

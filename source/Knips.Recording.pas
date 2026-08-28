@@ -11,6 +11,27 @@ unit Knips.Recording;
 // sprite was made on the main thread before the capture started). Stop
 // arrives through a signal-safe flag set by the program's SIGINT/SIGTERM
 // handler.
+//
+// The one other thing the main thread does *while* the capture queue is
+// live is the idle heartbeat: ScreenCaptureKit delivers a frame only when
+// the content changes, so a still screen would otherwise leave the movie
+// standing still while the wall clock ran on. SampleMetadata — the tick
+// every front end already calls — asks whether the movie has fallen
+// behind (Knips.Recording.Heartbeat, neutral and tested) and, when it
+// has, tells the writer to repeat its last frame at the current host
+// time.
+//
+// Two threads now write to one AVAssetWriterInput, and the two problems
+// that creates are solved in two different places. The appends themselves
+// serialise under the writer's own mutex, the same one the capture queue
+// takes, so there is no second lock anywhere in the path. But serialising
+// them does nothing about their *stamps*: a heartbeat stamps at the
+// clock's reading while ScreenCaptureKit stamps at capture time and
+// delivers later, so a frame can arrive stamped behind a heartbeat that
+// has already been written — which fails AVAssetWriter for good. The
+// writer's own AppendVideoSample retimes such a frame forward; that is
+// where the ordering hazard lives, not here. See "The idle heartbeat" in
+// docs/architecture.md.
 
 {$I Knips.inc}
 
@@ -33,6 +54,7 @@ uses
   Knips.Options,
   Knips.Recording.CursorMath,
   Knips.Recording.CursorOverlay,
+  Knips.Recording.Heartbeat,
   Knips.Recording.LiveMath,
   Knips.Recording.Sidecar,
   MacOSAll;
@@ -99,6 +121,18 @@ type
     CursorFrames: Int64;
     CursorOffFrame: Int64;
     CursorRefused: Int64;
+    // The idle heartbeat: how many of AppendedFrames were the last frame
+    // repeated because ScreenCaptureKit had nothing new to deliver, and
+    // how many repeats were due and could not be made. A take whose
+    // content never stopped changing has zero of both.
+    //
+    // RetimedFrames is the heartbeat's other cost: frames that arrived
+    // stamped at or before a heartbeat and were moved one tick past it so
+    // the track stays monotonic. A handful on the transitions out of idle
+    // (Knips.Export.MovieWriter.AppendVideoSample).
+    HeartbeatFrames: Int64;
+    HeartbeatRefused: Int64;
+    RetimedFrames: Int64;
     DurationSeconds: Double;
     // The event sidecar (Knips.Recording.Sidecar): where it went, how many
     // pointer samples reached it, and why it was given up on if it was.
@@ -150,6 +184,20 @@ type
     FDisplayOriginY: Double;
     procedure HandleSample(ASampleBuffer: CMSampleBufferRef;
       AKind: TSampleKind);
+    // One tick of the idle heartbeat: if the movie's last frame is
+    // AIntervalSeconds or more behind the host clock, repeat it at the
+    // clock's current reading. Main thread; the writer serialises the
+    // append against the capture queue's own.
+    //
+    // The staleness is read from the writer's statistics and the append
+    // is a second call, so a real frame can land between the two. That
+    // costs one extra repeated frame at a stamp no earlier than it, which
+    // is why it is left alone rather than folded into one locked
+    // operation: the decision belongs to the neutral, tested half.
+    procedure EmitIdleHeartbeat(AIntervalSeconds: Double);
+    // Seconds per frame at the configured rate — the smallest step two
+    // stamps may be apart, and the staleness the closing heartbeat uses.
+    function NominalFrameSeconds: Double;
     procedure OpenSidecar;
     procedure CloseSidecar;
     // The rectangle ScreenCaptureKit is reading right now, in the recorded
@@ -675,6 +723,34 @@ begin
   Result := True;
 end;
 
+function TRecordingSession.NominalFrameSeconds: Double;
+begin
+  if FGeometry.FramesPerSecond > 0 then
+    Result := 1 / FGeometry.FramesPerSecond
+  else
+    Result := 1 / 30;
+end;
+
+procedure TRecordingSession.EmitIdleHeartbeat(AIntervalSeconds: Double);
+var
+  Statistics: TMovieWriterStatistics;
+  Moment: Double;
+begin
+  if FWriter = nil then
+    Exit;
+  Statistics := FWriter.Statistics;
+  // A writer that has already failed is not something to keep appending
+  // into; the run loop is about to stop the recording anyway.
+  if Statistics.WriterFailed then
+    Exit;
+  Moment := HostClockSeconds;
+  if not HeartbeatDue(Statistics.SessionStarted, Statistics.LastSampleSeconds,
+    Moment, AIntervalSeconds) then
+    Exit;
+  FWriter.EmitHeartbeatFrame(HeartbeatStamp(Statistics.LastSampleSeconds,
+    Moment, HeartbeatMinimumStep(NominalFrameSeconds, AIntervalSeconds)));
+end;
+
 function TRecordingSession.CurrentSourceRect: CGRect;
 begin
   if (FStream <> nil) and FStream.HasSentRect then
@@ -803,7 +879,18 @@ begin
   // Main thread. Nothing here may be reached from the capture queue: it
   // allocates, it writes to a file, and it sends no Objective-C message
   // only by luck rather than by rule.
-  if (FSidecar = nil) or not FCapturing then
+  if not FCapturing then
+    Exit;
+
+  // The idle heartbeat rides this tick rather than a timer of its own,
+  // for the reason given in the declaration above: one main thread, two
+  // very different run loops on it, and every front end already calls
+  // this at the rate the heartbeat wants. It goes before the sidecar's
+  // own guard because a recording without a sidecar still needs a movie
+  // that keeps pace with the clock.
+  EmitIdleHeartbeat(DefaultHeartbeatSeconds);
+
+  if FSidecar = nil then
     Exit;
 
   // The anchor, as soon as there is one. AVAssetWriter starts the movie's
@@ -944,6 +1031,21 @@ begin
   if FStream <> nil then
     FStream.Stop;
 
+  // The stop's own moment, and the second half of the drift measurement:
+  // the host time at the stop against the movie's own duration. Both come
+  // from the clock ScreenCaptureKit stamps frames with, so the two must
+  // agree — and after the closing heartbeat below they do exactly, rather
+  // than to within however long nothing moved.
+  FReport.StopHostSeconds := HostClockSeconds;
+  // The closing heartbeat. The periodic one leaves the movie up to its
+  // own interval short of the stop; this puts the last frame at the stop
+  // instant itself, so a take that ended on a still screen is as long as
+  // the recording was. Safe to append from here for a plainer reason than
+  // the periodic one: the stream has stopped, so no frame can arrive
+  // beside it. A gap of less than one frame interval is not worth a
+  // frame.
+  EmitIdleHeartbeat(NominalFrameSeconds);
+
   // After the stop, not before: Stop waits out the last live update, so
   // reading here counts it rather than reporting one fewer than was sent.
   if FStream <> nil then
@@ -979,13 +1081,10 @@ begin
   FReport.AudioInspected := Statistics.AudioInspected;
   FReport.MicrophonePeak := Statistics.MicrophonePeak;
   FReport.MicrophoneInspected := Statistics.MicrophoneInspected;
+  FReport.HeartbeatFrames := Statistics.HeartbeatFrames;
+  FReport.HeartbeatRefused := Statistics.HeartbeatRefused;
+  FReport.RetimedFrames := Statistics.RetimedFrames;
   FReport.DurationSeconds := Statistics.Duration;
-
-  // The trailer, and the second half of the drift measurement: the host
-  // time at the stop against the movie's own duration. Both come from the
-  // clock ScreenCaptureKit stamps frames with, so the two must agree to
-  // within the gap between the last frame and this line.
-  FReport.StopHostSeconds := HostClockSeconds;
 
   Result := FWriter.Finish(AError);
   // The trailer goes AFTER the finish, and only when it succeeded. The

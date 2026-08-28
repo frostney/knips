@@ -374,6 +374,15 @@ begin
     'frames', FSession.Report.AppendedFrames,
     'dropped_frames', FSession.Report.DroppedFrames,
     'failed_appends', FSession.Report.FailedAppends,
+    // How much of `frames` was the idle heartbeat repeating the last one,
+    // and how many repeats were due and could not be made. An MCP take is
+    // the sparse case — nothing runs on the main thread between tool
+    // calls — so a client that polled rarely should expect few of the
+    // first, and `heartbeats_refused` above zero is the one number that
+    // says the mechanism stopped working (docs/architecture.md, "The
+    // idle heartbeat").
+    'heartbeats', FSession.Report.HeartbeatFrames,
+    'heartbeats_refused', FSession.Report.HeartbeatRefused,
     'bytes', FileSizeOf(FSession.Report.OutputPath)]);
   FreeAndNil(FSession);
   Result := MCPStructuredResult(Summary, Structured);
@@ -436,7 +445,11 @@ begin
       'elapsed_seconds', Elapsed,
       'frames', Statistics.AppendedFrames,
       'dropped_frames', Statistics.DroppedFrames,
-      'failed_appends', Statistics.FailedAppends]));
+      'failed_appends', Statistics.FailedAppends,
+      // The failed branch is where a client most wants to know whether
+      // the heartbeat had stopped working before the writer did.
+      'heartbeats', Statistics.HeartbeatFrames,
+      'heartbeats_refused', Statistics.HeartbeatRefused]));
     // In-band error, not a protocol one: the status query itself
     // worked. isError is what stops an agent from reading the numbers
     // and carrying on as though the recording were fine.
@@ -454,6 +467,12 @@ begin
     'elapsed_seconds', Elapsed,
     'frames', Statistics.AppendedFrames,
     'dropped_frames', Statistics.DroppedFrames,
+    // See record_stop: how much of `frames` is the idle heartbeat, and
+    // the refusal count that would say it had stopped working. Mid-take
+    // here rather than at the end, which is what lets a client watching a
+    // long recording notice.
+    'heartbeats', Statistics.HeartbeatFrames,
+    'heartbeats_refused', Statistics.HeartbeatRefused,
     'width', FSession.Geometry.PixelWidth,
     'height', FSession.Geometry.PixelHeight,
     'fps', FSession.Geometry.FramesPerSecond]));
@@ -607,15 +626,22 @@ const
     + '"width":{"type":"integer"},"height":{"type":"integer"},'
     + '"duration_seconds":{"type":"number"},"frames":{"type":"integer"},'
     + '"dropped_frames":{"type":"integer"},'
-    + '"failed_appends":{"type":"integer"},"bytes":{"type":"integer"}},'
+    + '"failed_appends":{"type":"integer"},'
+    + '"heartbeats":{"type":"integer"},'
+    + '"heartbeats_refused":{"type":"integer"},'
+    + '"bytes":{"type":"integer"}},'
     + '"required":["path","width","height","duration_seconds","frames",'
-    + '"dropped_frames","failed_appends","bytes"]}';
+    + '"dropped_frames","failed_appends","heartbeats",'
+    + '"heartbeats_refused","bytes"]}';
   RecordStatusOutputSchema =
     '{"type":"object","properties":{"recording":{"type":"boolean"},'
     + '"failed":{"type":"boolean"},"finalised":{"type":"boolean"},'
     + '"path":{"type":"string"},"elapsed_seconds":{"type":"number"},'
     + '"frames":{"type":"integer"},"dropped_frames":{"type":"integer"},'
-    + '"failed_appends":{"type":"integer"},"width":{"type":"integer"},'
+    + '"failed_appends":{"type":"integer"},'
+    + '"heartbeats":{"type":"integer"},'
+    + '"heartbeats_refused":{"type":"integer"},'
+    + '"width":{"type":"integer"},'
     + '"height":{"type":"integer"},"fps":{"type":"integer"}},'
     + '"required":["recording"]}';
   ExportOutputSchema =

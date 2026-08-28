@@ -80,6 +80,19 @@ between the last captured frame and the stop, and it does not grow with the
 length of the take (a 5-second recording showed 0.050 s). There is no
 drift, because there is only one clock.
 
+That gap used to be bounded only by how long nothing moved: a still screen
+delivers no frames at all, so a 30-second recording of one produced a
+single frame and a movie spanning **0.000 s** against 30 s of elapsed host
+time, and every event after the first was past the end of the file. The
+**idle heartbeat** now repeats the last frame twice a second while a
+recording runs, and once more at the stop itself, so the movie's own
+duration and the anchor-to-stop span agree to within a frame whatever the
+screen was doing — measured, 13.972 s against 13.972 s. See
+[docs/architecture.md](architecture.md), "The idle heartbeat". Readers that
+place events on the movie's timeline are the reason it matters: the
+arithmetic above was always exact, but it used to be exact about a moment
+the movie did not reach.
+
 The anchor is written as soon as the first frame has been appended, not at
 the end, so a recording that dies still carries it.
 
@@ -146,6 +159,13 @@ Nothing about the sidecar runs on ScreenCaptureKit's capture queue.
   movie, not a dense event track. It is also the take the interpolation
   rule above is written for: minutes can separate two of those samples,
   and nothing may be drawn through the silence between them.
+
+  The idle heartbeat rides the same tick and inherits the same sparseness:
+  an unpolled MCP recording gets no periodic heartbeats, only the closing
+  one at `record_stop`. Its movie still **spans** the take — measured, 12.0
+  seconds of wall time came back as a 12.002 s span from two frames — and
+  polling `record_status` is what makes the frames inside it dense. A take
+  polled once a second showed frame gaps of exactly 1.005 s.
 
 ### Buttons
 
@@ -319,6 +339,20 @@ is not a click into it.
 own length in seconds (last frame PTS minus first), and `samples` is how
 many `cursor` records were written. `recovered` is `true` when this trailer
 was written by the recovery pass rather than by the recording itself.
+
+**`frames` counts what is in the file, which is no longer the same as
+what the capture delivered.** Since the idle heartbeat, a take whose
+screen went still has the last frame repeated into it about twice a
+second, and those repeats are in this count exactly as captured frames
+are — they are frames in the movie, and a reader comparing this against
+the file would otherwise find it wrong. So `frames ÷ duration` is the
+movie's frame rate and not a measure of how busy the content was: a
+wholly still 11.7 s take reports 145 frames of which 13 are repeats,
+against the single frame it would have reported before. A reader that
+wants capture density has to look at the pixels; the sidecar does not
+record which frames were repeats. `duration` is unaffected in meaning and
+much improved in accuracy — it now matches the anchor-to-`t` span to
+within a frame whatever the screen did.
 
 A file with no trailer was cut short — the process died, or is still
 recording.

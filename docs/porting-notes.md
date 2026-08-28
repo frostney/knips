@@ -122,6 +122,22 @@ changed. A wrong assumption here is a write into somebody else's memory,
 not a wrong colour, which is why it is checked on every frame rather than
 once (`Knips.Recording.CursorOverlay.DrawInto`).
 
+### One CoreMedia call for the idle heartbeat
+
+`CMSampleBufferCreateCopyWithNewTiming` went into the same `knips
+additions` banner, with `CMSampleBufferRetain` (an alias for `_CFRetain`,
+the way `CMSampleBufferRelease` already aliases `_CFRelease`) and a local
+`InvalidCMTime` helper. The heartbeat re-appends the last delivered frame
+with a fresh presentation stamp, and this is the one call that makes that
+possible without touching a pixel: the copy shares the original's image
+buffer and differs only in its `CMSampleTimingInfo`. Its signature is the
+same shape as `CMSampleBufferCreateReady`, which the unit already carried,
+and it uses the `CMSampleTimingInfo` record and `CMItemCount` type that
+were already there. `kCMTimeInvalid` is documented as an all-zero
+structure, so it is built rather than bound — one fewer external global
+for one fewer thing to get wrong. Nothing else about the unit changed.
+See [architecture.md](architecture.md), "The idle heartbeat".
+
 ### The rename reached the vendored units too
 
 The project shipped its first milestones under the name *opname*, and the

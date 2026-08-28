@@ -9,6 +9,33 @@ release-tagging step; it does not produce the entries below.)
 
 ### Features
 
+- **Recordings of a still screen are no longer nearly empty.**
+  ScreenCaptureKit delivers a frame only when the content changes, so a
+  take whose screen went quiet used to stop producing frames — and,
+  because the movie's timeline is built from the frames' own stamps, the
+  movie stopped with it. A 30-second recording of a still screen came out
+  as one frame spanning 0.000 seconds; a real 17.5-second take came out as
+  4.3 seconds with three of its four clicks past the end of the file.
+  Suppressing the pointer for a raw take made it the common case rather
+  than an oddity, because moving the mouse then stopped counting as a
+  change.
+
+  knips now repeats the last frame twice a second while nothing is
+  changing, and once more at the stop, so a take's movie is as long as the
+  recording was: the same still screen, recorded by both builds at the same
+  moment, gives 58 frames over 29.6 seconds instead of one frame over
+  none. Everything downstream inherits it — clicks land inside the movie's
+  span so `render --effects=zoom` has frames to zoom, a take killed with
+  `SIGKILL` recovers 10.5 seconds where it used to recover 2.0, and a movie
+  with sound no longer has an 11-second audio track over a single video
+  frame. Takes whose content keeps changing are untouched: the repeat never
+  fires while frames are arriving, and a busy recording measured 0 dropped
+  and 0 failed appends either way. Costs about 1.7 ms of CPU and 2.6 kB a
+  second while idle. A frame that arrives just behind a heartbeat's stamp
+  is retimed one tick forward rather than handed to the writer out of
+  order (which would end the recording) — the summary's "N frames
+  retimed" is that rescue counted. See
+  [docs/architecture.md](docs/architecture.md), "The idle heartbeat".
 - **The effects animate instead of jumping.** ScreenCaptureKit only
   delivers a frame when the screen changes, and a raw take has no pointer
   in its pixels — so moving the mouse over a still window produced no
@@ -24,13 +51,17 @@ release-tagging step; it does not produce the entries below.)
   own frame grid, and one gap can never cost more than a bounded number
   of frames however damaged the movie's stamps are.
 
-  Two limits worth knowing. The fill goes only *between* frames the
-  capture delivered, so a take whose screen went static still loses its
-  tail — measured, a 17.5-second recording came back as a 4.3-second
-  movie — and putting that back is a recorder-side change still to come.
-  And every figure above was measured on the recorder as it stands
-  today; once the capture keeps a steady cadence of its own, most of
-  these gaps will simply not exist.
+  Every figure above was measured against a recorder that stopped
+  producing frames when the screen went still. That recorder-side change
+  — the idle heartbeat, the entry above — has since landed, and it moves
+  both limits this entry used to carry. The tail a static take used to
+  lose is no longer lost, so the fill has a frame on both sides of every
+  gap it is asked about; and because the capture now keeps a half-second
+  cadence of its own, most of the gaps these numbers came from do not
+  arise in the first place. What is left for the fill is the sub-second
+  work it is actually good at: measured on a still take on the merged
+  build, a zoom that had one real frame to land on now animates over
+  several, and the fill is invoked only inside the effect windows.
 - **A sparse pointer track is no longer drawn through.** Two samples
   minutes apart — which is what an MCP recording produces between tool
   calls — used to be joined with a straight line, so the drawn pointer
@@ -72,7 +103,6 @@ release-tagging step; it does not produce the entries below.)
   a frame at 28 against 7.6–9.8 ms at 12, ranges that overlap almost
   entirely, with Vision ~78 % of each. Both are far under the 33 ms
   budget.
-
 - **Event sidecar.** Every recording writes `<take>.knips.jsonl` beside
   its movie: the pointer's path at about thirty samples a second, mouse
   button edges, the rectangle the capture was reading at each instant, and

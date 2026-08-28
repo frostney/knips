@@ -263,6 +263,7 @@ var
   Error: string;
   Audio: string;
   Cursor: string;
+  Heartbeat: string;
   Silence: string;
 begin
   if not BuildRecordingOptions(AOptions, Recording, Error) then
@@ -310,11 +311,25 @@ begin
         ', big cursor on %d frames (%d off frame, %d refused)',
         [Session.Report.CursorFrames, Session.Report.CursorOffFrame,
         Session.Report.CursorRefused]);
-    WriteLn(Format('wrote %s: %dx%d, %.1fs, %d frames (%d dropped, %d failed)%s%s',
+    // The idle heartbeat's share of the frame count, when there was one:
+    // a still screen produces no frames at all, so the difference between
+    // "this take was 20 seconds long" and "this take was 20 seconds of
+    // nothing changing" is worth saying out loud rather than hiding
+    // inside one total.
+    Heartbeat := '';
+    if (Session.Report.HeartbeatFrames > 0)
+      or (Session.Report.HeartbeatRefused > 0)
+      or (Session.Report.RetimedFrames > 0) then
+      Heartbeat := Format(
+        ', %d idle heartbeats (%d refused, %d frames retimed)',
+        [Session.Report.HeartbeatFrames, Session.Report.HeartbeatRefused,
+        Session.Report.RetimedFrames]);
+    WriteLn(Format(
+      'wrote %s: %dx%d, %.1fs, %d frames (%d dropped, %d failed)%s%s%s',
       [Session.Report.OutputPath, Session.Report.PixelWidth,
       Session.Report.PixelHeight, Session.Report.DurationSeconds,
       Session.Report.AppendedFrames, Session.Report.DroppedFrames,
-      Session.Report.FailedAppends, Cursor, Audio]));
+      Session.Report.FailedAppends, Heartbeat, Cursor, Audio]));
     // Silence, said out loud. Never a failure — the file is written and
     // the video is fine — so this goes to standard error like the other
     // advice, and after the summary line it is about.
@@ -335,11 +350,12 @@ begin
     // The event sidecar, and the two spans that say whether its clock is
     // the movie's. Both are measured from the same host clock: the first
     // is anchor-to-stop, the second is the movie's own first-to-last
-    // frame. They differ by the gap between the last captured frame and
-    // the stop — which for a still screen is however long nothing moved,
-    // because ScreenCaptureKit delivers a frame only when something
-    // changes. A difference that GROWS with the length of a busy take
-    // would be the thing to worry about, and it does not.
+    // frame. Before the idle heartbeat they differed by however long
+    // nothing moved, because ScreenCaptureKit delivers a frame only when
+    // something changes; now the closing heartbeat puts the last frame at
+    // the stop itself, so the two agree to a few milliseconds whatever
+    // the screen was doing. A difference of more than a frame is the
+    // thing to worry about.
     // The two spans are only a pair when there IS an anchor: without one
     // no frame was ever appended, and StopHostSeconds minus zero is the
     // machine's uptime.
