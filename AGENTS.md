@@ -76,6 +76,7 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | `source/Knips.App.Live.pas` | Follow Mouse: a main-thread animator on the app's 30 Hz timer that moves the stream's `sourceRect`, the recording border and a docked camera. Zoom on Click was the other half and is now a render-time effect |
 | `source/Knips.App.Hotkey.pas` | The global ⌘⇧2 stop hotkey: Carbon `RegisterEventHotKey` + an application-target event handler, no TCC grant |
 | `source/Knips.Recording.LiveMath.pas` | Platform-neutral live-effect arithmetic: rect clamping, dead zone, smoothstep easing, which effects a target can have (tested) |
+| `source/Knips.Recording.Heartbeat.pas` | Platform-neutral idle-heartbeat arithmetic: whether the movie has fallen behind the host clock and what stamp the repeated frame carries (tested) |
 | `source/Knips.Recording.Sidecar.pas` | The event sidecar: the public JSON Lines format for a take's pointer track, clicks, geometry and what was baked into its pixels, and the rule that a silence too long to believe is held rather than interpolated across (tested; [docs/event-sidecar.md](docs/event-sidecar.md)) |
 | `source/Knips.Recording.Recovery.pas` | Finishes off a take whose process died: an unfinished sidecar plus a dead pid, then a passthrough re-mux |
 | `source/Knips.Export.CursorEffect.pas` | The pointer drawn back into a rendered MP4, a GIF or an APNG from the sidecar's smoothed track |
@@ -91,7 +92,7 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | `source/Knips.ObjC.Runtime.pas` | Runtime-built ObjC classes (the ADR-0002 primitive) |
 | `source/Knips.Capture.ShareableContent.pas` | Display/window enumeration via SCShareableContent |
 | `source/Knips.Capture.Stream.pas` | SCStream wrapper; runtime-built SCStreamOutput; frame-status filter; live `sourceRect` updates |
-| `source/Knips.Export.MovieWriter.pas` | AVAssetWriter bindings + the movie sink |
+| `source/Knips.Export.MovieWriter.pas` | AVAssetWriter bindings + the movie sink; holds the last delivered frame so the idle heartbeat can repeat it under the same mutex the capture queues append through |
 | `source/Knips.Export.MovieReader.pas` | AVAssetReader bindings; BGRA frames + presentation stamps, with a trim range |
 | `source/Knips.Export.Bitmap.pas` | Platform-neutral BGRA buffer + box/bilinear resampling (tested) |
 | `source/Knips.Export.Gif.pas` | Platform-neutral GIF89a: exact-colour histogram (64-bit counters, no sampling budget), median cut, dithering, LZW, and the self-thinning palette sample schedule the pipeline drives (tested) |
@@ -132,6 +133,10 @@ and a GIF fill the same gaps the same way.
 only on `Knips.App.State` and MacOSAll. `Knips.Recording.CursorOverlay`
 sits beside `Knips.Recording` and consumes `Knips.Recording.CursorMath`
 the way `Knips.App.Live` consumes `Knips.Recording.LiveMath`.
+`Knips.Recording.Heartbeat` sits beside them and depends on nothing at
+all; `Knips.Recording` reads the clock and asks it whether the movie has
+fallen behind, and `Knips.Export.MovieWriter` carries the answer out
+under the mutex its capture-queue appends already take.
 `Knips.Options` is used by every layer and depends on nothing;
 `Knips.App.State`, `Knips.Recording.LiveMath` and
 `Knips.Recording.CursorMath` depend only on it;

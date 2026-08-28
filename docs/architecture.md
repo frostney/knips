@@ -66,7 +66,12 @@
   [The composited window recording](#the-composited-window-recording).
 - Timing is taken from each sample buffer's presentation stamp; the
   writer's session starts at the first appended frame. This is what makes
-  SCK's change-driven frame delivery record at real speed.
+  SCK's change-driven frame delivery record at real speed — and, because
+  a screen that stops changing delivers *nothing*, why an **idle
+  heartbeat** repeats the last frame twice a second so the movie keeps
+  pace with the wall clock. Without it a 30-second recording of a still
+  screen was one frame spanning 0.000 s. See
+  [The idle heartbeat](#the-idle-heartbeat).
 - Two threads: the main thread (run loop, signals, progress) and SCK's
   capture queue (sample delivery → append). No `cthreads`; shared counters
   sit under a pthread mutex; the capture path never raises or prints.
@@ -118,7 +123,7 @@
 | Recording | `Knips.Recording` | Target → filter + geometry → writer → stream; progress; report |
 | CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `render`, `export`, `displays`, `windows`, `mcp`, `probe`; SIGINT/SIGTERM → `StopRequested` |
 | App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Camera.Blur`, `Knips.App.Live`, `Knips.App.Hotkey`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window and its background-blur pipeline, the live-effect animator, the global stop hotkey, and the neutral state machine (tested) |
-| Recording | `Knips.Recording`, `Knips.Recording.LiveMath`, `Knips.Recording.CursorMath`, `Knips.Recording.CursorOverlay`, `Knips.Recording.Sidecar`, `Knips.Recording.Recovery` | Target → filter + geometry → writer → stream; progress; report. The live-effect and big-cursor arithmetic are neutral and tested; the overlay is the Darwin half that makes the sprite and blits it. The event sidecar is the neutral, tested file format (docs/event-sidecar.md) and recovery is the Darwin pass that finishes off a take whose process died |
+| Recording | `Knips.Recording`, `Knips.Recording.LiveMath`, `Knips.Recording.CursorMath`, `Knips.Recording.CursorOverlay`, `Knips.Recording.Heartbeat`, `Knips.Recording.Sidecar`, `Knips.Recording.Recovery` | Target → filter + geometry → writer → stream; progress; report. The live-effect, big-cursor and idle-heartbeat arithmetic are neutral and tested; the overlay is the Darwin half that makes the sprite and blits it. The event sidecar is the neutral, tested file format (docs/event-sidecar.md) and recovery is the Darwin pass that finishes off a take whose process died |
 | Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
 | Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.MovieTrim`, `Knips.Export.Pipeline`, `Knips.Export.Render`, `Knips.Export.CursorEffect` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; AVAssetExportSession passthrough trim; the shared GIF/APNG pipeline; the raw-take → deliverable render (video re-encoded, audio copied); the pointer drawn back in at render/export time from the sidecar |
 | Export (neutral) | `Knips.Export.Gif`, `Knips.Export.Apng`, `Knips.Export.Bitmap`, `Knips.Export.Timing`, `Knips.Export.SizeEstimate`, `Knips.Export.ZoomTrack` | Median cut, dithering, LZW, GIF89a writer; APNG chunks, PNG filters, paszlib; BGRA buffer + resampling; frame-delay planning; the pre-export size estimate and the in-flight projection; the post-recording Zoom on Click replayed from the click track (all tested) |
@@ -285,21 +290,41 @@ because each is a decision:
   preserved the sparsity as long delays — and the same take at 20 fps
   went 108 → 146 frames, 2.44 MB → 3.25 MB.
 
-  **Every number in this section was measured on the recorder as it
-  stands, before the capture-side idle heartbeat.** That heartbeat
-  re-presents the last frame while ScreenCaptureKit is idle, which makes
-  takes dense at the source and will make most of these figures
-  historical: the render will still interleave, but it will rarely find a
-  gap worth filling.
+  **Every number in this section was measured before the capture-side
+  idle heartbeat, which has since landed.** That heartbeat re-presents the
+  last frame while ScreenCaptureKit is idle, which makes takes dense at
+  the source, and it moves both of the limits this section used to carry.
+  The figures above are kept as the historical record of what the render
+  alone was worth; what the two do *together* is measured below.
 
-  **And this fills only gaps BETWEEN captured frames.** A take whose
-  screen went static loses its tail at capture time — there is no later
-  frame to interleave towards. Measured on a real take: 17.54 s of
-  recording, 88 frames, a movie **4.26 s** long, three of its four clicks
-  past the end of the file; and a controlled repro of a wholly static
-  5.67 s recording produced **one frame and a movie spanning 0.000 s**.
-  Nothing in the render can invent those pixels. That is what the
-  heartbeat is for, and the render is not presented as the whole fix.
+  **This fills only gaps BETWEEN captured frames**, and that used to be a
+  hard limit rather than a shape. A take whose screen went static lost its
+  tail at capture time — there was no later frame to interleave towards.
+  Measured on a real take: 17.54 s of recording, 88 frames, a movie
+  **4.26 s** long, three of its four clicks past the end of the file; and
+  a controlled repro of a wholly static 5.67 s recording produced **one
+  frame and a movie spanning 0.000 s**. Nothing in the render could invent
+  those pixels. The heartbeat now supplies them, so the fill always has a
+  frame on both sides of any gap it is asked about.
+
+  **Composed, measured on the merged build.** A still 11.66 s raw take at
+  600×400: 145 frames, 13 of them heartbeats, no gap over **0.535 s**, and
+  a movie spanning exactly the elapsed host time. Rendered with
+  `--effects=zoom,smooth-cursor` from a click placed inside the still
+  stretch: 168 frames out, **zoom on 24 of them**, **23 frames filled in
+  at 30 fps where the capture had none**. In the one second around the
+  click the raw take holds 2 frames and the deliverable holds 13.
+
+  Each half does exactly its own job, and the division is visible in the
+  numbers. The heartbeat is what puts the click *inside* the movie at all
+  and guarantees a real frame within half a second of it — before it, the
+  same click on the same shape of take rendered **zoom on 0 frames**,
+  because it fell inside a 6.39 s hole. The synthesis is what turns those
+  half-second neighbours into an animation. And the dedupe is what keeps
+  the bill down: outside the effect window the take's other twelve
+  heartbeat-spaced gaps were **not** filled — the picture either side is
+  identical, so there is nothing to interleave — and they survive into the
+  output as 0.53 s gaps.
 
   **A gap is bounded.** One gap may be filled to at most
   `MaxCadenceStepsPerGap` frames (1800, a minute at 30 Hz) — the same
@@ -948,10 +973,23 @@ rejects.
   lock and event primitives (recursive mutexes, cond-var events) while
   leaving thread creation on the error stubs: the RTL still never spawns
   or adopts a thread, and the capture queue stays foreign.
+- **The one main-thread append** is the idle heartbeat, and it is the
+  exception that proves how the rest works. `AVAssetWriterInput` is not
+  safe for two callers at once, so `TMovieWriter.EmitHeartbeatFrame` does
+  everything — read the retained last frame, copy it with a new stamp,
+  append — inside the **same** `FLock` the three capture queues already
+  take around their appends. One mutex serialises every append in the
+  program, from whichever thread; the heartbeat adds no second lock and
+  therefore no ordering. The capture-queue side pays two CoreFoundation
+  calls per frame (retain the new buffer, release the previous) inside a
+  critical section it was already holding. See
+  [The idle heartbeat](#the-idle-heartbeat).
 - Stop order is fixed: `TScreenStream.Stop` (waits for the framework's
   completion) *then* `TMovieWriter.Finish`, so no append can race the
   finish. The output object's owner ivar is cleared before the stream is
-  released so a late callback finds `nil` and returns.
+  released so a late callback finds `nil` and returns. The closing
+  heartbeat sits between the two, where the capture queue has already
+  stopped and the writer is still open.
 - **Completion handlers are foreign-thread code.** SCK calls
   `startCaptureWithCompletionHandler:` and
   `stopCaptureWithCompletionHandler:` back on one of its own queues, never
@@ -2551,12 +2589,191 @@ take, in place, behind the same `Busy` lockout the GIF export uses.
 `TMovieWriter` calls `startSessionAtSourceTime:` with the first buffer's
 PTS and records the last one; duration in the report is the difference.
 SCK delivers frames when content changes (plus the configured minimum
-interval), so idle stretches simply have fewer samples and the file plays
-at real speed — the opposite of a frame-counting encoder.
+interval), so a stretch with less movement in it costs fewer samples and
+still plays at real speed — the opposite of a frame-counting encoder.
 
 Frames arriving while the input reports `isReadyForMoreMediaData ==
 NO` are dropped and counted; that is the back-pressure path during
 keyframe spikes, mirrored by the stream's `queueDepth`.
+
+### The idle heartbeat
+
+The sentence above has a floor under it, and without one it stops being
+true. "Fewer samples" becomes **none at all** when the screen stops
+changing, and a movie built out of the frames' own stamps then stops with
+it. Measured on this project:
+
+| take | wall time | frames | movie spans |
+| --- | --- | --- | --- |
+| a real take, before | 17.54 s | 88 | 4.26 s (3 of its 4 clicks past the end) |
+| a still screen, before | 30.0 s | 1 | **0.000 s** |
+| the same still screen, after | 30.0 s | 58 | 29.572 s |
+
+The last two rows are one measurement: two builds recording the same
+still screen through two streams at the same moment.
+
+Suppressing the pointer is what turned this from a curiosity into the
+common case. A raw take records with `--smooth-cursor` so the render can
+draw the pointer back in, and with the pointer out of the frames, moving
+the mouse is no longer a content change — so a user reading something on
+screen produces nothing at all.
+
+**What it does.** While a recording runs, the main thread asks once a tick
+whether the movie's last frame is more than `DefaultHeartbeatSeconds`
+behind ScreenCaptureKit's host clock. When it is, the writer appends the
+last delivered frame again with a fresh stamp:
+`CMSampleBufferCreateCopyWithNewTiming`, which shares the original's
+pixels and changes nothing but the timing. The take goes on keeping pace
+with the wall clock at two frames a second of stillness.
+
+`FinishCapture` emits one more after the stream has stopped, stamped at
+the stop instant itself and gated at one frame interval rather than the
+heartbeat interval. That is what makes the movie's own duration equal to
+the elapsed host time rather than merely close to it: measured, a 13.972 s
+take reported a 13.972 s movie, where the same shape of take before the
+change came out 0.5 s short. "Equal" is exact to within that one-frame
+gate — up to 33 ms at 30 fps, and up to a full second at `--fps=1`,
+always short and never long, so no event can land past the end of the
+file.
+
+**Where the decision lives.** `Knips.Recording.Heartbeat` is neutral and
+tested — is one due, what stamp should it carry, and what floor goes under
+that stamp — and knows nothing about a frame.
+`TRecordingSession.EmitIdleHeartbeat` reads the clock and asks;
+`TMovieWriter.EmitHeartbeatFrame` carries it out. The interval is one
+constant in the neutral unit.
+
+The floor is the part that is easy to get wrong, and was. A heartbeat's
+stamp is normally the clock's own reading, with a floor under it of one
+frame at the configured rate so two stamps are never closer together than
+the rest of the file is. But at `--fps=1` a frame is a whole second and
+the interval is half of one, so that floor overshot: each beat landed at
+the last stamp plus a second for half a second of wall time, and the movie
+ran **ahead** of the clock — measured, an 11.6 s take reported 0.384 s
+long, which is the opposite of what the heartbeat is for.
+`HeartbeatMinimumStep` caps the floor at the interval, which makes the
+stamp exactly the caller's moment whenever a beat is due. Monotonicity
+never depended on the floor: the writer's one-tick clamp is the real
+guard.
+
+**What it reports, and where.** Three counters travel with every
+recording: how many of the appended frames were heartbeats, how many
+heartbeats were due and refused, and how many frames had to be retimed.
+The second is the one that would say the mechanism had stopped working,
+so it is visible on all three front ends rather than only in the report
+record — `knips record` prints all three in its summary line, `record_stop`
+and `record_status` carry `heartbeats` and `heartbeats_refused` in their
+payloads (and in their output schemas), and the menu-bar app writes one
+line per take into `~/Library/Logs/Knips.log`. The app's line is written
+whatever the numbers are: a log that only speaks up when something is
+wrong is a log nobody can check.
+
+**The tick it rides.** `TRecordingSession.SampleMetadata`, which every
+front end already calls at the rate the sidecar samples at: the CLI's run
+loop, the menu-bar app's 30 Hz timer, and `record_status` on the MCP
+server. No new timer — the reason is the one the sidecar gives, that this
+program has one main thread and two very different run loops on it, and a
+third timer would be a third thing to invalidate on every failure path.
+The MCP surface inherits the sidecar's sparseness with it: an unpolled
+recording gets no periodic heartbeats, only the closing one, so its movie
+still spans the take (measured: 12.0 s of wall time, two frames, a 12.002 s
+span) while the frames inside it are as sparse as the polling was.
+
+**Two threads, two hazards.** The heartbeat appends from the main thread
+while the capture queue may be delivering, and that raises two separate
+problems. Only the first is about the lock, and the second is the one that
+can lose a take.
+
+**Concurrency, which the lock does solve.** `AVAssetWriterInput` is not
+safe for two callers at once. The whole of `EmitHeartbeatFrame` — reading
+the retained frame, copying it, and the append — runs inside the **same**
+`FLock` the capture path already takes around its own appends. Every
+append on every input, from every thread, is serialised by that one
+mutex; a heartbeat is one more of them. There is no second lock, so there
+is no ordering to get wrong. The staleness check is a separate, earlier
+read of the writer's statistics, so a real frame can land between the
+two: that costs one extra repeated frame at a stamp no earlier than the
+real one, and it is left that way on purpose rather than folded into one
+locked operation, because the decision belongs to the neutral half.
+
+**Ordering, which the lock does NOT solve.** Serialising two appends says
+nothing about their *stamps*, and this is where a heartbeat differs from
+every other frame in the file. ScreenCaptureKit stamps a buffer at the
+moment it captured the content and delivers it some milliseconds later —
+measured on this machine, up to **27 ms** on a busy 1280×800 take. A
+heartbeat stamps at the moment the main thread reads the clock. So a frame
+captured just *before* a heartbeat fires and delivered just *after* it
+arrives with a presentation stamp earlier than the one already written,
+and **one out-of-order stamp fails AVAssetWriter terminally**: the writer
+leaves Writing state, every later append on every input is rejected, and
+`finishWriting` returns status 3. The take is gone — not shortened, gone:
+a 658 kB file that `ffprobe` reports as "moov atom not found".
+
+This hazard did not exist before the heartbeat, because until then every
+stamp in the file came from ScreenCaptureKit in delivery order. It is
+real rather than theoretical: forcing the interval to 20 ms so the
+collision window is always open, a busy-region recording failed this way
+on **3 of 3** runs. At the shipped half-second the window is only open on
+the transitions out of idle, and takes from the first round of proofs show
+real frames landing 21.7 ms and 48.3 ms after a heartbeat stamp — safe by
+margin, not by design.
+
+`AppendVideoSample` closes it. Under the same lock, an incoming frame
+whose stamp is not strictly greater than the last one written is
+**retimed forward** to one tick past it, through the same
+`CMSampleBufferCreateCopyWithNewTiming` the heartbeat uses, and counted as
+`RetimedFrames`. The pixels are the user's content and are kept; what
+moves is a stamp that was at most a few tens of milliseconds from where it
+now sits. Dropping the frame instead would have been the cheaper fix and
+the wrong one — a frame lost costs a frame, an out-of-order stamp costs
+the recording — and appending it unchanged is the thing that must never
+happen. If the copy cannot be made, the frame is dropped rather than
+appended out of order. The same forced-20 ms recording, with the retime
+in place, completed cleanly on 3 of 3 runs: 432 frames, 114 heartbeats,
+**6 frames retimed**, 0 failed, a strictly increasing packet list and a
+movie that plays.
+
+Stamps — the heartbeat's own and a retimed frame's alike — are built in
+the last frame's own timescale and epoch and clamped to at least one tick
+past it. In the written file that lands them 1/600 s apart, the movie
+track's own resolution. This is a clamp and not an assumption, for the
+reason above.
+
+**Holding a frame.** The writer retains the most recent successfully
+appended sample buffer, releasing the previous one as it does, so exactly
+one frame of ScreenCaptureKit's pool is held at a time — and the one held
+is the frame AVAssetWriter was just given anyway. The stream's
+`queueDepth` is 5, so this leaves four. Measured rather than assumed: a
+whole-display retina capture (3600×2338, 33.7 MB a frame) ran 303 frames
+with **0 dropped and 0 failed**, and a 1280×800 busy take matched its
+baseline at 0 dropped and 0 failed. Copying the pixels into an allocation
+of our own was the alternative, and it is not needed: a 33.7 MB memcpy on
+the capture queue every frame would cost several milliseconds of a 33 ms
+budget to solve a problem that does not exist. If ScreenCaptureKit ever
+does invalidate a buffer a client still holds, `CMSampleBufferIsValid` is
+checked before every repeat and the refusal is counted rather than
+guessed at.
+
+**Cost.** Two builds recording the same still screen simultaneously for
+30 s: 0.21 s of CPU without the heartbeat, 0.26 s with — 1.7 ms a second,
+for 57 encodes of a 1280×800 frame plus 900 staleness checks. When frames
+are flowing the heartbeat never fires at all (measured: 0 heartbeats over
+a 10 s animated take), and the per-tick cost is one mutex acquisition and
+one clock read.
+
+**Crash recovery gets it too**, because the heartbeat frames are in the
+movie fragments the recovery pass re-muxes. A take killed with `SIGKILL`
+after four seconds of motion and eight of stillness recovered as **2.0 s**
+before the change and **10.5 s** after — the loss is now the unfinished
+last fragment and nothing else. See [Never lose a take](#never-lose-a-take).
+
+**Audio.** System audio keeps flowing while the video is still, so before
+the change a still take produced a file whose audio track ran 11.3 s
+against a video track of 0.067 s — a player shows one frame and then holds
+it for eleven seconds. After, the two agree: 11.48 s of video against
+11.36 s of audio, the video longer by the closing heartbeat's reach to the
+stop. Audio sample counts and drop counts were unchanged (565 against
+568, 0 dropped either way).
 
 ## Audio
 
@@ -2727,6 +2944,14 @@ Measured on device: a recording killed with `SIGKILL` six seconds in used
 to leave a file of **zero bytes**; it now leaves 483 kB that `ffprobe`
 decodes as 117 frames of 4.0 s. The most a crash costs is the fragment in
 flight.
+
+That last sentence became true only with the idle heartbeat behind it. A
+fragment can only hold what was appended into it, so a still screen used
+to lose its whole idle stretch as well: measured, a take killed after four
+seconds of motion and eight of stillness recovered as **2.0 s**. With the
+heartbeat filling those eight seconds the same take recovered as **10.5 s**
+— the loss really is the unfinished fragment now. See
+[The idle heartbeat](#the-idle-heartbeat).
 
 The price is `shouldOptimizeForNetworkUse`, which is now **off**. With it
 on, AVAssetWriter puts a complete file at the output path only when

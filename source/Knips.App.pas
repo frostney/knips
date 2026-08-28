@@ -3832,6 +3832,22 @@ begin
   Finished := FSession.FinishCapture(Error);
   if not Finished then
     RecordError(Error);
+  // One line per take about the idle heartbeat. The menu-bar app is the
+  // front end most takes come through and it shows the user no counters
+  // at all, so the log is the only place a refusal — the one number that
+  // would say the heartbeat had stopped working — could ever be seen.
+  // Written whatever the numbers are, because "0 refused" on a still take
+  // is the reassuring reading and a log that only speaks up when things
+  // are wrong cannot be checked. See docs/architecture.md, "The idle
+  // heartbeat".
+  if Finished then
+    LogMessage(Format('idle heartbeat: %d of %d frames repeated, '
+      + '%d refused, %d frames retimed; the movie spans %.3f s of a '
+      + '%.3f s take', [FSession.Report.HeartbeatFrames,
+      FSession.Report.AppendedFrames, FSession.Report.HeartbeatRefused,
+      FSession.Report.RetimedFrames, FSession.Report.DurationSeconds,
+      FSession.Report.StopHostSeconds
+      - FSession.Report.AnchorHostSeconds]));
   // The backstop for the microphone. The grant is checked before the
   // capture opens, but a grant can be revoked mid-recording, a device can
   // be unplugged, and a future ScreenCaptureKit is free to refuse the
