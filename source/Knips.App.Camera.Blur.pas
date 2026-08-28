@@ -467,12 +467,40 @@ const
   BlendBackgroundKey = 'inputBackgroundImage';
   BlendMaskKey = 'inputMaskImage';
 
-  // The blur, in source pixels. The feed is 640x480 (the camera window
-  // asks for AVCaptureSessionPreset640x480), and 12 is about a fortieth
-  // of the frame width — enough that a bookshelf reads as texture rather
-  // than as titles, and not so much that the person's outline bleeds a
-  // halo the mask cannot hide.
-  DefaultBlurRadius = 12.0;
+  // The blur, in **source** pixels — and the source is not what anybody
+  // looks at, which is the whole reason this number is what it is. The
+  // feed is 640x480 (the camera window asks for
+  // AVCaptureSessionPreset640x480) and the window is 240x180 points, so
+  // on a 2x display the composited frame is shown at 480x360: every
+  // source pixel of blur arrives on screen as 0.75 of a backing pixel.
+  // A radius that looks right in a 640-wide still is three quarters of
+  // itself by the time it is a picture-in-picture.
+  //
+  // 28 is a twenty-third of the frame width, and about 10.5 points — a
+  // sixteenth of the window's height — once that scaling is done.
+  //
+  // **Measured** rather than chosen by eye, on a real 640x480 frame put
+  // through this exact chain (imageByClampingToExtent -> CIGaussianBlur
+  // -> imageByCroppingToRect), as the mean absolute luma difference
+  // between pixels 1, 4 and 16 apart — the last of which is the scale
+  // at which a room's objects read as objects:
+  //
+  //   radius   1 px     4 px    16 px   (share of the source's own)
+  //   12      4.74 %  11.15 %  31.74 %  the old value
+  //   24      3.10 %   7.28 %  21.14 %
+  //   28      2.81 %   6.60 %  19.21 %  shipped
+  //   40      2.33 %   5.46 %  16.02 %
+  //
+  // So this is 2.33x the kernel and takes out two fifths of the
+  // mid-scale structure 12 left behind. Past about 40 the curve is flat:
+  // more radius stops buying softness and starts buying halo, because
+  // the background is blurred from the *whole* frame — the person
+  // included — so a wider kernel smears more of the person's own colour
+  // out to where a Fast-quality mask's edge is. Getting past that is not
+  // a bigger number: it is a feathered mask, or a background inpainted
+  // before it is blurred, which is what the system Portrait effect does
+  // and what this would have to become to go further.
+  DefaultBlurRadius = 28.0;
   // Vision every frame until something measured says otherwise.
   DefaultSegmentationStride = 1;
 

@@ -168,18 +168,27 @@ passed to ScreenCaptureKit's `excludingWindows:` so the compositor never
 draws it into the stream at all. Display and window recordings get no
 frame.
 
-**Zoom on Click and Follow Mouse.** Both change what the *file* shows
-while it records, and neither changes anything on screen or the size of
-the finished movie — they move the rectangle ScreenCaptureKit reads
-from the display, not the video's dimensions. Turn either on before you
-start; they are greyed out while a recording runs, because what the
-stream captures is fixed when the capture starts.
+**Zoom on Click and Follow Mouse.** Both change what the *file* shows and
+neither changes anything on screen or the size of the finished movie —
+they move the rectangle the deliverable is taken from, not the video's
+dimensions. They are no longer the same kind of setting, though, and the
+difference is worth knowing:
 
-Zoom works for a region and for a whole display. Follow only works for a
-region: a full-display capture already contains everywhere the pointer
-can go. Window recordings get neither. With both on they compose — the
-frame follows the pointer, and a click zooms inside wherever the frame
-has got to.
+**Follow Mouse** has to be chosen *before* you start, because a pan
+decides which pixels are read off the screen at all and nothing
+afterwards can recover what was never captured. It is greyed out while a
+recording runs. It only works for a region: a full-display capture
+already contains everywhere the pointer can go, and a window recording
+follows the window rather than the pointer.
+
+**Zoom on Click** is decided *after* the take exists, in the playback
+window's **Effects** control, because a crop is taken from pixels that
+are already in the file. It works for a region, for a whole display and
+for a window recording, and it **composes with a pan**: on a Follow Mouse
+take the click zooms inside wherever the frame had got to at that
+instant, exactly as the live pair used to. A click the pan has drifted
+away from is answered as closely as the captured rectangle allows rather
+than refused.
 
 **Big Cursor.** A third checkbox in the same group, and the only one that
 changes the picture rather than the framing: the system pointer is left
@@ -189,10 +198,8 @@ I-beam over text or a hand over a link the way the real one does. It is
 part of the video, so it survives a GIF or APNG export — which the
 system pointer also does, only at its ordinary size. It tracks
 a zoom or a pan (it is placed against whatever rectangle is being
-captured at that instant) but does not grow with one; a window recording
-ignores it, because a window's frames have no fixed relationship to the
-screen the pointer is measured against. Off by default and greyed out
-while a recording runs.
+captured at that instant) but does not grow with one. Off by default and
+greyed out while a recording runs.
 
 Clicks on the menu bar never zoom — including the one on the Knips icon
 that stops the recording, which would otherwise end every full-screen
@@ -228,7 +235,7 @@ a menu-bar-only process the rest of the time.
 
 | Control | What it does |
 | --- | --- |
-| Effects ▾ | **Zoom on Click**, **Smooth Cursor**, **Big Cursor**. What is ticked here is what the movie was rendered with, and what *Re-export* and *Export as GIF…* will use. The two cursor items are one setting — ticking one unticks the other, and clicking the ticked one turns the pointer off. An item the take cannot take is greyed out with the reason as its tooltip: a window recording's frames have no fixed relationship to the screen its pointer was measured against, a take where nothing was clicked has nothing to zoom to, and a recording made before this existed has no raw take beside it. Your choice becomes the default for the next recording. |
+| Effects ▾ | **Zoom on Click**, **Smooth Cursor**, **Big Cursor**. What is ticked here is what the movie was rendered with, and what *Re-export* and *Export as GIF…* will use. The two cursor items are one setting — ticking one unticks the other, and clicking the ticked one turns the pointer off. An item the take cannot take is greyed out with the reason as its tooltip: a take where nothing was clicked has nothing to zoom to, a take whose capture was already zooming cannot be zoomed again, a window recording made with every effect switched off was captured the desktop-independent way and has no raw take, and a recording made before this existed has none either. Your choice becomes the default for the next recording. |
 | Re-export | Renders the movie again from the raw take with what Effects now says, replacing it in place. The title counts it out; the player reloads when it is done. |
 | Export as GIF… | Writes `<recording>.gif` beside the movie at 20 fps and reveals it in Finder, from the **raw** take and with the same Effects selection — so the GIF moves the way the movie beside it moves. Retina recordings export at their **point** size (pixel width ÷ capture scale — an exact 2:1 reduction, which is what keeps small text readable); scale-1 recordings cap at 800 px. A large result is noted on the `Last error:` line. Use `knips export --width=N` for anything else. |
 | Reveal in Finder | Shows the `.mp4`. |
@@ -320,13 +327,26 @@ For a **region**, that puts the camera in the file: Kap's
 picture-in-picture, without any compositing.
 
 For a **window**, the plain window capture would not — ScreenCaptureKit
-composits that one window and nothing drawn on top of it, measured. So
-when the camera is up, a window recording is captured from the *display*
-instead, through a rectangle sitting exactly on the window and following
-it as you drag it. The camera really is in the file, and the price is
-that anything else in front of the window — a notification, a menu pulled
-down over it, another app dragged across — is in the file too. Switch the
-camera off and the recording goes back to capturing the window alone.
+composits that one window and nothing drawn on top of it, measured. So a
+window recording is captured from the *display* instead, through a
+rectangle sitting exactly on the window and following it as you drag it.
+The camera really is in the file.
+
+That same switch is what makes **the effects work on a window
+recording**. A plain window capture is a picture of something that moves
+under the recorder with no way to find out, so no pointer can be drawn
+back into it and no zoom can be computed for it — which is why a window
+take used to come out with the system pointer baked in and every effect
+greyed out. Captured from the display, it is a raw take like any other:
+Smooth Cursor, Big Cursor and Zoom on Click all apply, and can be changed
+afterwards in the playback window.
+
+The price is that anything else in front of the window — a notification, a
+menu pulled down over it, another app dragged across — is in the file too.
+Knips pays it only where it buys something: with the camera off *and* the
+pointer switched off in the Effects control *and* Zoom on Click off, a
+window recording goes back to capturing the window alone, because there
+would be nothing to render into it anyway.
 
 And it **stays inside** the rectangle while the rectangle moves. With
 *Follow Mouse* on, a region pans across the display and the camera pans

@@ -120,14 +120,32 @@ Nothing about the sidecar runs on ScreenCaptureKit's capture queue.
   work); a busy run loop achieves less.
 - **Readers must use each sample's own `t` and never assume a spacing.**
   Interpolating between the two samples that bracket a time is the
-  supported way to ask where the pointer was.
+  supported way to ask where the pointer was — **up to a point.** A gap
+  is not evidence of a straight line: two samples minutes apart say only
+  that the pointer was here, and later was there. Knips' own reader
+  therefore refuses to interpolate across a silence longer than fifteen
+  of the header's own sample intervals, floored at half a second and
+  **capped at two** (`TSidecarLog.MaxInterpolatedGap`) — the cap because
+  `sampleHz` is a number in a file somebody else may have written, and a
+  header declaring 0.05 Hz must not be able to buy itself a five-minute
+  licence to draw a straight line. It **holds the earlier sample's
+  position** until the track speaks again, then snaps. Holding claims
+  only what the track actually says; the snap is the honest shape of
+  "nobody was watching in between". A lerp instead draws a pointer
+  gliding smoothly across the screen for a minute — a thing that never
+  happened — and, because a render synthesises a frame wherever the
+  picture would change, fills that whole minute with frames to draw it
+  on. Another reader may choose differently, but it should choose
+  deliberately.
 - An **MCP** recording is the sparse case: the stdio transport is a
   blocking read/handle/write loop, so between tool calls nothing runs on
   the main thread at all. Those takes get a sample at the start, one per
   `record_status` call, and one at the stop. The times are still exact;
   there are simply fewer of them. Recovery treats such a take like any
   other and the movie comes back whole — but what it recovers is the
-  movie, not a dense event track.
+  movie, not a dense event track. It is also the take the interpolation
+  rule above is written for: minutes can separate two of those samples,
+  and nothing may be drawn through the silence between them.
 
 ### Buttons
 
@@ -228,7 +246,10 @@ keeps its baked system cursor *and* logs where the pointer went.
 
 The three `baked…` fields are the same kind of fact about the framing. The live effects move ScreenCaptureKit's own `sourceRect`, so
 a take that zoomed is zoomed **in its pixels** and an export must not zoom
-it again. They record what the capture actually did, not what was ticked in
+it again. A take that merely *panned* is a different case and is not
+refused: the pan is in its pixels for good, but every sample says which
+rectangle was being read at that instant, so a post-recording zoom is
+composed inside that rectangle rather than against the base one. They record what the capture actually did, not what was ticked in
 a menu: a window recording with Zoom on Click switched on is not a zoomed
 recording, and says `false`.
 
@@ -356,26 +377,56 @@ which is what makes a rendered file safe to hand back to knips.
 Everything else is carried across unchanged, and one thing deliberately is
 not:
 
-- **the anchor is still exact.** The render copies each frame's
+- **the anchor is still exact.** The render copies each *source* frame's
   presentation stamp verbatim (`CMTime`, not seconds — a stamp taken
   through a `Double` and back at a 1/600 s timescale lands up to 1.7 ms
   out, which was measured and is why it is not done that way). The
   deliverable's timeline *is* the raw take's timeline, so `event.t −
-  anchor.host` means the same on both files;
+  anchor.host` means the same on both files.
+
+  The deliverable can hold **more frames than the take did**, and that
+  changes nothing about the above. ScreenCaptureKit delivers a frame only
+  when the content changes, so a pointer gliding over a still window — or
+  a zoom easing over one — has almost no frames to be drawn into; the
+  render therefore *interleaves* extra ones between the take's own, made
+  by re-presenting the previous source frame with the effect evaluated at
+  the new instant, and only where that would be a different picture. Its
+  own stamps sit strictly between two source stamps and no source stamp
+  is moved, dropped or re-timed, so the file's first and last stamps are
+  still the take's and every time in this sidecar still means what it
+  meant. The deliverable's `trailer` counts the frames the file actually
+  holds, which is what `frames` has always meant;
 - **the samples' source rectangles are rewritten** where a zoom was
   applied. A sample's `sx`/`sy`/`sw`/`sh` say what the capture was
   reading; what the deliverable's frames show at that instant is the
   crop, so the crop is what the deliverable's copy records. Anything
   mapping a pointer into the deliverable's pixels then gets the right
-  answer from the ordinary arithmetic under *Coordinates*.
+  answer from the ordinary arithmetic under *Coordinates*. On a take
+  whose framing panned, the crop is composed **inside** the rectangle the
+  sample already carried — the pan is in the pixels for good and the zoom
+  sits within it — so the rewritten value is a subset of the one it
+  replaces. Frames past the end of the track are not cropped at all: a
+  movie can outlast its own sidecar (samples flush about a second behind,
+  and recovery re-muxes without trimming), and a crop is only as good as
+  the rectangle it is measured from, so those frames are passed through
+  whole and the render says how many.
 
 **A take that cannot be rendered is never split in the first place.** The
-app asks before it names the file: a window recording's frames have no
-fixed relationship to the screen its pointer was measured against, so
-neither effect can ever apply to it, and it is written straight to the
-deliverable's own name with one sidecar — exactly as every `knips record`
-take is. Splitting it would have left two byte-identical movies and two
-sidecars on disk for ever.
+app asks before it names the file, and the answer is written straight to
+the deliverable's own name with one sidecar — exactly as every `knips
+record` take is. Splitting it would have left two byte-identical movies
+and two sidecars on disk for ever.
+
+The take that answers "cannot" is a **desktop-independent** window
+recording: its frames have no fixed relationship to the screen its
+pointer was measured against, so neither effect can ever apply. The app
+only records one of those when nothing would be rendered into it anyway —
+no camera, no pointer, no zoom. A window recording that wants any of
+those is captured from the display through a rectangle riding the window
+instead, which makes it `"target":"display"` with
+`"bakedWindowFollow":true` and a per-sample source rectangle for every
+move of the window; that take is raw, is split, and takes both effects
+like any region take.
 
 `knips render` answers the same question the same way: a take with
 nothing that can be applied after the fact is **refused**, with the

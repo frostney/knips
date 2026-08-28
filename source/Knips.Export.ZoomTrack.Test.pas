@@ -28,6 +28,7 @@ uses
 
   Knips.Export.ZoomTrack,
   Knips.Options,
+  Knips.Recording.CursorMath,
   Knips.Recording.LiveMath,
   Knips.Recording.Sidecar,
   TestingPascalLibrary;
@@ -67,6 +68,28 @@ type
     procedure TestClicksOutsideTheRegionAreIgnored;
     procedure TestAWindowRecordingHasNoUsableClicks;
     procedure TestNoAnchorMeansNoClicks;
+  end;
+
+  // Zoom composed inside a framing the capture panned. This is what
+  // makes a Follow Mouse take and a composited window recording
+  // zoomable: the crop is taken inside the rectangle the capture was
+  // reading at that instant, exactly as the live effect composes zoom
+  // inside follow (Knips.Recording.LiveMath), rather than against the
+  // recording's fixed base rectangle — which is the rectangle those
+  // takes are NOT showing, and computing against it was the bug the
+  // whole effect used to be refused over.
+  TCompositionTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestUnzoomedIsThePannedWindowExactly;
+    procedure TestTheCropCentresOnTheClickInsideThePan;
+    procedure TestTheCropStaysInsideThePannedWindow;
+    procedure TestAFocusOutsideThePanIsClamped;
+    procedure TestTheFrameCropIsIdentityWhenUnzoomed;
+    procedure TestThePointerMapsThroughBothTransforms;
+    procedure TestFramingComesFromTheSampleTrack;
+    procedure TestFramingPastTheTrackIsRefusedNotGuessed;
+    procedure TestAClickOutsideTheBaseButInsideThePanCounts;
   end;
 
   TFrameCropTests = class(TTestSuite)
@@ -166,6 +189,39 @@ begin
   Result := Format('{"k":"button","t":%.6f,"x":%.3f,"y":%.3f,"n":0,"d":%s}',
     [AHost, AX, AY, BoolToStr(ADown, 'true', 'false')], DefaultFormatSettings)
     + LineEnding;
+end;
+
+// A take whose framing PANNED: the header's base rectangle, an anchor,
+// and a sample track that slides the source rectangle 300 points right
+// and 200 down a second in.
+//
+// The click is at (790, 400), and the two coordinates are chosen rather
+// than convenient. The base rectangle spans x 120..760, the panned one
+// spans x 420..1060 — so 790 is **outside the base and inside the pan**,
+// which is the only kind of click that can tell the new filter from the
+// old one. A click inside both (which this fixture used to carry) passes
+// either way and pins nothing at all.
+function PannedLogText: string;
+begin
+  Result := '{"k":"header","format":"knips-events","version":1,'
+    + '"knips":"0.1.0","movie":"demo.mp4","created":"2026-08-27T00:00:00Z",'
+    + '"pid":1,"target":"display","pixelWidth":1280,'
+    + '"pixelHeight":800,"scale":2,"fps":30,"sampleHz":30.000,'
+    + '"displayId":1,"displayWidth":1512.000,"displayHeight":982.000,'
+    + '"baseX":120.000,"baseY":80.000,"baseWidth":640.000,'
+    + '"baseHeight":400.000,"menuBarInset":0.000,'
+    + '"cursor":"smooth","bakedZoomOnClick":false,'
+    + '"bakedFollowMouse":true,"bakedWindowFollow":false,"audio":"none"}'
+    + LineEnding
+    + '{"k":"anchor","host":1000.000000}' + LineEnding
+    + '{"k":"cursor","t":1000.000000,"x":200.000,"y":150.000,"b":0}'
+    + LineEnding
+    + '{"k":"cursor","t":1001.000000,"x":430.000,"y":290.000,"b":0,'
+    + '"sx":420.000,"sy":280.000,"sw":640.000,"sh":400.000}' + LineEnding
+    + '{"k":"cursor","t":1002.000000,"x":430.000,"y":290.000,"b":0}'
+    + LineEnding
+    + '{"k":"button","t":1001.500000,"x":790.000,"y":400.000,"n":0,'
+    + '"d":true}' + LineEnding;
 end;
 
 { TQuietTests }
@@ -511,6 +567,248 @@ begin
   ExpectTrue(not Crop.Identity, 'a half crop is not the identity');
 end;
 
+{ TCompositionTests }
+
+// A framing the capture panned to: the same 640x400 rectangle, slid
+// 300 points right and 200 down from where the recording was sized.
+// Nothing about it is inside the base rectangle, which is the point —
+// a crop computed against the base would land on pixels these frames
+// are not showing.
+const
+  PanX = BaseX + 300;
+  PanY = BaseY + 200;
+
+function PannedWindow: TLiveRect;
+begin
+  Result := LiveRect(PanX, PanY, BaseWidth, BaseHeight);
+end;
+
+function WalkerAt(const AClicks: TZoomClickArray;
+  ASeconds: Double): TZoomWalker;
+begin
+  Result := ZoomWalkerStart(TestBase, 0, 0);
+  Result := ZoomWalkerAdvance(Result, AClicks, ASeconds);
+end;
+
+procedure TCompositionTests.SetupTests;
+begin
+  Test('with no zoom in force the composed rectangle is the panned '
+    + 'window exactly', TestUnzoomedIsThePannedWindowExactly);
+  Test('a click crops inside the panned window, centred on the click',
+    TestTheCropCentresOnTheClickInsideThePan);
+  Test('the composed crop never leaves the panned window',
+    TestTheCropStaysInsideThePannedWindow);
+  Test('a focus that drifted outside the pan is clamped to its edge',
+    TestAFocusOutsideThePanIsClamped);
+  Test('an unzoomed frame of a panned take is copied, not resampled',
+    TestTheFrameCropIsIdentityWhenUnzoomed);
+  Test('the pointer maps through the pan and the zoom together',
+    TestThePointerMapsThroughBothTransforms);
+  Test('the framing comes from the sample track, not the header',
+    TestFramingComesFromTheSampleTrack);
+  Test('past the end of the track the framing is refused, not guessed',
+    TestFramingPastTheTrackIsRefusedNotGuessed);
+  Test('a click outside the base but inside the pan is a click',
+    TestAClickOutsideTheBaseButInsideThePanCounts);
+end;
+
+procedure TCompositionTests.TestUnzoomedIsThePannedWindowExactly;
+var
+  Rect: TLiveRect;
+begin
+  // This is the property that makes an unzoomed stretch of a panned take
+  // a plain copy of its frames: at zoom 1 the composition is the
+  // identity on whatever window it is given.
+  Rect := ZoomWalkerSourceRectIn(WalkerAt(nil, 3.0), PannedWindow);
+  ExpectNear(Rect.X, PanX, RectEpsilon, 'x');
+  ExpectNear(Rect.Y, PanY, RectEpsilon, 'y');
+  ExpectNear(Rect.Width, BaseWidth, RectEpsilon, 'width');
+  ExpectNear(Rect.Height, BaseHeight, RectEpsilon, 'height');
+end;
+
+procedure TCompositionTests.TestTheCropCentresOnTheClickInsideThePan;
+var
+  Clicks: TZoomClickArray;
+  Rect: TLiveRect;
+  ClickX, ClickY: Double;
+begin
+  // A click in the middle of the PANNED window, which is well outside
+  // the base rectangle.
+  ClickX := PanX + BaseWidth / 2;
+  ClickY := PanY + BaseHeight / 2;
+  Clicks := OneClick(1.0, ClickX, ClickY);
+  // Past the ease-in, so the zoom has reached the live factor.
+  Rect := ZoomWalkerSourceRectIn(WalkerAt(Clicks, 1.0 + LiveZoomInSeconds),
+    PannedWindow);
+  ExpectNear(Rect.Width, BaseWidth / LiveClickZoom, RectEpsilon, 'width');
+  ExpectNear(Rect.Height, BaseHeight / LiveClickZoom, RectEpsilon,
+    'height');
+  ExpectNear(Rect.X + Rect.Width / 2, ClickX, RectEpsilon, 'centre x');
+  ExpectNear(Rect.Y + Rect.Height / 2, ClickY, RectEpsilon, 'centre y');
+end;
+
+procedure TCompositionTests.TestTheCropStaysInsideThePannedWindow;
+var
+  Clicks: TZoomClickArray;
+  Step: Integer;
+  Rect: TLiveRect;
+begin
+  // Every instant of a whole zoom, against the panned window rather than
+  // the base one: the render indexes memory with this rectangle, so a
+  // crop that left the window would read pixels the frame does not hold.
+  Clicks := OneClick(0.5, PanX + 40, PanY + BaseHeight - 30);
+  for Step := 0 to 120 do
+  begin
+    Rect := ZoomWalkerSourceRectIn(WalkerAt(Clicks, Step / 60),
+      PannedWindow);
+    ExpectTrue(IsInside(Rect, PannedWindow),
+      Format('the crop at %.3fs is inside the panned window',
+      [Step / 60]));
+  end;
+end;
+
+procedure TCompositionTests.TestAFocusOutsideThePanIsClamped;
+var
+  Clicks: TZoomClickArray;
+  Rect: TLiveRect;
+begin
+  // The ill-defined case, clamped rather than refused: a click near the
+  // window's edge, and then a framing that has since panned away from
+  // it. The crop cannot centre on the click without reaching for pixels
+  // the movie does not have, so it sits against the edge nearest to it.
+  Clicks := OneClick(1.0, PanX - 500, PanY - 400);
+  Rect := ZoomWalkerSourceRectIn(WalkerAt(Clicks, 1.0 + LiveZoomInSeconds),
+    PannedWindow);
+  ExpectTrue(IsInside(Rect, PannedWindow), 'the clamped crop is inside');
+  ExpectNear(Rect.X, PanX, RectEpsilon, 'clamped to the left edge');
+  ExpectNear(Rect.Y, PanY, RectEpsilon, 'clamped to the top edge');
+end;
+
+procedure TCompositionTests.TestTheFrameCropIsIdentityWhenUnzoomed;
+var
+  Crop: TZoomCrop;
+begin
+  Crop := ZoomFrameCrop(1280, 800, PannedWindow,
+    ZoomWalkerSourceRectIn(WalkerAt(nil, 2.0), PannedWindow));
+  ExpectTrue(Crop.Identity, 'an unzoomed panned frame is the whole frame');
+end;
+
+procedure TCompositionTests.TestThePointerMapsThroughBothTransforms;
+var
+  Clicks: TZoomClickArray;
+  Rect: TLiveRect;
+  Mapping: TCursorFrameMapping;
+  FrameX, FrameY: Double;
+  ClickX, ClickY: Double;
+begin
+  // The pointer is placed against what the frame SHOWS, which after the
+  // composition is the zoomed crop of the panned window. A pointer at
+  // the zoom's focus therefore lands in the middle of the frame, whether
+  // or not the framing had panned away from the base rectangle.
+  ClickX := PanX + BaseWidth / 2;
+  ClickY := PanY + BaseHeight / 2;
+  Clicks := OneClick(1.0, ClickX, ClickY);
+  Rect := ZoomWalkerSourceRectIn(WalkerAt(Clicks, 1.0 + LiveZoomInSeconds),
+    PannedWindow);
+  Mapping := CursorFrameMapping(1280, 800, Rect.X, Rect.Y, Rect.Width,
+    Rect.Height);
+  ExpectTrue(CursorFramePoint(Mapping, ClickX, ClickY, FrameX, FrameY),
+    'the mapping is usable');
+  ExpectNear(FrameX, 640, 1E-6, 'the focus is centred across');
+  ExpectNear(FrameY, 400, 1E-6, 'the focus is centred down');
+end;
+
+procedure TCompositionTests.TestFramingComesFromTheSampleTrack;
+var
+  Log: TSidecarLog;
+  Rect: TLiveRect;
+  Error: string;
+  Stale: Boolean;
+begin
+  Log := TSidecarLog.Create;
+  try
+    Log.LoadFromText(PannedLogText, Error);
+    // Before the first sample that carries a rectangle: the header's
+    // base, which is what the format says stands until one does — and
+    // answered rather than refused, because the format says it.
+    Rect := FramingRectAt(Log, 0.0, Stale);
+    ExpectNear(Rect.X, BaseX, RectEpsilon, 'x before the pan');
+    ExpectTrue(not Stale, 'the start of the track is not stale');
+    // At the panned sample: the rectangle the capture was reading.
+    Rect := FramingRectAt(Log, 1.0, Stale);
+    ExpectNear(Rect.X, PanX, RectEpsilon, 'x during the pan');
+    ExpectNear(Rect.Y, PanY, RectEpsilon, 'y during the pan');
+    ExpectNear(Rect.Width, BaseWidth, RectEpsilon, 'width during the pan');
+    ExpectTrue(not Stale, 'a time inside the track is not stale');
+  finally
+    Log.Free;
+  end;
+end;
+
+// The regression this exists for, and it is reachable rather than
+// theoretical: pointer samples are flushed about a second behind, and
+// crash recovery re-muxes a dead take's movie without trimming it to the
+// track's extent — so a movie can run past its own sidecar. Carrying the
+// last framing forward then crops every one of those frames against a
+// rectangle the capture had already left. Measured on the user's own
+// Follow Mouse take with its sidecar truncated at 2.0 s: a 443-pixel
+// mis-crop at 3.8 s, reported as plain success.
+procedure TCompositionTests.TestFramingPastTheTrackIsRefusedNotGuessed;
+var
+  Log: TSidecarLog;
+  Rect: TLiveRect;
+  Error: string;
+  Stale: Boolean;
+begin
+  Log := TSidecarLog.Create;
+  try
+    Log.LoadFromText(PannedLogText, Error);
+    // The fixture's last sample is at movie time 2.0 and it claims 30 Hz,
+    // so the limit is half a second. Just inside it the last known
+    // framing still stands...
+    Rect := FramingRectAt(Log, 2.4, Stale);
+    ExpectTrue(not Stale, 'just past the last sample is still answerable');
+    ExpectNear(Rect.X, PanX, RectEpsilon, 'the last known framing');
+    // ...and past it the answer is "I do not know", which is what stops
+    // the render cropping through it.
+    Rect := FramingRectAt(Log, 3.8, Stale);
+    ExpectTrue(Stale, 'well past the last sample is stale');
+    // A degenerate track cannot make the question unanswerable either.
+    ExpectTrue(FramingRectAt(Log, 1000.0, Stale).Width > 0,
+      'a stale answer still names a usable rectangle');
+    ExpectTrue(Stale, 'a time far past the end is stale');
+  finally
+    Log.Free;
+  end;
+end;
+
+procedure TCompositionTests.TestAClickOutsideTheBaseButInsideThePanCounts;
+var
+  Log: TSidecarLog;
+  Clicks: TZoomClickArray;
+  Error: string;
+begin
+  // The click that used to be thrown away: it is outside the base
+  // rectangle, which is all the old filter looked at, but it is inside
+  // what the recording was showing when it happened.
+  Log := TSidecarLog.Create;
+  try
+    Log.LoadFromText(PannedLogText, Error);
+    Clicks := ZoomClicksFromLog(Log);
+    Expect<Integer>(Length(Clicks)).ToBe(1);
+    ExpectNear(Clicks[0].X, 790, RectEpsilon, 'the click''s x');
+    // The half that makes this a regression test rather than a
+    // restatement: the click really is outside the rectangle the old
+    // filter tested against.
+    ExpectTrue(not LiveRectContains(TestBase, 790, 400),
+      'the click is outside the base rectangle');
+    ExpectTrue(LiveRectContains(PannedWindow, 790, 400),
+      'the click is inside the panned window');
+  finally
+    Log.Free;
+  end;
+end;
+
 procedure TFrameCropTests.TestACropIsNeverEmpty;
 var
   Crop: TZoomCrop;
@@ -541,6 +839,8 @@ begin
   TestRunnerProgram.AddSuite(TInvariantTests.Create('invariants'));
   TestRunnerProgram.AddSuite(TClickFilterTests.Create(
     'which clicks count'));
+  TestRunnerProgram.AddSuite(TCompositionTests.Create(
+    'zoom composed inside a panned framing'));
   TestRunnerProgram.AddSuite(TFrameCropTests.Create('the frame crop'));
   TestRunnerProgram.Run;
   ExitCode := TestResultToExitCode;

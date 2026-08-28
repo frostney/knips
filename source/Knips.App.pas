@@ -2175,20 +2175,31 @@ end;
   header says.
 
   So docking the camera onto a recorded window used to be about the
-  *screen* only. This is the other half: when the camera is up and the
-  user records a window, capture the **display** instead, with a source
-  rectangle sitting exactly on that window's frame. ScreenCaptureKit then
-  reads the screen, which has the camera on it, and the picture-in-picture
-  really is composited into the file — the same way it already is for a
-  region.
+  *screen* only. This is the other half: capture the **display** instead,
+  with a source rectangle sitting exactly on that window's frame.
+  ScreenCaptureKit then reads the screen, which has the camera on it, and
+  the picture-in-picture really is composited into the file — the same
+  way it already is for a region.
+
+  **And it is not only the camera any more.** A desktop-independent
+  window capture is the one target no post-recording effect can ever
+  reach: its frames have no fixed relationship to the screen the pointer
+  was measured against, so no pointer can be drawn back into them and no
+  crop can be computed for them. A composited one is a display take in
+  every way that matters — the samples map, the framing is written into
+  the sidecar's own per-sample source rectangles, and a zoom composes
+  inside the pan (Knips.Export.ZoomTrack) — so a window recording gets
+  the same effects a region recording does, and gets them the same way:
+  a raw take plus a render.
 
   **The trade is real and is not hidden.** A composited window recording
   captures whatever is in front of the window: a notification, a menu
   pulled down over it, another app's window dragged across. The
   desktop-independent path has none of that, and it is still what a
-  recording with the camera *off* uses — so the cost is paid only by the
-  user who asked for a picture-in-picture, which is the only user it buys
-  anything for.
+  window take that wants **nothing** uses — no camera, no pointer, no
+  zoom. WindowTakeNeedsCompositing is where that line is drawn, and the
+  principle behind it is that the cost is paid only where it buys
+  something.
 
   **The rectangle pans and never resizes.** AVAssetWriter fixes the
   file's dimensions at the first frame; a window resized mid-take would
@@ -2204,7 +2215,11 @@ end;
   meaning in a window the user is free to move, and two owners for one
   source rectangle — the animator and this poll — is a rectangle that
   fights itself. StartPending therefore does not start the animator for a
-  composited recording. }
+  composited recording.
+
+  The post-recording effects are a different matter and are not off at
+  all: they are applied to the finished take, where the poll's own track
+  says exactly which rectangle each frame was showing. }
 
 function TAppController.CompositeWindowForPending: Boolean;
 var
@@ -3444,16 +3459,20 @@ begin
   if FState <> asRecording then
     Exit;
   // Before every other read of the pending request, because it rewrites
-  // it: a WINDOW recording with the camera up becomes a region recording
-  // on the display that window is on, so the picture-in-picture is
-  // composited into the file instead of being left out of it. A camera
-  // that is off changes nothing — the desktop-independent path is
-  // cleaner and is what a recording without a camera should get.
-  if (FPendingWindowID <> 0) and (FCamera <> nil) and FCamera.Visible then
+  // it: a WINDOW recording becomes a region recording on the display that
+  // window is on, panned onto it by the poll, whenever there is anything
+  // to be gained from it — a camera picture-in-picture to composite in,
+  // or an effect for the render to apply. WindowTakeNeedsCompositing is
+  // that question and carries the trade; a window take that wants
+  // neither keeps ScreenCaptureKit's desktop-independent capture, which
+  // is the cleaner picture.
+  if (FPendingWindowID <> 0)
+    and WindowTakeNeedsCompositing(FEffects,
+    (FCamera <> nil) and FCamera.Visible) then
     if not CompositeWindowForPending then
       LogMessage('the recorded window''s frame or display could not be '
-        + 'resolved, so the camera will not be in the file; recording the '
-        + 'window on its own instead');
+        + 'resolved, so the effects (and the camera, if it is up) will '
+        + 'not reach the file; recording the window on its own instead');
   DisplayIndex := -1;
   // A region is meaningless without the display it was drawn on: the
   // NSScreen had no NSScreenNumber, so falling back to the main display
@@ -3551,27 +3570,32 @@ begin
   // and it is why Big Cursor is never asked for here — the enlarged
   // pointer is drawn at render time now, from the same track.
   //
-  // Resolved against what the USER asked for rather than against the
-  // filter this path happens to build. A composited window recording is
-  // a display capture underneath (FCompositedWindowID <> 0, see
-  // CompositeWindowForPending) and the pointer's screen position would
-  // in fact map onto it correctly — but *Record Window* must not mean two
-  // different things depending on whether the camera happens to be up.
-  // Same command, same answer, camera or no camera.
+  // Resolved against the target the capture is actually opening, which
+  // for a composited window recording is a DISPLAY: the pointer's screen
+  // position maps onto its frames exactly, through the per-sample source
+  // rectangles the poll writes into the sidecar, so the take is raw and
+  // renderable like any other region take.
+  //
+  // This used to be pinned to ctkWindow so that *Record Window* meant
+  // the same thing whether or not the camera happened to be up. It means
+  // the same thing still — the decision is now
+  // WindowTakeNeedsCompositing's, taken from the effects the user chose
+  // rather than from the camera — and it is the answer the user asked
+  // for rather than a refusal.
   Options.BigCursor := False;
-  if FCompositedWindowID <> 0 then
-    Options.SmoothCursor := ResolveSmoothCursor(ctkWindow, True)
-  else
-    Options.SmoothCursor := ResolveSmoothCursor(Options.TargetKind, True);
-  // A window capture is the one target that cannot be raw: its frames
-  // have no fixed relationship to the screen the pointer is measured
-  // against, so the pointer cannot be drawn back into them and the
-  // system one has to stay. Said out loud, because it is the one case
-  // where the effects a user has chosen will not reach the deliverable.
+  Options.SmoothCursor := ResolveSmoothCursor(Options.TargetKind, True);
+  // A desktop-independent window capture is the one target that cannot
+  // be raw: its frames have no fixed relationship to the screen the
+  // pointer is measured against, so the pointer cannot be drawn back
+  // into them and the system one has to stay. Reached only when the user
+  // asked for no effects at all, or when the composite could not be set
+  // up; said out loud either way, because it is the one case where the
+  // deliverable is the take.
   if not Options.SmoothCursor then
-    LogMessage('this recording keeps the system pointer: a window '
-      + 'capture has no fixed relationship to the screen the pointer is '
-      + 'measured against, so it cannot be drawn back in afterwards');
+    LogMessage('this recording keeps the system pointer and takes no '
+      + 'effects: a desktop-independent window capture has no fixed '
+      + 'relationship to the screen the pointer is measured against, so '
+      + 'nothing can be drawn back in afterwards');
   // The frame is stroked outside the region either way, so a failed
   // exclusion still cannot reach the file while the region stands still;
   // it is a *moving* region that needs this list to have worked.

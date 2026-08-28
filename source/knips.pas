@@ -581,6 +581,14 @@ begin
     if Session.Report.CursorDrawn then
       Applied := Applied + Format(', pointer on %d frames',
         [Session.Report.CursorFrames]);
+    // Frames the capture never made. Said out loud rather than folded
+    // into the total, because it is the difference between a deliverable
+    // that animates and one that jumps, and because it is what the file
+    // grew for.
+    if Session.Report.SynthesizedFrames > 0 then
+      Applied := Applied + Format(', %d frames filled in at %d fps where '
+        + 'the capture had none', [Session.Report.SynthesizedFrames,
+        Session.Report.SynthesisFramesPerSecond]);
     if Session.Report.AudioTracks > 0 then
       Applied := Applied + Format(', %d audio track(s) copied (%d samples)',
         [Session.Report.AudioTracks, Session.Report.AudioSamples]);

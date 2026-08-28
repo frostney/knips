@@ -165,6 +165,7 @@ type
     procedure TestTheTwoCursorEffectsAreOneSetting;
     procedure TestRenderProgressIsClamped;
     procedure TestTheUnavailableLineStaysNarrow;
+    procedure TestAWindowTakeIsCompositedOnlyWhereItBuysSomething;
   end;
 
   TWindowMenuTests = class(TTestSuite)
@@ -1881,6 +1882,8 @@ begin
     TestRenderProgressIsClamped);
   Test('the Effects menu''s reason line stays narrow',
     TestTheUnavailableLineStaysNarrow);
+  Test('a window take is composited only where compositing buys '
+    + 'something', TestAWindowTakeIsCompositedOnlyWhereItBuysSomething);
 end;
 
 procedure TEffectDefaultsTests.TestTheDefaultDrawsThePointer;
@@ -1892,6 +1895,43 @@ begin
   // default that decides whether a first recording looks broken.
   Expect<string>(ExportCursorModeName(Effects.Cursor)).ToBe('smooth');
   Expect<Boolean>(Effects.ZoomOnClick).ToBe(False);
+end;
+
+// The trade a composited window recording makes — whatever is in front
+// of the window reaches the file — is paid only where it buys something.
+// Both directions are pinned, because getting either wrong is a silent
+// regression: one loses the effects the user asked for, the other loses
+// the desktop-independent capture for nothing.
+procedure TEffectDefaultsTests
+  .TestAWindowTakeIsCompositedOnlyWhereItBuysSomething;
+var
+  Effects: TExportEffects;
+begin
+  // The app's own defaults draw the pointer, so an ordinary window
+  // recording is composited and comes out raw and renderable.
+  Expect<Boolean>(WindowTakeNeedsCompositing(DefaultAppEffects, False))
+    .ToBe(True);
+  // Everything switched off: nothing to render, so the cleaner capture
+  // wins.
+  Effects := DefaultAppEffects;
+  Effects.Cursor := ecmNone;
+  Effects.ZoomOnClick := False;
+  Expect<Boolean>(WindowTakeNeedsCompositing(Effects, False)).ToBe(False);
+  // ...unless the camera is up, which is the case this path was built
+  // for: a desktop-independent capture leaves the picture-in-picture out
+  // of the file entirely.
+  Expect<Boolean>(WindowTakeNeedsCompositing(Effects, True)).ToBe(True);
+  // Zoom alone is enough.
+  Effects.ZoomOnClick := True;
+  Expect<Boolean>(WindowTakeNeedsCompositing(Effects, False)).ToBe(True);
+  // And so is any pointer the render would draw, including the default
+  // "whatever the recording decided" — which for a raw take is a
+  // pointer.
+  Effects.ZoomOnClick := False;
+  Effects.Cursor := ecmAsRecorded;
+  Expect<Boolean>(WindowTakeNeedsCompositing(Effects, False)).ToBe(True);
+  Effects.Cursor := ecmBig;
+  Expect<Boolean>(WindowTakeNeedsCompositing(Effects, False)).ToBe(True);
 end;
 
 procedure TEffectDefaultsTests.TestZoomMigratesFromTheOldToggle;

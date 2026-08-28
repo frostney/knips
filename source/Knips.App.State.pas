@@ -676,6 +676,36 @@ function ExportProgressTitleWithSize(APercent: Integer;
 // not.
 function DefaultAppEffects: TExportEffects;
 
+// Whether a *window* recording has to be captured as a composited region
+// of the display it sits on, rather than through ScreenCaptureKit's
+// desktop-independent window capture.
+//
+// **The trade, stated once.** A desktop-independent capture is a picture
+// of that one window and nothing on top of it — a notification, a menu
+// pulled over it, another app dragged across, none of them reach the
+// file. It is the better capture, and it is why it is still the default
+// for a window take that wants nothing else. But its frames have no
+// fixed relationship to the screen the pointer is measured against, so
+// **no post-recording effect can ever apply to one**: no drawn pointer,
+// no zoom. That is what the user meets as "effects do not work on window
+// recordings".
+//
+// A composited window recording is a display capture cropped to the
+// window's frame and panned onto it by the 5 Hz poll. It is a display
+// take in every way that matters — the samples map, the framing is in
+// the sidecar's own source rectangles, a zoom composes inside the pan
+// (Knips.Export.ZoomTrack) — so every effect applies. The cost is that
+// whatever is in front of the window is in the file.
+//
+// So the rule is: **pay the cost only where it buys something.** A
+// camera picture-in-picture has to be composited or it is not in the
+// file at all. An effect the render would apply — a drawn pointer of any
+// kind, or Zoom on Click — needs a take a render can work on. A window
+// recording with the pointer switched off and no zoom asked for wants
+// neither, and keeps the cleaner capture.
+function WindowTakeNeedsCompositing(const AEffects: TExportEffects;
+  ACameraVisible: Boolean): Boolean;
+
 // The one-way migration from the three menu toggles the effects replaced.
 // Both consult the old key only where the new one has never been written,
 // and neither writes the old one back — the same shape the audio
@@ -1084,6 +1114,16 @@ begin
   Result := DefaultExportEffects;
   Result.Cursor := ecmSmooth;
   Result.ZoomOnClick := False;
+end;
+
+function WindowTakeNeedsCompositing(const AEffects: TExportEffects;
+  ACameraVisible: Boolean): Boolean;
+begin
+  // ecmNone is the one cursor mode that asks for nothing: ecmAsRecorded
+  // draws the smoothed pointer for a raw take, which is what the app
+  // records, so it is a request like the other two.
+  Result := ACameraVisible or AEffects.ZoomOnClick
+    or (AEffects.Cursor <> ecmNone);
 end;
 
 function MigratedEffectZoom(AHasNewKey, ANewValue,

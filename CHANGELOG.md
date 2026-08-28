@@ -9,6 +9,70 @@ release-tagging step; it does not produce the entries below.)
 
 ### Features
 
+- **The effects animate instead of jumping.** ScreenCaptureKit only
+  delivers a frame when the screen changes, and a raw take has no pointer
+  in its pixels — so moving the mouse over a still window produced no
+  frames at all, and a zoom easing in over 0.30 s could land on a single
+  one. Measured on a real 8.1-second take: 152 frames, 18.8 a second
+  against a nominal 30, and **one** frame inside the ease. The render now
+  fills those gaps in, re-presenting the last captured frame with the
+  effect evaluated at the intervening instant — but only where the result
+  would be a different picture, so a zoom's hold and a still stretch with
+  nothing moving over it cost nothing. Same take, same binary: one frame
+  in the ease became **seven**, for 20 % more bytes and 0.35× realtime
+  instead of 0.28×. GIF and APNG exports get the same treatment on their
+  own frame grid, and one gap can never cost more than a bounded number
+  of frames however damaged the movie's stamps are.
+
+  Two limits worth knowing. The fill goes only *between* frames the
+  capture delivered, so a take whose screen went static still loses its
+  tail — measured, a 17.5-second recording came back as a 4.3-second
+  movie — and putting that back is a recorder-side change still to come.
+  And every figure above was measured on the recorder as it stands
+  today; once the capture keeps a steady cadence of its own, most of
+  these gaps will simply not exist.
+- **A sparse pointer track is no longer drawn through.** Two samples
+  minutes apart — which is what an MCP recording produces between tool
+  calls — used to be joined with a straight line, so the drawn pointer
+  glided smoothly across the screen for a minute of footage nobody
+  watched, and the render filled that minute with frames to draw it on.
+  The reader now holds the last known position across a silence longer
+  than half a second and snaps when the track speaks again. On a
+  three-sample fixture the render went from 81 invented frames to 1.
+- **Zoom on Click works on a Follow Mouse take.** It used to be refused,
+  because the crop was computed against the rectangle the recording was
+  *sized* from rather than the one it was *showing*. It is now composed
+  inside the framing each sample records — the same base/window/source
+  composition the live effects always used — so a click zooms inside
+  wherever the pan had got to. Proved at pixel level against a predicted
+  crop of the raw frame: SSIM 0.9965, against 0.8636 for the old
+  arithmetic. A click the pan has drifted away from is answered as
+  closely as the captured rectangle allows rather than refused. Where the
+  sample track runs out — a movie can outlast its own sidecar — the
+  frames past its end are passed through uncropped rather than zoomed
+  against a rectangle the capture had already left, and the render says
+  how many.
+- **Window recordings take the effects too.** A desktop-independent
+  window capture is a picture of something that moves under the recorder
+  with no way to find out, so nothing could ever be drawn back into one —
+  which is why *Record Window* produced a single movie with the system
+  pointer baked in and every effect greyed out. A window recording is now
+  captured from the display through a rectangle riding the window, which
+  makes it a raw take like any other: Smooth Cursor, Big Cursor and Zoom
+  on Click all apply and can still be changed afterwards. The price is
+  that anything in front of the window is in the file, so it is paid only
+  where it buys something — with the camera off, the pointer switched off
+  and no zoom asked for, a window recording still captures the window
+  alone.
+- **The camera's background blur is stronger.** `CIGaussianBlur` at
+  radius 28 instead of 12 — 2.33× the kernel, taking out two fifths of
+  the mid-scale structure the old value left behind (measured on a real
+  640×480 frame at three spatial scales). It costs nothing measurable:
+  three probe runs at each radius on an idle machine came back 9.1–9.8 ms
+  a frame at 28 against 7.6–9.8 ms at 12, ranges that overlap almost
+  entirely, with Vision ~78 % of each. Both are far under the 33 ms
+  budget.
+
 - **Event sidecar.** Every recording writes `<take>.knips.jsonl` beside
   its movie: the pointer's path at about thirty samples a second, mouse
   button edges, the rectangle the capture was reading at each instant, and
@@ -96,6 +160,24 @@ release-tagging step; it does not produce the entries below.)
   there with a message instead of aborting.
 
 ### Fixes
+
+- **A sidecar with no `sampleHz` field read as a sample rate of
+  1.5×10⁻³²². The reader's fallback went through `TJSONFloat(30)`, and a
+  typecast of an integer constant to a float type in Delphi mode
+  reinterprets the bits rather than converting them — so the documented
+  default of 30 arrived as the denormal `$000000000000001E`. Nothing
+  noticed for as long as nothing divided by it; the first thing that did
+  crashed. Every other fallback in the reader casts a literal `0`, whose
+  bit pattern is `0.0` either way, which is why this was the only one
+  that was wrong.
+- **A drawn pointer could be placed against the wrong rectangle on the
+  frames of a take whose movie outlasts its sidecar** — reachable after a
+  crash-recovered recording, because samples are flushed about a second
+  behind and recovery re-muxes the movie without trimming it. Those
+  frames now fall back to the last rectangle the track actually holds
+  (measured: the pointer had been landing 207 pixels away), and the
+  render says how many frames it could not place instead of reporting a
+  clean success.
 
 - `app`: a close asked for by the user — the titlebar's button or ⌘W —
   is now refused while a GIF export is running (`windowShouldClose:`),
