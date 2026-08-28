@@ -25,8 +25,12 @@
   afterwards, and deleting it is a decision only you can make (delete
   `<name>-raw.mp4` and `<name>-raw.knips.jsonl` together — the playback
   window then greys its Effects out and says why). A **window** recording
-  is the exception: nothing can be applied to it after the fact, so it is
-  written once, as a single movie and a single sidecar.
+  is raw and editable too whenever an effect could apply — captured from
+  the display, cropped to the window, so overlapping windows appear in
+  the picture. Switch every effect off before recording a window to get
+  the clean desktop-independent capture instead; that one is written
+  once, as a single movie and a single sidecar, and nothing can be
+  applied to it after the fact.
 - **Follow Mouse** is the one recording setting left in the menu, because
   a pan decides which pixels are read off the screen and cannot be undone
   afterwards. Zoom on Click, Smooth Cursor and Big Cursor moved into the
