@@ -41,6 +41,7 @@ uses
   Knips.Capture.CoreMedia,
   Knips.Export.Apng,
   Knips.Export.Bitmap,
+  Knips.Export.Cadence,
   Knips.Export.CursorEffect,
   Knips.Export.Gif,
   Knips.Export.MovieReader,
@@ -116,6 +117,15 @@ type
     ZoomedFrames: Int64;
     ZoomClicks: Integer;
     ZoomNote: string;
+    // Frames the zoom could not be applied to because the sample track
+    // had nothing to say about what they were showing. See the MP4
+    // render's field of the same name.
+    UnframedFrames: Int64;
+    // Frames the capture never made, put back on the decimation grid
+    // where an effect was animating and ScreenCaptureKit had delivered
+    // nothing (Knips.Export.Cadence). Zero on a take whose frames
+    // already arrived at the target rate.
+    SynthesizedFrames: Int64;
     // What the size was expected to be before a byte was written, and how
     // many output frames that was over. Kept in the report so the caller
     // can say afterwards how close it came — which is the only way the
@@ -198,6 +208,9 @@ type
     FZoomClicks: TZoomClickArray;
     FZoomWalker: TZoomWalker;
     FZoomBase: TLiveRect;
+    // Whether the capture moved its own source rectangle during the
+    // take, which decides whether the framing is per frame or fixed.
+    FFramingPanned: Boolean;
     // The source movie's bytes per pixel-frame — H.264's own verdict on
     // how busy the content is, and the only content signal the size
     // estimate has that costs nothing to get
@@ -215,6 +228,23 @@ type
     FBaseSeconds: Double;
     FLastSlot: Int64;
     FEmitted: Int64;
+    // The frame synthesis. FHeld is the last emitted frame's pixels,
+    // retained past the reader's own lifetime for it; FPendingSource is
+    // the next frame that passed the grid, read but not yet handed out,
+    // because the slots between the two have to be filled first.
+    FHeld: CVPixelBufferRef;
+    FPendingSource: TMovieReaderFrame;
+    FHasPendingSource: Boolean;
+    FPendingSlot: Int64;
+    FFillSlot: Int64;
+    // One past the last slot this gap may be filled to. The bound is
+    // Knips.Export.Cadence's own (MaxCadenceStepsPerGap), applied here
+    // because this pass walks the decimation grid it already counts in
+    // rather than calling CadenceTimes — the two must not be allowed to
+    // disagree about how much one gap may cost.
+    FFillLimit: Int64;
+    FLastShape: TRenderedFrameShape;
+    FHasLastShape: Boolean;
     // What the palette pass counted. Zero until it has run, and it never
     // runs for APNG.
     FMeasuredFrames: Int64;
@@ -224,9 +254,22 @@ type
       ABytesWritten: Int64);
     procedure BeginPass;
     function NextEmittedFrame(out AFrame: TMovieReaderFrame): Boolean;
+    // What one output frame would come out as at ASeconds, given that
+    // the pixels behind it do not change. See Knips.Export.Cadence.
+    function EmittedFrameShape(ASourceWidth, ASourceHeight: Integer;
+      ASeconds: Double): TRenderedFrameShape;
+    procedure HoldFrame(const AFrame: TMovieReaderFrame);
+    procedure ReleaseHeldFrame;
+    // What the whole frame shows at ASeconds: the base rectangle for a
+    // take whose framing never moved, the sample track's own for one
+    // that panned. False when the track has nothing to say about that
+    // instant, which is the one case a zoom must not crop through — see
+    // Knips.Export.ZoomTrack.FramingRectAt.
+    function FramingAt(ASeconds: Double; out ARect: TLiveRect): Boolean;
     procedure EnsureTargetSize(ASourceWidth, ASourceHeight: Integer);
     procedure PrepareSmoothCursor;
     procedure PrepareZoom;
+    procedure NoteUnframedFrames;
     function ScaleFrame(const AFrame: TMovieReaderFrame;
       var ADestination: TBgraImage; out AError: string): Boolean;
     function RangeSeconds: Double;
@@ -380,10 +423,80 @@ end;
 
 destructor TExportSession.Destroy;
 begin
+  ReleaseHeldFrame;
   FreeAndNil(FReader);
   FreeAndNil(FCursorEffect);
   FreeAndNil(FZoomLog);
   inherited Destroy;
+end;
+
+function TExportSession.FramingAt(ASeconds: Double;
+  out ARect: TLiveRect): Boolean;
+var
+  Stale: Boolean;
+begin
+  ARect := FZoomBase;
+  if not FFramingPanned then
+    Exit(True);
+  ARect := FramingRectAt(FZoomLog, ASeconds, Stale);
+  if (ARect.Width <= 0) or (ARect.Height <= 0) then
+  begin
+    ARect := FZoomBase;
+    Exit(False);
+  end;
+  Result := not Stale;
+end;
+
+procedure TExportSession.ReleaseHeldFrame;
+begin
+  if FHeld <> nil then
+  begin
+    CVPixelBufferRelease(FHeld);
+    FHeld := nil;
+  end;
+end;
+
+// The reader's buffer is only valid until the next NextFrame, and a
+// synthesised frame is made from the frame *before* the one that has
+// just been read — so it is retained rather than borrowed.
+procedure TExportSession.HoldFrame(const AFrame: TMovieReaderFrame);
+begin
+  ReleaseHeldFrame;
+  FHeld := CVPixelBufferRetain(AFrame.PixelBuffer);
+end;
+
+function TExportSession.EmittedFrameShape(ASourceWidth,
+  ASourceHeight: Integer; ASeconds: Double): TRenderedFrameShape;
+var
+  Crop: TZoomCrop;
+  Source, Framing: TLiveRect;
+  FramingKnown: Boolean;
+begin
+  Result := Default(TRenderedFrameShape);
+  Crop := Default(TZoomCrop);
+  Crop.Width := ASourceWidth;
+  Crop.Height := ASourceHeight;
+  Crop.Identity := True;
+  FramingKnown := FramingAt(ASeconds, Framing);
+  Source := Framing;
+  if FReport.ZoomOnClick and FramingKnown then
+  begin
+    // The walk is monotonic and ScaleFrame advances it too; advancing to
+    // a time it has already reached is a no-op, which is what makes
+    // asking here safe.
+    FZoomWalker := ZoomWalkerAdvance(FZoomWalker, FZoomClicks, ASeconds);
+    Source := ZoomWalkerSourceRectIn(FZoomWalker, Framing);
+    Crop := ZoomFrameCrop(ASourceWidth, ASourceHeight, Framing, Source);
+  end;
+  Result.CropX := Crop.X;
+  Result.CropY := Crop.Y;
+  Result.CropWidth := Crop.Width;
+  Result.CropHeight := Crop.Height;
+  if FCursorEffect <> nil then
+    Result.HasCursor := FCursorEffect.SpritePlacement(FReport.PixelWidth,
+      FReport.PixelHeight, ASeconds, FReport.ZoomOnClick, Source.X,
+      Source.Y, Source.Width, Source.Height, Result.CursorX,
+      Result.CursorY);
 end;
 
 procedure TExportSession.BeginPass;
@@ -391,6 +504,13 @@ begin
   FEmitted := 0;
   FBaseSeconds := 0;
   FLastSlot := 0;
+  ReleaseHeldFrame;
+  FHasPendingSource := False;
+  FPendingSlot := 0;
+  FFillSlot := 0;
+  FFillLimit := 0;
+  FHasLastShape := False;
+  FReport.SynthesizedFrames := 0;
   // A GIF walks the movie twice and the walker only goes forwards, so
   // the second pass starts the zoom over. Without this the encode pass
   // would find the walk already at the end of the movie and every frame
@@ -400,21 +520,83 @@ begin
       FOptions.Effects.ZoomHoldSeconds);
 end;
 
+// The next frame the export should write, which is not always a frame
+// the movie holds.
+//
+// Two things happen here. The first is the decimation that has always
+// been here: a source stamp lands in a slot of the 1/fps grid and the
+// first frame to reach each slot is the one that is kept.
+//
+// The second is the **fill**. ScreenCaptureKit delivers a frame only
+// when the content changes, and a raw take has no pointer in its pixels
+// — so a drawn pointer gliding over a still window, or a zoom easing
+// over one, has nothing to be drawn into. The delay planner then does
+// exactly what it should and holds one frame for the whole gap, which
+// in a GIF is the same stutter this effect exists to remove. So an empty
+// slot between two source frames is filled by re-presenting the earlier
+// one with the effect evaluated at that slot's time — but only when it
+// would come out a **different picture** (Knips.Export.Cadence), so a
+// still stretch with nothing animating over it stays exactly as sparse
+// as it was captured and costs the file nothing.
 function TExportSession.NextEmittedFrame(
   out AFrame: TMovieReaderFrame): Boolean;
 var
   Frame: TMovieReaderFrame;
+  Shape: TRenderedFrameShape;
   Slot: Int64;
+  FillSeconds: Double;
 begin
   Result := False;
   AFrame := Default(TMovieReaderFrame);
-  while FReader.NextFrame(Frame) do
-  begin
+  repeat
+    if FHasPendingSource then
+    begin
+      // The slots between the last emitted frame and the one waiting,
+      // up to the shared per-gap bound.
+      if (FHeld <> nil) and (FFillSlot < FFillLimit)
+        and (FReport.PixelWidth > 0) then
+      begin
+        FillSeconds := FBaseSeconds
+          + FFillSlot / FOptions.FramesPerSecond;
+        Inc(FFillSlot);
+        Shape := EmittedFrameShape(Integer(CVPixelBufferGetWidth(FHeld)),
+          Integer(CVPixelBufferGetHeight(FHeld)), FillSeconds);
+        if FHasLastShape and not FrameShapesDiffer(Shape, FLastShape) then
+          Continue;
+        FLastShape := Shape;
+        FHasLastShape := True;
+        AFrame.PixelBuffer := FHeld;
+        AFrame.Seconds := FillSeconds;
+        AFrame.Time := CMTimeMakeWithSeconds(FillSeconds, TrimTimeScale);
+        Inc(FEmitted);
+        Inc(FReport.SynthesizedFrames);
+        Exit(True);
+      end;
+      // Nothing left to fill: the frame that was waiting is next.
+      FHasPendingSource := False;
+      FLastSlot := FPendingSlot;
+      Inc(FEmitted);
+      AFrame := FPendingSource;
+      HoldFrame(AFrame);
+      if FReport.PixelWidth > 0 then
+      begin
+        FLastShape := EmittedFrameShape(
+          Integer(CVPixelBufferGetWidth(AFrame.PixelBuffer)),
+          Integer(CVPixelBufferGetHeight(AFrame.PixelBuffer)),
+          AFrame.Seconds);
+        FHasLastShape := True;
+      end;
+      Exit(True);
+    end;
+
+    if not FReader.NextFrame(Frame) then
+      Exit(False);
     Inc(FReport.FramesRead);
     if FEmitted = 0 then
     begin
       FBaseSeconds := Frame.Seconds;
       FLastSlot := 0;
+      Slot := 0;
     end
     else
     begin
@@ -430,12 +612,17 @@ begin
         * FOptions.FramesPerSecond + GridEpsilon);
       if Slot <= FLastSlot then
         Continue;
-      FLastSlot := Slot;
     end;
-    Inc(FEmitted);
-    AFrame := Frame;
-    Exit(True);
-  end;
+    FPendingSource := Frame;
+    FPendingSlot := Slot;
+    FHasPendingSource := True;
+    FFillSlot := FLastSlot + 1;
+    // The shared bound, so a damaged movie with an hour between two
+    // stamps cannot ask this export for a hundred thousand frames — and
+    // so this path and the MP4 render's cannot disagree about what one
+    // gap may cost.
+    FFillLimit := CadenceFillLimit(FFillSlot, FPendingSlot);
+  until False;
 end;
 
 procedure TExportSession.EnsureTargetSize(ASourceWidth,
@@ -498,6 +685,7 @@ begin
   end;
   FZoomBase := LiveRect(FZoomLog.Header.BaseX, FZoomLog.Header.BaseY,
     FZoomLog.Header.BaseWidth, FZoomLog.Header.BaseHeight);
+  FFramingPanned := not HasUntouchedFraming(FZoomLog.Header);
   FReport.ZoomOnClick := True;
   FZoomWalker := ZoomWalkerStart(FZoomBase, FOptions.Effects.ZoomFactor,
     FOptions.Effects.ZoomHoldSeconds);
@@ -530,6 +718,20 @@ begin
   FreeAndNil(FCursorEffect);
 end;
 
+// The note a run leaves behind about frames it could not place. Kept
+// beside the zoom's own note rather than replacing it: "the zoom was
+// refused" and "the zoom applied to all but the last thirty frames" are
+// different facts and a caller with one line to show wants the first.
+procedure TExportSession.NoteUnframedFrames;
+begin
+  if (FReport.UnframedFrames > 0) and (FReport.ZoomNote = '') then
+    FReport.ZoomNote := Format('%d frame(s) run past the end of this '
+      + 'recording''s pointer track, so what they were showing is not '
+      + 'recorded; nothing was cropped for them and the pointer was '
+      + 'placed from the last position the track holds',
+      [FReport.UnframedFrames]);
+end;
+
 // A frame that cannot be read has to fail the export. Leaving the
 // destination untouched would hand the encoder the previous frame
 // again, or the quantiser the same frame twice, and still report
@@ -541,8 +743,8 @@ var
   Stride, SourceWidth, SourceHeight: Integer;
   Status: CVReturn;
   Crop: TZoomCrop;
-  Source: TLiveRect;
-  HasCrop: Boolean;
+  Source, Framing: TLiveRect;
+  HasCrop, FramingKnown: Boolean;
 begin
   Result := False;
   AError := '';
@@ -569,16 +771,36 @@ begin
     HasCrop := False;
     Source := Default(TLiveRect);
     Crop := Default(TZoomCrop);
-    if FReport.ZoomOnClick then
+    // Inside what the frame SHOWS at this instant, which on a take whose
+    // framing panned is not the base rectangle — the same composition
+    // the MP4 render does, from the same track, so a GIF and the movie
+    // beside it crop the same pixels. A frame the track cannot place is
+    // passed through whole rather than cropped against a guess.
+    FramingKnown := FramingAt(AFrame.Seconds, Framing);
+    if FReport.ZoomOnClick and FramingKnown then
     begin
       FZoomWalker := ZoomWalkerAdvance(FZoomWalker, FZoomClicks,
         AFrame.Seconds);
-      Source := ZoomWalkerSourceRect(FZoomWalker);
-      Crop := ZoomFrameCrop(SourceWidth, SourceHeight, FZoomBase, Source);
+      Source := ZoomWalkerSourceRectIn(FZoomWalker, Framing);
+      Crop := ZoomFrameCrop(SourceWidth, SourceHeight, Framing, Source);
       HasCrop := True;
       if not Crop.Identity then
         Inc(FReport.ZoomedFrames);
     end;
+    // Counted whether or not a zoom was asked for: a frame the track
+    // cannot place is one whose pointer falls back to the last rectangle
+    // the track holds (HasCrop stays False below, which is exactly that
+    // fallback), and that is worth saying even with no crop in play.
+    //
+    // One asymmetry with the MP4 render, stated rather than hidden: this
+    // pass only loads a sidecar for the ZOOM, so a cursor-only export of
+    // a take whose movie outlasts its track gets the right pixels — the
+    // fallback above is unconditional — but no note. The pixels are what
+    // matter and they are correct; closing the note would mean loading
+    // the log for the cursor path too, which the cursor effect already
+    // does privately.
+    if not FramingKnown then
+      Inc(FReport.UnframedFrames);
     // The crop is applied by handing the resampler a smaller rectangle of
     // the same buffer: the stride is the frame's, the origin is the
     // crop's. One resample does the crop and the scale together, so a
@@ -867,6 +1089,7 @@ begin
   // sampled, and cropped every frame it scaled; only this pass's frames
   // end up in the file, so both counters start again here.
   FReport.ZoomedFrames := 0;
+  FReport.UnframedFrames := 0;
   if FCursorEffect <> nil then
     FCursorEffect.ResetCounters;
   if not FReader.StartPass(FStartSeconds, FRangeSeconds, AError) then
@@ -952,6 +1175,7 @@ begin
     FReport.FramesWritten := ASink.FrameCount;
     FReport.OutputBytes := ASink.BytesWritten;
     FReport.DurationSeconds := Planner.SpentTicks / Planner.TicksPerSecond;
+    NoteUnframedFrames;
     Result := True;
   finally
     Planner.Free;

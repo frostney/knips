@@ -72,6 +72,7 @@ type
     procedure SetupTests; override;
     procedure TestMovieTimeIsHostTimeMinusTheAnchor;
     procedure TestCursorInterpolatesBetweenSamples;
+    procedure TestASilenceIsHeldRatherThanBlended;
     procedure TestCursorClampsAtBothEnds;
     procedure TestStateCarriesTheSourceRectangleOfTheEarlierSample;
     procedure TestNoAnchorMeansNoAnswer;
@@ -84,7 +85,7 @@ type
     procedure TestABakedCursorClosesTheChoice;
     procedure TestAWindowTakeCanHaveNothing;
     procedure TestZoomNeedsClicksAndAnUnzoomedCapture;
-    procedure TestZoomRefusesEveryPannedFraming;
+    procedure TestZoomComposesWithAPannedFraming;
     procedure TestABakedPointerDoesNotCloseTheZoom;
     procedure TestNoLogAtAllIsAnswerable;
     procedure TestARawTakeIsFullyRenderable;
@@ -99,6 +100,9 @@ type
     procedure TestSmoothingDoesNotDelayTheRamp;
     procedure TestAZeroWindowIsTheIdentity;
     procedure TestInterpolatePathClampsAndBlends;
+    procedure TestALongSilenceIsNotDrawnThrough;
+    procedure TestTheLogNamesItsOwnGapLimit;
+    procedure TestTheGapLimitIsCappedAndFloored;
   end;
 
 { ---------------------------------------------------------------- helpers }
@@ -666,6 +670,8 @@ begin
     TestMovieTimeIsHostTimeMinusTheAnchor);
   Test('the cursor is interpolated between the bracketing samples',
     TestCursorInterpolatesBetweenSamples);
+  Test('a silence too long to believe is held rather than blended',
+    TestASilenceIsHeldRatherThanBlended);
   Test('before the first and after the last sample the path is clamped',
     TestCursorClampsAtBothEnds);
   Test('the source rectangle is the earlier sample''s, not a blend',
@@ -693,15 +699,44 @@ var
   Log: TSidecarLog;
   X, Y: Double;
 begin
+  // 0.4 s apart, which is a long gap for a 30 Hz track and still well
+  // inside the silence this reader will draw a line through. A second
+  // apart — which this fixture used to be — is past it, and the reader
+  // holds instead of blending; see
+  // TestALongSilenceIsNotDrawnThrough for that half of the rule.
+  Log := LoadText(FixtureHeader + LineEnding + FixtureAnchor + LineEnding
+    + '{"k":"cursor","t":100.0,"x":0,"y":0,"b":0}' + LineEnding
+    + '{"k":"cursor","t":100.4,"x":100,"y":200,"b":0}');
+  try
+    Expect<Boolean>(Log.CursorAt(0.1, X, Y)).ToBe(True);
+    ExpectNear(X, 25, Epsilon, 'x a quarter in');
+    ExpectNear(Y, 50, Epsilon, 'y a quarter in');
+    Log.CursorAt(0.3, X, Y);
+    ExpectNear(X, 75, Epsilon, 'x three quarters in');
+  finally
+    Log.Free;
+  end;
+end;
+
+// The reader's half of the silence rule. Same fixture shape, one second
+// apart instead of four tenths: past the limit the earlier sample's
+// position stands rather than a line being drawn through it.
+procedure TTimelineTests.TestASilenceIsHeldRatherThanBlended;
+var
+  Log: TSidecarLog;
+  X, Y: Double;
+begin
   Log := LoadText(FixtureHeader + LineEnding + FixtureAnchor + LineEnding
     + '{"k":"cursor","t":100.0,"x":0,"y":0,"b":0}' + LineEnding
     + '{"k":"cursor","t":101.0,"x":100,"y":200,"b":0}');
   try
     Expect<Boolean>(Log.CursorAt(0.25, X, Y)).ToBe(True);
-    ExpectNear(X, 25, Epsilon, 'x a quarter in');
-    ExpectNear(Y, 50, Epsilon, 'y a quarter in');
-    Log.CursorAt(0.75, X, Y);
-    ExpectNear(X, 75, Epsilon, 'x three quarters in');
+    ExpectNear(X, 0, Epsilon, 'held rather than a quarter across');
+    ExpectNear(Y, 0, Epsilon, 'held rather than a quarter down');
+    Log.CursorAt(0.99, X, Y);
+    ExpectNear(X, 0, Epsilon, 'still held at the far end');
+    Log.CursorAt(1.0, X, Y);
+    ExpectNear(X, 100, Epsilon, 'and snaps when the track speaks again');
   finally
     Log.Free;
   end;
@@ -733,10 +768,10 @@ begin
   Log := LoadText(FixtureHeader + LineEnding + FixtureAnchor + LineEnding
     + '{"k":"cursor","t":100.0,"x":0,"y":0,"b":0,'
     + '"sx":0,"sy":0,"sw":100,"sh":100}' + LineEnding
-    + '{"k":"cursor","t":101.0,"x":10,"y":10,"b":0,'
+    + '{"k":"cursor","t":100.4,"x":10,"y":10,"b":0,'
     + '"sx":50,"sy":50,"sw":200,"sh":200}');
   try
-    Expect<Boolean>(Log.StateAt(0.5, State)).ToBe(True);
+    Expect<Boolean>(Log.StateAt(0.2, State)).ToBe(True);
     ExpectNear(State.X, 5, Epsilon, 'x half way');
     ExpectNear(State.SourceX, 0, Epsilon, 'sx is the earlier sample''s');
     ExpectNear(State.SourceWidth, 100, Epsilon,
@@ -847,6 +882,12 @@ begin
   Test('a window of zero is the identity', TestAZeroWindowIsTheIdentity);
   Test('the free interpolator clamps and blends the same way',
     TestInterpolatePathClampsAndBlends);
+  Test('a silence too long to believe is held, not drawn through',
+    TestALongSilenceIsNotDrawnThrough);
+  Test('a take names its own limit on that silence',
+    TestTheLogNamesItsOwnGapLimit);
+  Test('that limit is capped and floored against a hostile header',
+    TestTheGapLimitIsCappedAndFloored);
 end;
 
 // Samples every 1/30 s along a straight line, with one optional spike.
@@ -924,13 +965,140 @@ var
   X, Y: Double;
 begin
   Path := Ramp(3, -1, 0);
-  Expect<Boolean>(InterpolatePath(Path, 3, 1 / 60, X, Y)).ToBe(True);
+  Expect<Boolean>(InterpolatePath(Path, 3, 1 / 60, 0, X, Y)).ToBe(True);
   ExpectNear(X, 5, 1E-9, 'half a sample in');
-  InterpolatePath(Path, 3, -1, X, Y);
+  InterpolatePath(Path, 3, -1, 0, X, Y);
   ExpectNear(X, 0, 1E-9, 'clamped at the start');
-  InterpolatePath(Path, 3, 99, X, Y);
+  InterpolatePath(Path, 3, 99, 0, X, Y);
   ExpectNear(X, 20, 1E-9, 'clamped at the end');
-  Expect<Boolean>(InterpolatePath(Path, 0, 0, X, Y)).ToBe(False);
+  Expect<Boolean>(InterpolatePath(Path, 0, 0, 0, X, Y)).ToBe(False);
+end;
+
+// The sparse track, which is the one this rule exists for. An MCP
+// recording gets a sample at the start, one per `record_status` call and
+// one at the stop, so two samples can be minutes apart — and a lerp
+// between them draws a pointer gliding across the screen for a minute,
+// which is a thing that never happened. It is also what would make the
+// render's frame synthesis fill that minute in, every instant "a
+// different picture".
+procedure TSmoothingTests.TestALongSilenceIsNotDrawnThrough;
+var
+  Path: TSidecarSampleArray;
+  X, Y: Double;
+begin
+  // Two samples a hundred seconds apart, the pointer at opposite ends of
+  // a display.
+  SetLength(Path, 2);
+  Path[0] := Default(TSidecarSample);
+  Path[0].Time := 1000;
+  Path[0].X := 0;
+  Path[0].Y := 0;
+  Path[1] := Default(TSidecarSample);
+  Path[1].Time := 1100;
+  Path[1].X := 1000;
+  Path[1].Y := 800;
+  // With no limit asked for, the old answer: half way across the screen.
+  InterpolatePath(Path, 2, 1050, 0, X, Y);
+  ExpectNear(X, 500, 1E-9, 'unlimited interpolation still slides');
+  // With the limit a real take carries, the last thing actually known.
+  InterpolatePath(Path, 2, 1050, MinInterpolatedGapSeconds, X, Y);
+  ExpectNear(X, 0, 1E-9, 'the held x');
+  ExpectNear(Y, 0, 1E-9, 'the held y');
+  // Held all the way, not eased — so the shape stops changing and the
+  // render stops filling.
+  InterpolatePath(Path, 2, 1099.9, MinInterpolatedGapSeconds, X, Y);
+  ExpectNear(X, 0, 1E-9, 'still held at the far end of the silence');
+  // And it snaps to the next sample when the track speaks again.
+  InterpolatePath(Path, 2, 1100, MinInterpolatedGapSeconds, X, Y);
+  ExpectNear(X, 1000, 1E-9, 'the snap at the next sample');
+  // An ordinary 30 Hz gap is nowhere near the limit and still blends.
+  Path := Ramp(3, -1, 0);
+  InterpolatePath(Path, 3, 1 / 60, MinInterpolatedGapSeconds, X, Y);
+  ExpectNear(X, 5, 1E-9, 'an ordinary gap is still interpolated');
+end;
+
+// The reader's own limit, taken from the header rather than from a
+// constant a caller had to know.
+procedure TSmoothingTests.TestTheLogNamesItsOwnGapLimit;
+var
+  Log: TSidecarLog;
+begin
+  Log := LoadText(FixtureHeader + LineEnding + FixtureAnchor);
+  try
+    // 30 Hz in the fixture's header: fifteen intervals is half a second,
+    // and the floor is the same, so the answer is the floor.
+    ExpectNear(Log.MaxInterpolatedGap, MinInterpolatedGapSeconds, 1E-9,
+      'the limit at 30 Hz');
+  finally
+    Log.Free;
+  end;
+end;
+
+// `sampleHz` is a number in a file, and this format is public — so the
+// two ways a file can be unhelpful about it are pinned rather than
+// assumed. Neither is a hypothetical: a slow rate is what a tool writing
+// one sample a call would honestly declare, and a missing one is what an
+// older writer leaves.
+procedure TSmoothingTests.TestTheGapLimitIsCappedAndFloored;
+var
+  Log: TSidecarLog;
+begin
+  // A header claiming one sample every twenty seconds. Fifteen of those
+  // is five minutes, which would hand a straight line the whole take.
+  Log := LoadText(StringReplace(FixtureHeader, '"sampleHz":30',
+    '"sampleHz":0.05', []) + LineEnding + FixtureAnchor);
+  try
+    ExpectNear(Log.MaxInterpolatedGap, MaxInterpolatedGapSeconds, 1E-9,
+      'an absurdly slow rate is capped');
+  finally
+    Log.Free;
+  end;
+  // A rate between the two bounds is honoured as written: five hertz is
+  // three seconds of interval-multiple, capped to two.
+  Log := LoadText(StringReplace(FixtureHeader, '"sampleHz":30',
+    '"sampleHz":5', []) + LineEnding + FixtureAnchor);
+  try
+    ExpectNear(Log.MaxInterpolatedGap, MaxInterpolatedGapSeconds, 1E-9,
+      'five hertz reaches the cap');
+  finally
+    Log.Free;
+  end;
+  // Ten hertz is 1.5 s, which is inside both bounds and comes through.
+  Log := LoadText(StringReplace(FixtureHeader, '"sampleHz":30',
+    '"sampleHz":10', []) + LineEnding + FixtureAnchor);
+  try
+    ExpectNear(Log.MaxInterpolatedGap, 1.5, 1E-9,
+      'a rate between the bounds is honoured');
+  finally
+    Log.Free;
+  end;
+  // A rate of zero is not a slow sampler, it is a damaged number — and
+  // this reader divides by it. The floor, not a division.
+  Log := LoadText(StringReplace(FixtureHeader, '"sampleHz":30',
+    '"sampleHz":0', []) + LineEnding + FixtureAnchor);
+  try
+    ExpectNear(Log.MaxInterpolatedGap, MinInterpolatedGapSeconds, 1E-9,
+      'a zero rate falls back to the floor');
+  finally
+    Log.Free;
+  end;
+  // A header with no sampleHz field at all reads as the documented
+  // default of 30 Hz. This assertion is here because it did NOT: the
+  // reader's fallback went through `TJSONFloat(30)`, which in Delphi
+  // mode reinterprets the integer's bits as a Double and produced a
+  // denormal of about 1.5E-322 — a header claiming three hundred
+  // sextillionths of a sample a second. Nothing noticed until something
+  // divided by it.
+  Log := LoadText(StringReplace(FixtureHeader, '"sampleHz":30,', '', [])
+    + LineEnding + FixtureAnchor);
+  try
+    ExpectNear(Log.Header.SampleHz, 30, 1E-9,
+      'a missing rate is the documented default');
+    ExpectNear(Log.MaxInterpolatedGap, MinInterpolatedGapSeconds, 1E-9,
+      'and yields the ordinary limit');
+  finally
+    Log.Free;
+  end;
 end;
 
 { ----------------------------------------------------------- availability }
@@ -945,8 +1113,8 @@ begin
     TestAWindowTakeCanHaveNothing);
   Test('post-hoc zoom needs clicks and a capture that was not zooming',
     TestZoomNeedsClicksAndAnUnzoomedCapture);
-  Test('post-hoc zoom is refused for every way the framing could pan',
-    TestZoomRefusesEveryPannedFraming);
+  Test('post-hoc zoom composes with a panned framing and is refused only '
+    + 'by a baked zoom', TestZoomComposesWithAPannedFraming);
   Test('a pointer already in the pixels does not close the zoom',
     TestABakedPointerDoesNotCloseTheZoom);
   Test('no sidecar at all still answers', TestNoLogAtAllIsAnswerable);
@@ -970,16 +1138,16 @@ begin
     Available := AvailableExportEffects(Log);
     Expect<Boolean>(Available.CanDrawCursor).ToBe(True);
     Expect<Boolean>(Available.CursorAlreadyBaked).ToBe(False);
-    // The fixture header pans (bakedFollowMouse). The pointer can still
-    // be drawn — every sample carries the rectangle the capture was
-    // reading at that instant, so the mapping follows the pan — but the
-    // crop cannot, because it is taken against the fixed base rectangle.
-    Expect<Boolean>(Available.CanZoomOnClick).ToBe(False);
+    // The fixture header pans (bakedFollowMouse). Both effects are open:
+    // every sample carries the rectangle the capture was reading at that
+    // instant, so the pointer's mapping follows the pan and the crop is
+    // composed inside it. What the pan closes is only the claim that
+    // NOTHING is baked — the pan itself is, for good.
+    Expect<Boolean>(Available.CanZoomOnClick).ToBe(True);
     Expect<Boolean>(Available.FullyRenderable).ToBe(False);
     Expect<Boolean>(Pos('panned by the capture', Available.Reason) > 0)
       .ToBe(True);
-    Expect<Boolean>(Pos('panned by the capture', Available.ZoomReason) > 0)
-      .ToBe(True);
+    Expect<string>(Available.ZoomReason).ToBe('');
     Expect<string>(Available.CursorReason).ToBe('');
   finally
     Log.Free;
@@ -1025,18 +1193,24 @@ begin
     + '{"k":"button","t":100.1,"x":1,"y":2,"n":0,"d":true}';
 end;
 
-// The regression this exists for: the crop is computed against the
-// recording's BASE rectangle, so a capture that moved its own source
-// rectangle shows something else in every frame and the crop lands on a
-// rectangle the pixels are not showing. All three ways of moving it are
-// pinned, because only the first was checked before and the other two
-// rendered silently wrong — measured, 36 mis-cropped frames on a Follow
-// Mouse take.
-procedure TAvailabilityTests.TestZoomRefusesEveryPannedFraming;
+// The rule, and the change it went through. A capture that ZOOMED itself
+// still closes the post-hoc zoom, because a crop applied to a crop
+// compounds and nothing can take the first one out again. A capture that
+// merely PANNED — Follow Mouse, or a composited window recording's poll —
+// does not: the crop is composed inside the rectangle the capture was
+// reading at that instant (Knips.Export.ZoomTrack.ZoomWalkerSourceRectIn),
+// which is exactly where the live effect puts it.
+//
+// It used to be refused for all three, and for the code that existed the
+// refusal was right: the crop was taken against the recording's base
+// rectangle, so a panned take rendered against a rectangle its pixels
+// were not showing — measured, 36 mis-cropped frames on a Follow Mouse
+// take. Both halves are pinned here so neither can come back.
+procedure TAvailabilityTests.TestZoomComposesWithAPannedFraming;
 var
   Log: TSidecarLog;
 
-  procedure ExpectRefused(const AWhat, AHeader: string);
+  procedure ExpectOffered(const AWhat, AHeader: string; AOffered: Boolean);
   var
     Log: TSidecarLog;
     Available: TSidecarEffectAvailability;
@@ -1046,20 +1220,21 @@ var
       Available := AvailableExportEffects(Log);
       Expect<string>(AWhat + ' -> zoom '
         + BoolToStr(Available.CanZoomOnClick, 'offered', 'refused'))
-        .ToBe(AWhat + ' -> zoom refused');
-      Expect<Boolean>(Available.ZoomReason <> '').ToBe(True);
+        .ToBe(AWhat + ' -> zoom '
+        + BoolToStr(AOffered, 'offered', 'refused'));
+      Expect<Boolean>(Available.ZoomReason <> '').ToBe(not AOffered);
     finally
       Log.Free;
     end;
   end;
 
 begin
-  ExpectRefused('bakedZoomOnClick',
-    AvailabilityHeader('smooth', True, False, False));
-  ExpectRefused('bakedFollowMouse',
-    AvailabilityHeader('smooth', False, True, False));
-  ExpectRefused('bakedWindowFollow',
-    AvailabilityHeader('smooth', False, False, True));
+  ExpectOffered('bakedZoomOnClick',
+    AvailabilityHeader('smooth', True, False, False), False);
+  ExpectOffered('bakedFollowMouse',
+    AvailabilityHeader('smooth', False, True, False), True);
+  ExpectOffered('bakedWindowFollow',
+    AvailabilityHeader('smooth', False, False, True), True);
   // And the control: nothing panned, so the zoom is offered.
   Log := LoadText(AvailabilityHeader('smooth', False, False, False)
     + AvailabilityBody);
@@ -1068,13 +1243,24 @@ begin
   finally
     Log.Free;
   end;
+  // A panned take is still not FULLY renderable — the pan is in its
+  // pixels for good — and the summary says so even though both effects
+  // are open.
+  Log := LoadText(AvailabilityHeader('smooth', False, True, False)
+    + AvailabilityBody);
+  try
+    Expect<Boolean>(AvailableExportEffects(Log).FullyRenderable).ToBe(False);
+    Expect<Boolean>(Pos('panned by the capture',
+      AvailableExportEffects(Log).Reason) > 0).ToBe(True);
+  finally
+    Log.Free;
+  end;
 end;
 
-// The other half of the same rule, and the reason this is
-// HasUntouchedFraming rather than IsRawTake: a pointer that is already in
-// the pixels is part of the picture and scales with the crop exactly as
-// the live effect's would have. An ordinary `knips record` take can still
-// be zoomed after the fact.
+// The other half of the same rule: a pointer that is already in the
+// pixels is part of the picture and scales with the crop exactly as the
+// live effect's would have. An ordinary `knips record` take can still be
+// zoomed after the fact.
 procedure TAvailabilityTests.TestABakedPointerDoesNotCloseTheZoom;
 var
   Log: TSidecarLog;

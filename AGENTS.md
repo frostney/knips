@@ -76,11 +76,12 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | `source/Knips.App.Live.pas` | Follow Mouse: a main-thread animator on the app's 30 Hz timer that moves the stream's `sourceRect`, the recording border and a docked camera. Zoom on Click was the other half and is now a render-time effect |
 | `source/Knips.App.Hotkey.pas` | The global ⌘⇧2 stop hotkey: Carbon `RegisterEventHotKey` + an application-target event handler, no TCC grant |
 | `source/Knips.Recording.LiveMath.pas` | Platform-neutral live-effect arithmetic: rect clamping, dead zone, smoothstep easing, which effects a target can have (tested) |
-| `source/Knips.Recording.Sidecar.pas` | The event sidecar: the public JSON Lines format for a take's pointer track, clicks, geometry and what was baked into its pixels (tested; [docs/event-sidecar.md](docs/event-sidecar.md)) |
+| `source/Knips.Recording.Sidecar.pas` | The event sidecar: the public JSON Lines format for a take's pointer track, clicks, geometry and what was baked into its pixels, and the rule that a silence too long to believe is held rather than interpolated across (tested; [docs/event-sidecar.md](docs/event-sidecar.md)) |
 | `source/Knips.Recording.Recovery.pas` | Finishes off a take whose process died: an unfinished sidecar plus a dead pid, then a passthrough re-mux |
 | `source/Knips.Export.CursorEffect.pas` | The pointer drawn back into a rendered MP4, a GIF or an APNG from the sidecar's smoothed track |
-| `source/Knips.Export.ZoomTrack.pas` | Platform-neutral post-recording Zoom on Click: the live effect's own easing replayed from the sidecar's click track, and the frame crop it comes to (tested) |
-| `source/Knips.Export.Render.pas` | The render pass: raw take + sidecar → deliverable MP4. Video re-encoded through an `AVAssetWriterInputPixelBufferAdaptor`, audio copied sample-for-sample, presentation stamps passed through unchanged |
+| `source/Knips.Export.ZoomTrack.pas` | Platform-neutral post-recording Zoom on Click: the live effect's own easing replayed from the sidecar's click track, composed inside the framing each sample records, and the frame crop it comes to (tested) |
+| `source/Knips.Export.Cadence.pas` | Platform-neutral frame synthesis: where a render may put a frame the capture never made, whether that frame would be a different picture from the one before it, and how much one gap may ever cost (tested) |
+| `source/Knips.Export.Render.pas` | The render pass: raw take + sidecar → deliverable MP4. Video re-encoded through an `AVAssetWriterInputPixelBufferAdaptor`, audio copied sample-for-sample, every source frame's presentation stamp passed through unchanged, extra frames interleaved where an effect is animating |
 | `source/Knips.Export.SizeEstimate.pas` | Pre-export size estimate from the source movie's own density, and the in-flight projection (tested) |
 | `source/Knips.Recording.CursorMath.pas` | Platform-neutral Big Cursor arithmetic: screen point → frame pixel under a live sourceRect, clipped sprite placement, the premultiplied BGRA blit, sprite metrics (tested) |
 | `source/Knips.Recording.CursorOverlay.pas` | Big Cursor: the arrow sprite rendered once on the main thread, composited into each frame's own pixels on the capture queue |
@@ -123,7 +124,10 @@ session `knips export` does) →
 Re-export button) reach it, the same way `Knips.App.Playback` already
 reaches `Knips.Export.Pipeline`. `Knips.Export.ZoomTrack` is neutral and
 sits with `Knips.Recording.LiveMath`, whose arithmetic it replays, plus
-`Knips.Recording.Sidecar`, whose click track it reads.
+`Knips.Recording.Sidecar`, whose click track and framing track it reads.
+`Knips.Export.Cadence` is neutral and depends on nothing at all; both
+`Knips.Export.Render` and `Knips.Export.Pipeline` consume it, so an MP4
+and a GIF fill the same gaps the same way.
 `Knips.App.Hotkey` sits beside the other `Knips.App.*` units and depends
 only on `Knips.App.State` and MacOSAll. `Knips.Recording.CursorOverlay`
 sits beside `Knips.Recording` and consumes `Knips.Recording.CursorMath`
@@ -161,7 +165,11 @@ no `{$IFDEF DARWIN}` at all and are tested on every host.
   movies per take — `<name>-raw.mp4` (the raw take) and `<name>.mp4` (the
   rendered deliverable) — plus a sidecar for each, and never deletes
   either: the raw take is what makes the effects changeable afterwards.
-  A window recording, which no effect can apply to, is written once.
+  A window recording is written once only when it takes no effect at all
+  — no camera, no pointer, no zoom — because that is the only case where
+  ScreenCaptureKit's desktop-independent capture is kept; otherwise it is
+  composited from the display and split like any region take
+  (`WindowTakeNeedsCompositing`).
   `render` builds into `<out>.knips-render-tmp` and renames it into place,
   so a killed render cannot damage an existing deliverable; the recovery
   pass sweeps any temporary a killed render left behind. The

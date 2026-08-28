@@ -23,12 +23,29 @@ unit Knips.Export.ZoomTrack;
 //     rather than at whatever rate ScreenCaptureKit could be reconfigured
 //     at (measured at about 20 Hz — see LiveZoomInSeconds), so the
 //     animation is as smooth as the movie's frame rate;
-//   - Follow Mouse is not part of it. A pan changes which pixels were
-//     read off the screen, so it can only ever be a live effect; a zoom
-//     is a crop of pixels that are already in the file. The window this
-//     zoom crops out of is therefore the recording's base rectangle,
-//     fixed for the whole take — which is exactly what the live
-//     composition reduces to with Follow off.
+//   - Follow Mouse is not replayed, because it cannot be: a pan changes
+//     which pixels were read off the screen, so it is a live effect and
+//     stays baked into the take. A zoom is a crop of pixels that are
+//     already in the file, so it can still be applied — **inside** the
+//     pan, which is exactly where the live composition puts it
+//     (Knips.Recording.LiveMath: base, then window, then source). The
+//     window this zoom crops out of is therefore the rectangle the
+//     capture was reading at that instant, which the sidecar's samples
+//     record; for a take whose framing never moved, that is the base
+//     rectangle for the whole file and the composition reduces to the
+//     simple case.
+//
+// **A panned take is not refused.** It used to be, and the refusal was
+// right for the code that existed: the crop was computed against the
+// base rectangle, so a Follow Mouse take rendered mis-cropped frames.
+// The fix is the composition rather than the refusal — a click still
+// means "show me this, closer", and where the framing happens to be at
+// that instant does not change what the user asked for. What the
+// composition cannot do is put back pixels the pan moved off the
+// captured rectangle, so a zoom whose focus has drifted outside the
+// framing is clamped to the framing's edge (ZoomedSourceRect's own
+// ClampRectInside) rather than reaching for pixels the movie does not
+// have.
 //
 // **The menu-bar band.** The live effect refuses clicks in the strip
 // along the top of the display, because the click that stops a recording
@@ -123,6 +140,42 @@ function ZoomWalkerAdvance(const AWalker: TZoomWalker;
 // the display's own top-left points. Always inside Base.
 function ZoomWalkerSourceRect(const AWalker: TZoomWalker): TLiveRect;
 
+// The same, composed inside AWindow — the rectangle the capture was
+// actually reading at that instant, which for a take whose framing
+// panned is not the base rectangle and changes from frame to frame.
+//
+// Always inside AWindow, so a render can never ask for pixels the movie
+// does not hold; at zoom 1 it *is* AWindow, which is what makes an
+// unzoomed stretch of a panned take a plain copy of its frames.
+function ZoomWalkerSourceRectIn(const AWalker: TZoomWalker;
+  const AWindow: TLiveRect): TLiveRect;
+
+// The rectangle the capture was reading at AMovieSeconds, in the
+// display's own top-left points — the framing a zoom composes inside.
+// The header's base rectangle when the log has no samples to say
+// otherwise, which is also the right answer for a take whose framing
+// never moved and is what the format says stands before the first sample
+// that carries one.
+//
+// **AStale is the important output.** Past the end of the sample track
+// there is no framing to read, and carrying the last one forward is a
+// guess that gets worse the further it goes: a take whose window was
+// still being dragged when the track stopped is cropped against a
+// rectangle it left. That is reachable rather than theoretical — pointer
+// samples are flushed about a second behind, so a take whose process
+// died has a movie that runs past its own track, and crash recovery
+// re-muxes the movie without trimming it to the track's extent.
+// Measured on a real Follow Mouse take with its sidecar truncated at
+// 2.0 s: a 443-pixel mis-crop at 3.8 s, reported as plain success.
+//
+// So the answer past the end is "I do not know" rather than a stale
+// rectangle, and the caller's job is to stop cropping for that stretch
+// rather than to crop wrongly. The boundary is the take's own
+// MaxInterpolatedGap — the same silence this format refuses to draw a
+// straight line through anywhere else.
+function FramingRectAt(const ALog: TSidecarLog; AMovieSeconds: Double;
+  out AStale: Boolean): TLiveRect;
+
 // The whole thing at one instant, walked from the start. The reference
 // definition of the effect — the walker is an optimisation of exactly
 // this, and the suite holds the two against each other.
@@ -143,7 +196,9 @@ function ZoomClicksFromLog(const ALog: TSidecarLog): TZoomClickArray;
 var
   I, Count: Integer;
   Event: TSidecarButtonEvent;
-  Base: TLiveRect;
+  Base, Framing: TLiveRect;
+  Seconds: Double;
+  Stale: Boolean;
 begin
   Result := nil;
   if ALog = nil then
@@ -168,9 +223,21 @@ begin
       Continue;
     if Event.Y < ALog.Header.MenuBarInset then
       Continue;
-    if not LiveRectContains(Base, Event.X, Event.Y) then
+    Seconds := ALog.MovieSeconds(Event.Time);
+    // Inside what the RECORDING WAS SHOWING when the click happened, not
+    // inside the base rectangle: on a take whose framing panned the two
+    // are different rectangles, and a click the viewer can see happen is
+    // a click this effect should answer. For a take that never panned,
+    // the framing IS the base and this is the test it always was.
+    // A click past the end of the track has no framing to be tested
+    // against; the base rectangle stands in, which is what this test was
+    // before there was a framing to compose inside at all.
+    Framing := FramingRectAt(ALog, Seconds, Stale);
+    if Stale or (Framing.Width <= 0) or (Framing.Height <= 0) then
+      Framing := Base;
+    if not LiveRectContains(Framing, Event.X, Event.Y) then
       Continue;
-    Result[Count].Seconds := ALog.MovieSeconds(Event.Time);
+    Result[Count].Seconds := Seconds;
     Result[Count].X := Event.X;
     Result[Count].Y := Event.Y;
     Inc(Count);
@@ -293,8 +360,51 @@ end;
 
 function ZoomWalkerSourceRect(const AWalker: TZoomWalker): TLiveRect;
 begin
-  Result := ZoomedSourceRect(AWalker.Base, EasedScalarValue(AWalker.Zoom),
+  Result := ZoomWalkerSourceRectIn(AWalker, AWalker.Base);
+end;
+
+function ZoomWalkerSourceRectIn(const AWalker: TZoomWalker;
+  const AWindow: TLiveRect): TLiveRect;
+begin
+  Result := ZoomedSourceRect(AWindow, EasedScalarValue(AWalker.Zoom),
     EasedScalarValue(AWalker.FocusX), EasedScalarValue(AWalker.FocusY));
+end;
+
+function FramingRectAt(const ALog: TSidecarLog; AMovieSeconds: Double;
+  out AStale: Boolean): TLiveRect;
+var
+  Sample: TSidecarSample;
+  Last: Double;
+begin
+  AStale := False;
+  Result := Default(TLiveRect);
+  if ALog = nil then
+    Exit;
+  Result := LiveRect(ALog.Header.BaseX, ALog.Header.BaseY,
+    ALog.Header.BaseWidth, ALog.Header.BaseHeight);
+  if not ALog.StateAt(AMovieSeconds, Sample) then
+    Exit;
+  // Past the end of the track by more than one refusable silence. Only
+  // the END is checked: the header's base rectangle is what the format
+  // says stands BEFORE the first sample that carries one, so the start
+  // is answered rather than guessed.
+  if ALog.SampleCount > 0 then
+  begin
+    Last := ALog.RawSamples[ALog.SampleCount - 1].Time - ALog.AnchorHost;
+    if AMovieSeconds - Last > ALog.MaxInterpolatedGap then
+    begin
+      AStale := True;
+      Exit;
+    end;
+  end;
+  // A sample always carries a rectangle — the reader fills it in from
+  // the header and carries the last written value forward — but a
+  // degenerate one would silently divide the crop by zero downstream,
+  // so the base stands in for it.
+  if (Sample.SourceWidth <= 0) or (Sample.SourceHeight <= 0) then
+    Exit;
+  Result := LiveRect(Sample.SourceX, Sample.SourceY, Sample.SourceWidth,
+    Sample.SourceHeight);
 end;
 
 function ZoomSourceRectAt(const ABase: TLiveRect; AFactor,

@@ -54,12 +54,15 @@
   sharp, the room behind them soft. AVFoundation exposes the *system*
   Portrait effect read-only in both of its forms, so this is Knips's own
   pipeline: Vision person segmentation and a CoreImage composite on a
-  serial GCD queue, 11 ms a frame at 640×480 against a 33 ms budget. See
+  serial GCD queue, ~9 ms a frame at 640×480 on an idle machine against a
+  33 ms budget. See
   [Background blur](#background-blur).
-- A window recording with the camera up is captured from the **display**
-  through a rectangle riding the window, because desktop-independent
-  window capture composits that window alone and would leave the camera
-  out of the file (measured). See
+- A window recording is captured from the **display** through a
+  rectangle riding the window whenever there is anything to gain from it
+  — a camera picture-in-picture to composite in, or a post-recording
+  effect to apply — because desktop-independent window capture composits
+  that window alone and its frames have no fixed relationship to the
+  screen the pointer was measured against. See
   [The composited window recording](#the-composited-window-recording).
 - Timing is taken from each sample buffer's presentation stamp; the
   writer's session starts at the first appended frame. This is what makes
@@ -239,12 +242,71 @@ because each is a decision:
   as *requiring* the hint for anything but a QuickTime movie. Verified by
   extracting both tracks to ADTS and comparing: byte-identical, same MD5,
   same 326 879 bytes. A render costs a recording nothing in sound.
-- **Video presentation stamps are copied verbatim**, as `CMTime` rather
-  than as seconds. Measured over a 600-frame take: taking each stamp
-  through a `Double` and back at a 1/600 s timescale moved it by up to
-  1.7 ms; the container's own stamp moves it by exactly zero, all 600
-  frames. That is what keeps the sidecar's clock anchor valid for the
-  rendered file.
+- **Every source frame's presentation stamp is copied verbatim**, as
+  `CMTime` rather than as seconds. Measured over a 600-frame take: taking
+  each stamp through a `Double` and back at a 1/600 s timescale moved it
+  by up to 1.7 ms; the container's own stamp moves it by exactly zero,
+  all 600 frames. That is what keeps the sidecar's clock anchor valid for
+  the rendered file. Frames the render *synthesises* (below) are placed
+  between them, on the same timescale; no source frame is moved, dropped
+  or re-timed by that, and the file's first and last stamps are the
+  take's own.
+- **Frames the capture never made are filled in where an effect is
+  animating.** ScreenCaptureKit delivers a frame when the content changes
+  and not otherwise, and a raw take has no pointer in its pixels — so
+  moving the mouse over a still window produces no frames at all.
+  Measured on a real 8.10 s take: 152 frames, **18.8 a second** against a
+  nominal 30, gaps up to 567 ms, and **one** frame inside the 0.30 s the
+  zoom takes to ease in. A doubling eased across one frame is a
+  jump-cut, and that is what a janky zoom and a teleporting drawn pointer
+  are.
+
+  So the render interleaves. Between two source frames it re-presents the
+  earlier one — the same pixels, which is honest, because nothing on
+  screen changed or there would have been a frame — with the effect
+  evaluated at the intervening instant, on a grid of the take's own
+  nominal frame interval (from the sidecar's `fps`, not from the file's
+  average, which on a sparse take is the wrong number). A synthesised
+  frame is only made when it would be a **different picture** from the
+  one before it: `Knips.Export.Cadence` reduces a frame to the integers
+  that decide it — the crop in whole source pixels, the sprite's landing
+  place in whole output pixels — and skips any instant whose shape
+  matches the last one written. A zoom's *hold* is a constant crop and
+  costs nothing; a still stretch with nothing animating over it stays
+  exactly as sparse as it was captured.
+
+  Measured on that take, same binary, synthesis off and on: 152 → 209
+  frames, one → **seven** frames inside the ease-in, 6.31 MB → 7.56 MB
+  (**+19.8 %**), 2.31 s → 2.88 s of work for an 8.33 s take (0.28× →
+  0.35× realtime). The largest remaining gaps in the output are exactly
+  the stretches where the pointer is motionless and the zoom is not
+  animating. The GIF and APNG pipeline fills the same gaps on its own
+  decimation grid, for the same reason — the delay planner faithfully
+  preserved the sparsity as long delays — and the same take at 20 fps
+  went 108 → 146 frames, 2.44 MB → 3.25 MB.
+
+  **Every number in this section was measured on the recorder as it
+  stands, before the capture-side idle heartbeat.** That heartbeat
+  re-presents the last frame while ScreenCaptureKit is idle, which makes
+  takes dense at the source and will make most of these figures
+  historical: the render will still interleave, but it will rarely find a
+  gap worth filling.
+
+  **And this fills only gaps BETWEEN captured frames.** A take whose
+  screen went static loses its tail at capture time — there is no later
+  frame to interleave towards. Measured on a real take: 17.54 s of
+  recording, 88 frames, a movie **4.26 s** long, three of its four clicks
+  past the end of the file; and a controlled repro of a wholly static
+  5.67 s recording produced **one frame and a movie spanning 0.000 s**.
+  Nothing in the render can invent those pixels. That is what the
+  heartbeat is for, and the render is not presented as the whole fix.
+
+  **A gap is bounded.** One gap may be filled to at most
+  `MaxCadenceStepsPerGap` frames (1800, a minute at 30 Hz) — the same
+  bound in both paths, expressed as instants by `CadenceTimes` for the
+  MP4 render and as grid slots by `CadenceFillLimit` for the GIF and
+  APNG pipeline, so a damaged movie with an hour between two stamps
+  cannot ask either for a hundred thousand frames.
 - **Audio content is bit-identical; an audio track's start offset can
   move by up to one 1/600 s tick.** The packets themselves are copied, so
   the codec data, the packet count and every stamp *relative to the
@@ -325,18 +387,59 @@ take moves the way the movie beside it moves. `knips render` and
 is what the playback window's Effects control writes into
 `KnipsEffectZoom` and `KnipsEffectCursor`.
 
-**The zoom needs an untouched framing, and that is checked.** The crop is
-taken against the recording's *base* rectangle, so any capture that moved
-its own `sourceRect` — a live zoom, a Follow Mouse pan, or a composited
-window recording's poll — shows a different rectangle in every frame and
-the crop would land on one the pixels are not showing. `HasUntouchedFraming`
-is that question and `AvailableExportEffects` asks it; before it did, a
-Follow Mouse take rendered 36 silently mis-cropped frames. A pointer
-already baked into the pixels does *not* close the zoom — it is part of
-the picture and scales with the crop exactly as the live effect's would
-have — which is why the test is `HasUntouchedFraming` and not
-`IsRawTake`, and why an ordinary `knips record` take can still be zoomed
-after the fact.
+**The zoom composes with the framing the capture recorded.** The crop
+used to be taken against the recording's *base* rectangle, which is only
+what the frames show when the capture never moved its own `sourceRect` —
+so a Follow Mouse take, or a composited window recording's poll, rendered
+against a rectangle its pixels were not showing (measured: 36 silently
+mis-cropped frames). The zoom was then refused for those takes, and the
+refusal was right for the arithmetic that existed.
+
+It is the arithmetic that changed. Every sample records the rectangle the
+capture was reading at that instant, so the crop is taken **inside** that
+rectangle — `ZoomWalkerSourceRectIn`, fed by `FramingRectAt` — which is
+exactly where the live composition puts it: base, then window (the pan),
+then source (the zoom). At zoom 1 the composition is the identity on
+whatever window it is given, so an unzoomed stretch of a panned take is
+still a plain copy of its frames. A focus point the pan has drifted away
+from is **clamped** to the framing's edge rather than refused: the crop
+can never reach for pixels the movie does not hold.
+
+Proved at pixel level on a real Follow Mouse take (region 868×550 at
+(732, 268), framing panned to (627, 281) by the time of the probe): the
+rendered frame half a second after a click matched the predicted crop of
+the raw frame at **SSIM 0.9965**, against **0.8636** for the same frame
+cropped against the base rectangle. On a composited window take with a
+click outside the base rectangle and inside the panned one: **0.9925**
+against **0.6325**.
+
+**Where the track stops, the crop stops.** The framing is only as good as
+the sample that names it, and a movie can run past its own sidecar:
+pointer samples are flushed about a second behind, and crash recovery
+re-muxes a dead take's movie without trimming it to the track's extent.
+Carrying the last framing forward then crops every one of those frames
+against a rectangle the capture had already left — measured on the same
+Follow Mouse take with its sidecar truncated at 3.4 s, the framing it
+really had 0.8 s later was **317 output pixels** away, and the render
+reported plain success. So `FramingRectAt` reports staleness past the
+last sample, on the same boundary this format refuses to interpolate a
+pointer across (`TSidecarLog.MaxInterpolatedGap` — fifteen sample
+intervals, floored at half a second), and a frame it cannot place is
+passed through **whole** rather than cropped against a guess, with the
+count and the reason in the report. Showing everything that was captured
+is the one answer that cannot be wrong. The start of the track needs no
+such rule: the header's base rectangle is what the format says stands
+before the first sample that carries one.
+
+So `AvailableExportEffects` now refuses the zoom for one reason only — a
+capture that was **already zooming**, where a crop applied to a crop
+compounds into a zoom nobody chose and nothing can take the first one out
+again. A pointer already baked into the pixels does not close it either:
+it is part of the picture and scales with the crop exactly as the live
+effect's would have, so an ordinary `knips record` take can still be
+zoomed after the fact. `HasUntouchedFraming` survives as the cheaper
+question a render asks itself — whether the framing has to be looked up
+per frame at all — and as half of `IsRawTake`.
 
 **Post-hoc Zoom on Click is a replay, not a new effect.** It is built out
 of `Knips.Recording.LiveMath` — the same smoothstep, the same 2× factor,
@@ -1472,9 +1575,9 @@ capture.
 
 ### The composited window recording
 
-So the camera is put in the file the only way it can be: **when the
-camera is up, a window recording captures the DISPLAY instead**, with a
-source rectangle sitting exactly on that window's frame.
+So the camera is put in the file the only way it can be: **a window
+recording captures the DISPLAY instead**, with a source rectangle sitting
+exactly on that window's frame.
 `TAppController.CompositeWindowForPending` rewrites the pending request
 before anything else reads it — the window's AppKit frame from
 `CGWindowListCopyWindowInfo`, the display holding its centre from
@@ -1490,12 +1593,34 @@ exactly 480 × 360 — the whole stand-in, nothing clipped. Same file
 dimensions either way (1000 × 1754, the window's frame at scale 2), so
 the writer really is sized from the window's initial frame.
 
+**And it is not only the camera.** A desktop-independent window capture
+is the one target no post-recording effect can ever reach: its frames are
+a picture of something that moves under the recorder with no way to find
+out, so no pointer can be drawn back into them and no crop can be
+computed for them. That is what a user meets as *effects do not work on
+window recordings* — and before this, `Record Window` wrote a single
+movie with the system pointer baked in and every effect off.
+
+A composited one is a display take in every way that matters. The samples
+map (`target:"display"`), the poll writes the framing into the sidecar's
+own per-sample source rectangles, `bakedWindowFollow:true` says the
+framing moved, and the zoom composes inside that framing
+([the render pass](#the-render-pass)). So a window recording is written
+as a raw take plus a rendered deliverable exactly as a region recording
+is, and gets the same drawn pointer and the same Zoom on Click.
+
 **The trade is stated, not hidden.** A composited window recording
 captures whatever is in front of the window: a notification, a menu
 pulled down over it, another app dragged across. The desktop-independent
-path has none of that and is still what a recording with the camera
-**off** gets, so the cost is paid only by the user who asked for a
-picture-in-picture — which is the only user it buys anything for.
+path has none of that, and it is still what a window take that wants
+**nothing** gets — no camera, no pointer, no zoom.
+`WindowTakeNeedsCompositing` (platform-neutral, tested) is where that
+line is drawn, and the principle behind it is that the cost is paid only
+where it buys something. With the app's own defaults the pointer is
+drawn, so an ordinary `Record Window` is composited; a user who switches
+the pointer off in the Effects control and leaves the zoom off keeps the
+cleaner capture, and loses nothing by it because there would be nothing
+to render.
 
 **One display, and it is checked every tick.** The window's frame comes
 back in AppKit's *global* space, so the flip into a display's own points
@@ -1814,6 +1939,47 @@ So the effect is built, in `Knips.App.Camera.Blur`:
                  │
                  └─▶ CIContext.createCGImage ─▶ the window's own CALayer
 ```
+
+**How strong the blur is, and why that number.** `CIGaussianBlur` runs at
+`inputRadius` 28, in **source** pixels — and the source is not what
+anybody looks at, which is the whole reason for the number. The feed is
+640×480 and the window is 240×180 points, so on a 2× display the
+composited frame is shown at 480×360: every source pixel of blur arrives
+on screen as 0.75 of a backing pixel. 28 is a twenty-third of the frame
+width and about 10.5 points once that scaling is done.
+
+Measured on a real 640×480 frame through this exact chain, as the mean
+absolute luma difference between pixels 1, 4 and 16 apart — the last of
+which is the scale at which a room's objects read as objects — expressed
+as a share of the unblurred source's own:
+
+| radius | 1 px | 4 px | 16 px | |
+| --- | --- | --- | --- | --- |
+| 12 | 4.74 % | 11.15 % | 31.74 % | the old value |
+| 24 | 3.10 % | 7.28 % | 21.14 % | |
+| **28** | **2.81 %** | **6.60 %** | **19.21 %** | shipped |
+| 40 | 2.33 % | 5.46 % | 16.02 % | |
+
+So the kernel is 2.33× wider than it was and takes out two fifths of the
+mid-scale structure 12 left behind.
+
+**It costs nothing measurable, and the way to see that is the spread
+rather than the means.** `knips probe`, three runs at each radius on an
+idle machine: **9.1 / 9.4 / 9.8 ms** a frame at radius 28 against
+**7.6 / 9.3 / 9.8 ms** at radius 12. The ranges overlap almost entirely,
+and Vision is ~78 % of each — the radius is not what the frame costs. The
+figure moves with what else the machine is doing far more than with the
+radius: the same probe on a loaded machine reports 15–19 ms at *both*
+radii. Quote a range and the machine's state, never a single number; the
+only claim worth making is that both are far under the 33 ms budget.
+
+Past about 40 the curve flattens and more radius stops buying softness
+and starts buying halo, because the background is blurred from the
+*whole* frame — the person included — so a wider kernel smears more of
+the person's own colour out to where a Fast-quality mask's edge is.
+Getting past that is not a bigger number: it is a feathered mask, or a
+background inpainted before it is blurred, which is what the system
+Portrait effect does and what this would have to become to go further.
 
 **Two display paths, one window.** The content view hosts a plain root
 `CALayer` that carries the corner radius, the mask and the aspect-fill

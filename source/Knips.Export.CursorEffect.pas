@@ -103,6 +103,9 @@ type
     procedure ReleasePixels;
     function RenderSprite(APixelsPerPoint: Double;
       out AError: string): Boolean;
+    function PlanAt(AWidth, AHeight: Integer; ASeconds: Double;
+      AHasSource: Boolean; ASourceX, ASourceY, ASourceWidth,
+      ASourceHeight: Double; out APlan: TCursorBlitPlan): Boolean;
   public
     constructor Create;
     destructor Destroy; override;
@@ -144,6 +147,21 @@ type
     procedure DrawIntoPixels(APixels: Pointer; ABytesPerRow, AWidth,
       AHeight: Integer; ASeconds: Double; AHasSource: Boolean;
       ASourceX, ASourceY, ASourceWidth, ASourceHeight: Double);
+    // Where the sprite would land, without drawing it: the top-left of
+    // the copied area in output pixels, and False when nothing would be
+    // drawn at all. The arguments are DrawIntoPixels', because it is the
+    // same placement — this is that call with the blit taken off the
+    // end.
+    //
+    // It exists for the render's frame synthesis
+    // (Knips.Export.Cadence): deciding whether a frame between two
+    // captured ones would be a *different picture* means asking where
+    // the pointer lands at that instant, in the whole pixels the blit
+    // uses, and asking it without paying for a blit that may not
+    // happen.
+    function SpritePlacement(AWidth, AHeight: Integer; ASeconds: Double;
+      AHasSource: Boolean; ASourceX, ASourceY, ASourceWidth,
+      ASourceHeight: Double; out AX, AY: Integer): Boolean;
     // Zeroes the frame counters. A GIF export walks the movie twice — the
     // palette has to be chosen before the first frame is written — and
     // both passes draw the pointer, so the encode pass calls this to make
@@ -454,16 +472,19 @@ begin
   FOffFrameFrames := 0;
 end;
 
-procedure TExportCursor.DrawIntoPixels(APixels: Pointer; ABytesPerRow,
-  AWidth, AHeight: Integer; ASeconds: Double; AHasSource: Boolean;
-  ASourceX, ASourceY, ASourceWidth, ASourceHeight: Double);
+// The placement, shared by the draw and by the query that only wants to
+// know where the sprite would go. False when there is nothing to place.
+function TExportCursor.PlanAt(AWidth, AHeight: Integer; ASeconds: Double;
+  AHasSource: Boolean; ASourceX, ASourceY, ASourceWidth,
+  ASourceHeight: Double; out APlan: TCursorBlitPlan): Boolean;
 var
   State: TSidecarSample;
   Mapping: TCursorFrameMapping;
-  Plan: TCursorBlitPlan;
   X, Y: Double;
 begin
-  if not FReady or (FLog = nil) or (APixels = nil) then
+  Result := False;
+  APlan := Default(TCursorBlitPlan);
+  if not FReady or (FLog = nil) then
     Exit;
   if (AWidth <= 0) or (AHeight <= 0) then
     Exit;
@@ -472,8 +493,12 @@ begin
   // that was never read. The position from the smoothed one.
   if not FLog.StateAt(ASeconds, State) then
     Exit;
+  // The take's own limit on how long a silence may be drawn through; see
+  // Knips.Recording.Sidecar.InterpolatePath. A sparse track holds the
+  // last known position rather than sliding the sprite across the screen
+  // between two samples minutes apart.
   if not InterpolatePath(FSmoothed, FSmoothedCount,
-    FLog.AnchorHost + ASeconds, X, Y) then
+    FLog.AnchorHost + ASeconds, FLog.MaxInterpolatedGap, X, Y) then
     Exit;
   if not AHasSource then
   begin
@@ -484,8 +509,22 @@ begin
   end;
   Mapping := CursorFrameMapping(AWidth, AHeight, ASourceX, ASourceY,
     ASourceWidth, ASourceHeight);
-  Plan := PlanCursorBlit(Mapping, X, Y, FSpriteWidth, FSpriteHeight,
+  APlan := PlanCursorBlit(Mapping, X, Y, FSpriteWidth, FSpriteHeight,
     FHotSpotX, FHotSpotY);
+  Result := True;
+end;
+
+procedure TExportCursor.DrawIntoPixels(APixels: Pointer; ABytesPerRow,
+  AWidth, AHeight: Integer; ASeconds: Double; AHasSource: Boolean;
+  ASourceX, ASourceY, ASourceWidth, ASourceHeight: Double);
+var
+  Plan: TCursorBlitPlan;
+begin
+  if APixels = nil then
+    Exit;
+  if not PlanAt(AWidth, AHeight, ASeconds, AHasSource, ASourceX, ASourceY,
+    ASourceWidth, ASourceHeight, Plan) then
+    Exit;
   if not Plan.Visible then
   begin
     Inc(FOffFrameFrames);
@@ -494,6 +533,25 @@ begin
   BlitPremultipliedBgra(APixels, ABytesPerRow, FPixels, FSpriteBytesPerRow,
     Plan);
   Inc(FDrawnFrames);
+end;
+
+function TExportCursor.SpritePlacement(AWidth, AHeight: Integer;
+  ASeconds: Double; AHasSource: Boolean; ASourceX, ASourceY, ASourceWidth,
+  ASourceHeight: Double; out AX, AY: Integer): Boolean;
+var
+  Plan: TCursorBlitPlan;
+begin
+  AX := 0;
+  AY := 0;
+  Result := False;
+  if not PlanAt(AWidth, AHeight, ASeconds, AHasSource, ASourceX, ASourceY,
+    ASourceWidth, ASourceHeight, Plan) then
+    Exit;
+  if not Plan.Visible then
+    Exit;
+  AX := Plan.DestinationX;
+  AY := Plan.DestinationY;
+  Result := True;
 end;
 
 procedure TExportCursor.DrawInto(var AImage: TBgraImage; ASeconds: Double);

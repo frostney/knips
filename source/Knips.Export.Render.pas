@@ -17,10 +17,40 @@ unit Knips.Export.Render;
 // BGRA (Knips.Export.MovieReader); each frame is cropped and scaled by
 // the post-hoc zoom (Knips.Export.ZoomTrack) and has the pointer
 // composited into it (Knips.Export.CursorEffect); AVAssetWriter encodes
-// H.264 through an AVAssetWriterInputPixelBufferAdaptor. Presentation
-// stamps are copied across unchanged, so the rendered file's timeline is
-// the raw take's timeline and the sidecar's clock anchor is still exact
-// for it.
+// H.264 through an AVAssetWriterInputPixelBufferAdaptor. Every source
+// frame keeps its own presentation stamp exactly, so the rendered file's
+// timeline is the raw take's timeline and the sidecar's clock anchor is
+// still exact for it.
+//
+// **Frames the capture never made.** ScreenCaptureKit delivers a frame
+// when the content changes and not otherwise, and a raw take has no
+// pointer in its pixels — so moving the mouse over a still window
+// produces no frames at all. Measured on a real 8.10 s take, on the
+// recorder as it stands today: 152 frames, 18.8 a second against a
+// nominal 30, and **one** frame inside the 0.30 s the zoom takes to ease
+// in. A doubling eased across one frame is a jump-cut, and that is what
+// a janky zoom and a teleporting drawn pointer are.
+//
+// So the render *interleaves*. Between two source frames it re-presents
+// the earlier one — the same pixels, which is honest, because nothing on
+// screen changed or there would have been a frame — with the effect
+// evaluated at the intervening instant, on a grid of the take's own
+// nominal frame interval. A synthesised frame is only made when it would
+// be a **different picture** from the one before it
+// (Knips.Export.Cadence), so a zoom's hold costs nothing, a still
+// stretch with nothing animating over it stays exactly as sparse as it
+// was captured, and only the moving stretches are filled in. Source
+// frames are never moved, never dropped and never re-timed, and a render
+// with nothing to apply is still a byte copy.
+//
+// **It fills only BETWEEN captured frames.** A take whose screen went
+// static still loses its tail: the capture stopped delivering, so there
+// is no later frame to interleave towards and nothing here can invent
+// one. Measured on a real take: 17.54 s of recording, 88 frames, a movie
+// 4.26 s long, with three of its four clicks past the end of the file.
+// That is a recorder-side defect, and its fix is a capture-side
+// heartbeat that re-presents the last frame while ScreenCaptureKit is
+// idle; this pass is the other half and not the whole of it.
 //
 // **Audio is copied, not re-encoded.** Every audio track of the source
 // gets its own AVAssetReaderTrackOutput with *nil* output settings (the
@@ -87,6 +117,7 @@ uses
 
   CocoaAll,
   Knips.Capture.CoreMedia,
+  Knips.Export.Cadence,
   Knips.Export.CursorEffect,
   Knips.Export.MovieReader,
   Knips.Export.MovieWriter,
@@ -124,10 +155,25 @@ type
     // and Note are how a caller finds out.
     CursorDrawn: Boolean;
     CursorFrames: Int64;
+    // Frames that were never captured, made by re-presenting the last
+    // source frame with the effect evaluated at a new instant
+    // (Knips.Export.Cadence). Zero when every effect window in the take
+    // already had frames at the nominal rate — which a busy screen
+    // produces and a still one does not.
+    SynthesizedFrames: Int64;
+    // The cadence they were made at, in frames per second: the take's
+    // own configured rate. Zero when nothing was synthesised.
+    SynthesisFramesPerSecond: Integer;
     ZoomApplied: Boolean;
     // Frames whose crop was not the whole frame; zero on a take where
     // nothing was clicked even with the zoom switched on.
     ZoomedFrames: Int64;
+    // Frames the zoom was asked for and could not be applied to, because
+    // the sample track had nothing to say about what they were showing —
+    // a take whose movie runs past its own sidecar. Passed through whole
+    // rather than cropped against a stale rectangle; never zero without
+    // Note saying so.
+    UnframedFrames: Int64;
     UsableClicks: Integer;
     Note: string;
     // True when the render was a byte copy because nothing applied.
@@ -159,6 +205,11 @@ type
     FClicks: TZoomClickArray;
     FWalker: TZoomWalker;
     FBase: TLiveRect;
+    // Whether the capture moved its own source rectangle during the
+    // take (Follow Mouse, or a composited window recording's poll).
+    // Decides whether the framing has to be looked up per frame or is
+    // the base rectangle for the whole file.
+    FFramingPanned: Boolean;
     // The audio side: one asset, one reader, one output and one input per
     // audio track of the source.
     FAudioAsset: AVAsset;
@@ -172,8 +223,42 @@ type
     FEstimatedFrames: Int64;
     // Where the movie is built before it is renamed onto FOutputPath.
     FTempPath: string;
+    // The frame synthesis (Knips.Export.Cadence). FHeldBuffer is the
+    // last source frame, retained past the reader's own lifetime for it
+    // — the reader's buffer is only valid until the next NextFrame, and
+    // a synthesised frame is made from the frame *before* the one that
+    // has just been read.
+    FCadenceSeconds: Double;
+    FHeldBuffer: CVPixelBufferRef;
+    FHeldSeconds: Double;
+    FHeldTimeScale: Int32;
+    FLastValue: Int64;
+    FLastShape: TRenderedFrameShape;
+    FHasLastShape: Boolean;
     function LoadSidecar: Boolean;
     procedure PrepareEffects;
+    // The shape one frame would come out as at ASeconds, given that the
+    // pixels behind it do not change: the crop and where the pointer
+    // lands. Advances the zoom walk, which is monotonic, so it must be
+    // called in increasing time order — which is what the frame loop
+    // does.
+    function ShapeAt(ASourceWidth, ASourceHeight: Integer;
+      ASeconds: Double): TRenderedFrameShape;
+    // What the whole frame shows at ASeconds, in the display's own
+    // top-left points: the base rectangle for a take whose framing never
+    // moved, and the sample track's own rectangle for one that panned.
+    // False when the track has nothing to say about that instant, which
+    // is the one case a zoom must not crop through — see FramingRectAt.
+    function FramingAt(ASeconds: Double; out ARect: TLiveRect): Boolean;
+    procedure HoldFrame(const AFrame: TMovieReaderFrame);
+    procedure ReleaseHeldFrame;
+    // The frames that belong between the held one and the next source
+    // frame, if any do.
+    function SynthesizeUpTo(ANextSeconds: Double;
+      out AError: string): Boolean;
+    // Blocks until the encoder will take another frame, moving audio
+    // while it waits. False only when the writer has failed.
+    function AwaitVideoInput: Boolean;
     function CopyRawTake(out AError: string): Boolean;
     // Renames the finished temporary onto the deliverable's name. The one
     // instant at which the old file stops being the answer.
@@ -188,7 +273,8 @@ type
     function OpenWriter(out AError: string): Boolean;
     function AddAudioTracks(out AError: string): Boolean;
     function RenderFrames(out AError: string): Boolean;
-    function RenderOneFrame(const AFrame: TMovieReaderFrame;
+    function RenderOneFrame(APixelBuffer: CVPixelBufferRef;
+      const ATime: CMTime; ASeconds: Double;
       out AError: string): Boolean;
     function PumpAudio: Boolean;
     function FinishWriter(out AError: string): Boolean;
@@ -336,6 +422,7 @@ procedure TRenderSession.Teardown;
 var
   I: Integer;
 begin
+  ReleaseHeldFrame;
   for I := 0 to High(FAudioOutputs) do
     if FAudioOutputs[I] <> nil then
     begin
@@ -411,6 +498,7 @@ begin
   Available := AvailableExportEffects(FLog);
   FBase := LiveRect(FLog.Header.BaseX, FLog.Header.BaseY,
     FLog.Header.BaseWidth, FLog.Header.BaseHeight);
+  FFramingPanned := not HasUntouchedFraming(FLog.Header);
 
   if FEffects.ZoomOnClick then
   begin
@@ -809,7 +897,14 @@ end;
 // pixels by ZoomFrameCrop, and a crop that is the whole frame is copied
 // rather than resampled — a scale from a size to itself is not free and
 // is not lossless either.
-function TRenderSession.RenderOneFrame(const AFrame: TMovieReaderFrame;
+//
+// The pixels and the stamp are separate arguments rather than one
+// TMovieReaderFrame because a synthesised frame is the *held* frame's
+// pixels at a stamp of the render's own choosing; everything below is
+// the same either way, which is the property that makes the two kinds of
+// frame indistinguishable in the output.
+function TRenderSession.RenderOneFrame(APixelBuffer: CVPixelBufferRef;
+  const ATime: CMTime; ASeconds: Double;
   out AError: string): Boolean;
 var
   Status: CVReturn;
@@ -817,7 +912,8 @@ var
   SourceBase, DestinationBase: Pointer;
   SourceStride, DestinationStride, SourceWidth, SourceHeight, Y: Integer;
   Crop: TZoomCrop;
-  Source: TLiveRect;
+  Source, Framing: TLiveRect;
+  FramingKnown: Boolean;
   From, Onto: vImage_Buffer;
   ScaleError: clong;
   Pool: CVPixelBufferPoolRef;
@@ -839,13 +935,13 @@ begin
     Exit;
   end;
   try
-    Status := CVPixelBufferLockBaseAddress(AFrame.PixelBuffer,
+    Status := CVPixelBufferLockBaseAddress(APixelBuffer,
       kCVPixelBufferLock_ReadOnly);
     if Status <> kCVReturn_Success then
     begin
       AError := Format('could not read the frame at %.2fs '
         + '(CVPixelBufferLockBaseAddress returned %d)',
-        [AFrame.Seconds, Status]);
+        [ASeconds, Status]);
       Exit;
     end;
     try
@@ -856,18 +952,18 @@ begin
         Exit;
       end;
       try
-        SourceBase := CVPixelBufferGetBaseAddress(AFrame.PixelBuffer);
+        SourceBase := CVPixelBufferGetBaseAddress(APixelBuffer);
         SourceStride := Integer(CVPixelBufferGetBytesPerRow(
-          AFrame.PixelBuffer));
-        SourceWidth := Integer(CVPixelBufferGetWidth(AFrame.PixelBuffer));
-        SourceHeight := Integer(CVPixelBufferGetHeight(AFrame.PixelBuffer));
+          APixelBuffer));
+        SourceWidth := Integer(CVPixelBufferGetWidth(APixelBuffer));
+        SourceHeight := Integer(CVPixelBufferGetHeight(APixelBuffer));
         DestinationBase := CVPixelBufferGetBaseAddress(Destination);
         DestinationStride := Integer(CVPixelBufferGetBytesPerRow(
           Destination));
         if (SourceBase = nil) or (DestinationBase = nil) then
         begin
           AError := Format('a frame at %.2fs has no pixels',
-            [AFrame.Seconds]);
+            [ASeconds]);
           Exit;
         end;
 
@@ -875,13 +971,43 @@ begin
         Crop.Width := SourceWidth;
         Crop.Height := SourceHeight;
         Crop.Identity := True;
-        Source := FBase;
-        if FReport.ZoomApplied then
+        // The whole frame shows the rectangle the capture was READING at
+        // this instant, which on a panned take is not the base one. The
+        // zoom crops inside it — the live effect's own composition, base
+        // then window then source (Knips.Recording.LiveMath).
+        //
+        // When the track cannot say what this frame was showing, the
+        // frame is passed through WHOLE rather than cropped against a
+        // guess: a crop is only as good as the rectangle it is measured
+        // from, and showing everything that was captured is the one
+        // answer that cannot be wrong.
+        //
+        // The POINTER is handed the same verdict, and that is the part
+        // that is easy to get wrong. Past the end of the track the only
+        // rectangle this function can name is the header's base one —
+        // which for a panned take is not what the frame shows, and
+        // forcing it on the sprite lands the pointer somewhere it never
+        // was (measured on a truncated take: 257 x 241 output pixels
+        // out). So the sprite is placed with AHasSource False, which
+        // falls back to the last rectangle the SAMPLE TRACK actually
+        // holds — the same "hold the last thing known" the interpolator
+        // does with position, and the same answer the GIF and APNG
+        // pipeline reaches by leaving its crop off.
+        FramingKnown := FramingAt(ASeconds, Framing);
+        Source := Framing;
+        if FReport.ZoomApplied and FramingKnown then
         begin
-          FWalker := ZoomWalkerAdvance(FWalker, FClicks, AFrame.Seconds);
-          Source := ZoomWalkerSourceRect(FWalker);
-          Crop := ZoomFrameCrop(SourceWidth, SourceHeight, FBase, Source);
+          FWalker := ZoomWalkerAdvance(FWalker, FClicks, ASeconds);
+          Source := ZoomWalkerSourceRectIn(FWalker, Framing);
+          Crop := ZoomFrameCrop(SourceWidth, SourceHeight, Framing,
+            Source);
         end;
+        // Counted whether or not a zoom was asked for. A frame that
+        // could not be placed is a frame that could not be placed, and
+        // under the app's own defaults — pointer on, zoom off — this was
+        // the one path that mis-drew in silence.
+        if not FramingKnown then
+          Inc(FReport.UnframedFrames);
 
         if Crop.Identity then
         begin
@@ -909,7 +1035,7 @@ begin
           begin
             AError := Format('scaling the frame at %.2fs failed '
               + '(vImageScale_ARGB8888 returned %d)',
-              [AFrame.Seconds, Int64(ScaleError)]);
+              [ASeconds, Int64(ScaleError)]);
             Exit;
           end;
           Inc(FReport.ZoomedFrames);
@@ -920,14 +1046,14 @@ begin
         // picture rather than inside it.
         if FCursor <> nil then
           FCursor.DrawIntoPixels(DestinationBase, DestinationStride,
-            FReport.PixelWidth, FReport.PixelHeight, AFrame.Seconds,
-            FReport.ZoomApplied, Source.X, Source.Y, Source.Width,
+            FReport.PixelWidth, FReport.PixelHeight, ASeconds,
+            FramingKnown, Source.X, Source.Y, Source.Width,
             Source.Height);
       finally
         CVPixelBufferUnlockBaseAddress(Destination, 0);
       end;
     finally
-      CVPixelBufferUnlockBaseAddress(AFrame.PixelBuffer,
+      CVPixelBufferUnlockBaseAddress(APixelBuffer,
         kCVPixelBufferLock_ReadOnly);
     end;
 
@@ -936,10 +1062,10 @@ begin
     // exactly, and so what keeps the sidecar's clock anchor valid for it.
     if not AVAssetWriterInputPixelBufferAdaptor(FAdaptor)
       .AppendPixelBuffer_withPresentationTime(Destination,
-      AFrame.Time) then
+      ATime) then
     begin
       AError := Format('the encoder refused the frame at %.2fs',
-        [AFrame.Seconds]);
+        [ASeconds]);
       if FWriter.error <> nil then
         AError := AError + ': '
           + string(FWriter.error.localizedDescription.UTF8String);
@@ -949,6 +1075,149 @@ begin
     Result := True;
   finally
     CVPixelBufferRelease(Destination);
+  end;
+end;
+
+// What one frame would come out as at ASeconds, reduced to the integers
+// that decide it. The zoom walk is advanced here and again in
+// RenderOneFrame; advancing to a time it has already reached is a no-op,
+// which is what makes calling it twice safe and what makes this a query
+// rather than a second copy of the effect.
+function TRenderSession.ShapeAt(ASourceWidth, ASourceHeight: Integer;
+  ASeconds: Double): TRenderedFrameShape;
+var
+  Crop: TZoomCrop;
+  Source, Framing: TLiveRect;
+  FramingKnown: Boolean;
+begin
+  Result := Default(TRenderedFrameShape);
+  Crop := Default(TZoomCrop);
+  Crop.Width := ASourceWidth;
+  Crop.Height := ASourceHeight;
+  Crop.Identity := True;
+  FramingKnown := FramingAt(ASeconds, Framing);
+  Source := Framing;
+  if FReport.ZoomApplied and FramingKnown then
+  begin
+    FWalker := ZoomWalkerAdvance(FWalker, FClicks, ASeconds);
+    Source := ZoomWalkerSourceRectIn(FWalker, Framing);
+    Crop := ZoomFrameCrop(ASourceWidth, ASourceHeight, Framing, Source);
+  end;
+  Result.CropX := Crop.X;
+  Result.CropY := Crop.Y;
+  Result.CropWidth := Crop.Width;
+  Result.CropHeight := Crop.Height;
+  // The same AHasSource the draw will use, or the dedupe would agree
+  // with a frame nobody is going to render.
+  if FCursor <> nil then
+    Result.HasCursor := FCursor.SpritePlacement(FReport.PixelWidth,
+      FReport.PixelHeight, ASeconds, FramingKnown, Source.X, Source.Y,
+      Source.Width, Source.Height, Result.CursorX, Result.CursorY);
+end;
+
+function TRenderSession.FramingAt(ASeconds: Double;
+  out ARect: TLiveRect): Boolean;
+var
+  Stale: Boolean;
+begin
+  ARect := FBase;
+  // A take whose framing never moved shows the base rectangle for the
+  // whole file, which the header states outright — there is no track to
+  // run past and nothing to go stale.
+  if not FFramingPanned then
+    Exit(True);
+  ARect := FramingRectAt(FLog, ASeconds, Stale);
+  if (ARect.Width <= 0) or (ARect.Height <= 0) then
+  begin
+    ARect := FBase;
+    Exit(False);
+  end;
+  Result := not Stale;
+end;
+
+procedure TRenderSession.ReleaseHeldFrame;
+begin
+  if FHeldBuffer <> nil then
+  begin
+    CVPixelBufferRelease(FHeldBuffer);
+    FHeldBuffer := nil;
+  end;
+end;
+
+// The reader's buffer is only valid until the next NextFrame, and a
+// synthesised frame is made from the frame *before* the one that has
+// just been read — so it is retained here rather than borrowed. The
+// decoder vends from a pool and would otherwise recycle it under us.
+procedure TRenderSession.HoldFrame(const AFrame: TMovieReaderFrame);
+begin
+  ReleaseHeldFrame;
+  FHeldBuffer := CVPixelBufferRetain(AFrame.PixelBuffer);
+  FHeldSeconds := AFrame.Seconds;
+  FHeldTimeScale := AFrame.Time.timescale;
+  FLastValue := AFrame.Time.value;
+end;
+
+function TRenderSession.AwaitVideoInput: Boolean;
+begin
+  while not FVideoInput.isReadyForMoreMediaData do
+  begin
+    if FWriter.status = AVAssetWriterStatusFailed then
+      Exit(False);
+    if not PumpAudio then
+      CFRunLoopRunInMode(kCFRunLoopDefaultMode, IdleSliceSeconds, False);
+  end;
+  Result := True;
+end;
+
+// The frames that belong between the held source frame and the next one.
+// Nothing is emitted for an instant whose picture would be identical to
+// the frame before it, which is what keeps a still stretch sparse and a
+// zoom's hold free.
+function TRenderSession.SynthesizeUpTo(ANextSeconds: Double;
+  out AError: string): Boolean;
+var
+  Times: TCadenceTimes;
+  Shape: TRenderedFrameShape;
+  Stamp: CMTime;
+  Value: Int64;
+  Width, Height, I: Integer;
+begin
+  Result := True;
+  AError := '';
+  if (FCadenceSeconds <= 0) or (FHeldBuffer = nil)
+    or (FHeldTimeScale <= 0) then
+    Exit;
+  Times := CadenceTimes(FHeldSeconds, ANextSeconds, FCadenceSeconds);
+  if Length(Times) = 0 then
+    Exit;
+  Width := Integer(CVPixelBufferGetWidth(FHeldBuffer));
+  Height := Integer(CVPixelBufferGetHeight(FHeldBuffer));
+  for I := 0 to High(Times) do
+  begin
+    Shape := ShapeAt(Width, Height, Times[I]);
+    if FHasLastShape and not FrameShapesDiffer(Shape, FLastShape) then
+      Continue;
+    // The stamp on the source's own timescale, and strictly after the
+    // last one written: the encoder takes presentation stamps in
+    // increasing order, and a grid instant that rounds onto a stamp
+    // already used would be refused rather than merely close.
+    Value := Round(Times[I] * FHeldTimeScale);
+    if Value <= FLastValue then
+      Value := FLastValue + 1;
+    if Value >= Round(ANextSeconds * FHeldTimeScale) then
+      Break;
+    Stamp := CMTimeMake(Value, FHeldTimeScale);
+    if not AwaitVideoInput then
+    begin
+      AError := 'the encoder stopped accepting frames during the render';
+      Exit(False);
+    end;
+    if not RenderOneFrame(FHeldBuffer, Stamp, Times[I], AError) then
+      Exit(False);
+    FLastValue := Value;
+    FLastShape := Shape;
+    FHasLastShape := True;
+    Inc(FReport.SynthesizedFrames);
   end;
 end;
 
@@ -1015,9 +1284,28 @@ begin
             // still exact for it.
             FWriter.startSessionAtSourceTime(Frame.Time);
             Started := True;
-          end;
-          if not RenderOneFrame(Frame, AError) then
+          end
+          else if not SynthesizeUpTo(Frame.Seconds, AError) then
             Exit;
+          // The readiness the loop tested before reading may have been
+          // spent by the synthesised frames just written, so it is
+          // tested again here rather than assumed — appending to an
+          // input that is not ready is an exception, not a False.
+          if not AwaitVideoInput then
+          begin
+            AError := 'the encoder stopped accepting frames during the '
+              + 'render';
+            Exit;
+          end;
+          if not RenderOneFrame(Frame.PixelBuffer, Frame.Time,
+            Frame.Seconds, AError) then
+            Exit;
+          FLastShape := ShapeAt(
+            Integer(CVPixelBufferGetWidth(Frame.PixelBuffer)),
+            Integer(CVPixelBufferGetHeight(Frame.PixelBuffer)),
+            Frame.Seconds);
+          FHasLastShape := True;
+          HoldFrame(Frame);
           if FReport.FramesWritten mod ProgressEveryFrames = 0 then
             Progress(FReport.FramesWritten);
           if FReport.FramesRead mod PoolDrainEveryFrames = 0 then
@@ -1151,7 +1439,14 @@ begin
       begin
         Walker := ZoomWalkerAdvance(Walker, FClicks,
           Sample.Time - FLog.AnchorHost);
-        Source := ZoomWalkerSourceRect(Walker);
+        // Composed inside the rectangle the capture was reading at that
+        // instant — which is the sample's own, the one about to be
+        // overwritten — so a panned take's rewritten track says where
+        // the crop actually sat rather than where it would have sat if
+        // the framing had never moved.
+        Source := ZoomWalkerSourceRectIn(Walker,
+          LiveRect(Sample.SourceX, Sample.SourceY, Sample.SourceWidth,
+          Sample.SourceHeight));
         Sample.SourceX := Source.X;
         Sample.SourceY := Source.Y;
         Sample.SourceWidth := Source.Width;
@@ -1253,6 +1548,18 @@ begin
     Exit(True);
   end;
 
+  // The cadence to fill effect windows in at. The sidecar's header is
+  // what the capture was CONFIGURED for; the reader's nominalFrameRate
+  // is what the file came out at, which on a sparse take is the average
+  // and not the rate anybody asked for (measured: 18.8 against 30). So
+  // the header wins where there is one.
+  if (FLog <> nil) and (FLog.Header.FramesPerSecond > 0) then
+    FReport.SynthesisFramesPerSecond := FLog.Header.FramesPerSecond
+  else
+    FReport.SynthesisFramesPerSecond := Max(1,
+      Round(FReader.NominalFrameRate));
+  FCadenceSeconds := CadenceInterval(FReport.SynthesisFramesPerSecond);
+
   if not FReader.StartPass(0, 0, AError) then
     Exit;
   if not OpenWriter(AError) then
@@ -1294,6 +1601,15 @@ begin
 
   if FCursor <> nil then
     FReport.CursorFrames := FCursor.DrawnFrames;
+  if FReport.SynthesizedFrames = 0 then
+    FReport.SynthesisFramesPerSecond := 0;
+  // Said out loud rather than counted silently: a stretch of a take with
+  // no zoom in it looks exactly like a stretch nobody clicked in.
+  if (FReport.UnframedFrames > 0) and (FReport.Note = '') then
+    FReport.Note := Format('%d frame(s) run past the end of this take''s '
+      + 'pointer track, so what they were showing is not recorded; '
+      + 'nothing was cropped for them and the pointer was placed from '
+      + 'the last position the track holds', [FReport.UnframedFrames]);
   MeasureOutput;
   FReport.ElapsedSeconds := (Now - StartedAt) * SecsPerDay;
   if FReport.SourceDurationSeconds > 0 then

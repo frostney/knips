@@ -59,6 +59,7 @@ interface
 
 uses
   Classes,
+  Math,
   SysUtils,
 
   fpjson,
@@ -75,6 +76,36 @@ const
   // it keeps the movie's stem, so a directory of takes sorts with each
   // sidecar under its movie, and `.jsonl` still says what the file is.
   SidecarExtension = '.knips.jsonl';
+  // How long a silence in the pointer track a reader may draw a straight
+  // line through, as a multiple of the header's own target sample
+  // interval and with a floor under it.
+  //
+  // Fifteen intervals is half a second at the usual 30 Hz — fifteen
+  // times the spacing the sampler achieves and far past any stall a busy
+  // run loop produces, so it never fires on an ordinary take. What it
+  // does fire on is the case the format already documents as the sparse
+  // one: an MCP recording, whose stdio transport blocks between tool
+  // calls, gets a sample at the start, one per `record_status` and one at
+  // the stop. Two of those can be minutes apart, and a lerp between them
+  // is a pointer gliding across the screen for a minute — a thing that
+  // never happened. See InterpolatePath.
+  //
+  // The floor matters because the multiple alone would make a take that
+  // *claimed* a very high sample rate refuse gaps a viewer would never
+  // notice.
+  InterpolatedGapSamples = 15;
+  MinInterpolatedGapSeconds = 0.5;
+  // And a ceiling, because `sampleHz` is a number in a file somebody
+  // else may have written. A third-party sidecar declaring 0.05 Hz would
+  // otherwise buy itself a five-minute licence to interpolate, which is
+  // exactly the sweep this rule exists to stop. Two seconds is longer
+  // than any silence a real recorder produces and short enough that the
+  // worst a bad header can do is two seconds of drawn line.
+  MaxInterpolatedGapSeconds = 2.0;
+  // Below this a `sampleHz` is not a slow sampler, it is a damaged
+  // number: one sample a minute is 0.0167 Hz, and this reader divides by
+  // the value.
+  MinBelievableSampleHz = 0.01;
   // Bit 0 of a sample's button mask. Only the left button is sampled —
   // see the sampler's own comment for why the others are not.
   SidecarLeftButton = 1;
@@ -198,13 +229,16 @@ type
     // Big Cursor's sprite — so drawing another would show two.
     CursorAlreadyBaked: Boolean;
     // A crop driven by the click track can still be applied: there are
-    // clicks, the samples map, and — the part that is easy to get wrong —
-    // the capture never moved its own source rectangle. The crop is taken
-    // against the recording's BASE rectangle, so a take whose framing
-    // panned (Follow Mouse, or a composited window recording's poll)
-    // shows a different rectangle in every frame and the crop would be
-    // computed against one it is not showing. Measured before this was
-    // fixed: a Follow Mouse take rendered 36 silently mis-cropped frames.
+    // clicks, the samples map, and the capture was not already zooming
+    // itself — a crop applied to a crop compounds into a zoom nobody
+    // asked for.
+    //
+    // A take whose framing *panned* (Follow Mouse, or a composited
+    // window recording's poll) shows a different rectangle in every
+    // frame, and the crop is composed inside that rectangle rather than
+    // against the base one. Computing it against the base was the bug
+    // this used to be refused over — measured, 36 silently mis-cropped
+    // frames on a Follow Mouse take — and the composition is the fix.
     CanZoomOnClick: Boolean;
     // Nothing at all was baked into this take's pixels: no pointer, no
     // zoom, no pan. Such a movie is a *raw* take, and everything about it
@@ -374,6 +408,15 @@ type
     // read at all.
     function StateAt(AMovieSeconds: Double; out ASample: TSidecarSample):
       Boolean;
+    // The longest silence in this take's own pointer track that a reader
+    // may draw a straight line through, from the header's target rate —
+    // so the rule scales with how fast the take said it was sampling and
+    // a reader never has to guess it. Floored and CAPPED: the rate is a
+    // number in a file, and a file that claims a very slow one must not
+    // be able to talk this reader into a five-minute straight line. See InterpolatePath for why the
+    // limit exists at all; a caller drawing a pointer from this track
+    // should pass this to it.
+    function MaxInterpolatedGap: Double;
     property Header: TSidecarHeader read FHeader;
     property HasAnchor: Boolean read FHasAnchor;
     property AnchorHost: Double read FAnchorHost;
@@ -421,9 +464,15 @@ function ParseSidecarCursorRender(const AText: string;
 
 // True when the capture never moved its own source rectangle: no live
 // zoom, no Follow Mouse pan, no composited window follow. This is the
-// exact precondition for anything that crops against the recording's base
-// rectangle, which is why it is a named question rather than three
-// `and not`s at each call site.
+// exact precondition for anything that treats the recording's base
+// rectangle as what every frame shows, which is why it is a named
+// question rather than three `and not`s at each call site.
+//
+// It is NOT the precondition for a post-recording zoom any more. A crop
+// composed against the framing the samples record works on a panned take
+// too (Knips.Export.ZoomTrack.ZoomWalkerSourceRectIn); what this answers
+// for a render is the cheaper question of whether the framing has to be
+// looked up per frame at all.
 function HasUntouchedFraming(const AHeader: TSidecarHeader): Boolean;
 
 // True when nothing was baked into this take's pixels — no pointer, no
@@ -454,8 +503,29 @@ function SmoothSidecarPath(const ASamples: TSidecarSampleArray;
 
 // Linear interpolation of a smoothed (or raw) path at one time on the
 // same clock the samples carry. False when there is nothing to read.
+//
+// **A gap longer than AMaxGapSeconds is not interpolated across.** The
+// last known position is held instead, and the path snaps to the next
+// sample when it arrives. That is not a rounding decision, it is a
+// truthfulness one: an MCP recording gets a sample at the start, one per
+// `record_status` call and one at the stop (docs/event-sidecar.md,
+// *Sampling*), so two samples can be minutes apart — and a straight lerp
+// between them draws a pointer gliding smoothly across the screen for a
+// minute, which is a thing that never happened. Holding claims only what
+// the track actually says: the pointer was here, and later it was there.
+// The snap at the far end is visible and is the honest shape of "nobody
+// was watching in between".
+//
+// It also bounds the render's frame synthesis, which asks this function
+// whether the next instant would look different: a held position stops
+// changing, so a quiet stretch stops being filled in
+// (Knips.Export.Cadence).
+//
+// Zero or less means no limit, which is what a caller measuring the raw
+// interpolation wants and is never what a renderer wants.
 function InterpolatePath(const ASamples: TSidecarSampleArray;
-  ACount: Integer; ATime: Double; out AX, AY: Double): Boolean;
+  ACount: Integer; ATime, AMaxGapSeconds: Double;
+  out AX, AY: Double): Boolean;
 
 implementation
 
@@ -810,6 +880,7 @@ var
   Button: TSidecarButtonEvent;
   Render: TSidecarCursorRender;
   Mode: TAudioMode;
+  DefaultHz: TJSONFloat;
 begin
   Result := False;
   Kind := AObject.Get('k', '');
@@ -835,7 +906,17 @@ begin
     FHeader.PixelHeight := AObject.Get('pixelHeight', 0);
     FHeader.Scale := AObject.Get('scale', 0);
     FHeader.FramesPerSecond := AObject.Get('fps', 0);
-    FHeader.SampleHz := AObject.Get('sampleHz', TJSONFloat(DefaultSidecarSampleHz));
+    // Through a typed local, and that is not a style choice. In Delphi
+    // mode `TJSONFloat(DefaultSidecarSampleHz)` REINTERPRETS the integer
+    // constant's bits as a Double rather than converting them —
+    // measured, 30 comes out as $000000000000001E, a denormal of about
+    // 1.5E-322. Every other fallback here casts a literal 0, whose bit
+    // pattern happens to be 0.0 either way, which is why this was the
+    // one that was wrong and why it stayed hidden: a sidecar with no
+    // `sampleHz` field came back claiming a sample rate of 1.5E-322
+    // instead of the documented 30. An assignment converts.
+    DefaultHz := DefaultSidecarSampleHz;
+    FHeader.SampleHz := AObject.Get('sampleHz', DefaultHz);
     FHeader.DisplayID := Cardinal(AObject.Get('displayId', Int64(0)));
     FHeader.DisplayWidth := AObject.Get('displayWidth', TJSONFloat(0));
     FHeader.DisplayHeight := AObject.Get('displayHeight', TJSONFloat(0));
@@ -1035,7 +1116,13 @@ begin
   end;
   ASample := FSamples[Low];
   Span := FSamples[High].Time - FSamples[Low].Time;
-  if Span > 0 then
+  // The same refusal InterpolatePath makes, for the same reason: a gap
+  // this reader has no business drawing a line through leaves the
+  // earlier sample's position standing. The source rectangle was never
+  // interpolated in the first place — it is what the capture was
+  // reading, and a rectangle half way between two of them was never
+  // read at all.
+  if (Span > 0) and (Span <= MaxInterpolatedGap) then
   begin
     Fraction := (Target - FSamples[Low].Time) / Span;
     ASample.X := FSamples[Low].X
@@ -1044,6 +1131,23 @@ begin
       + (FSamples[High].Y - FSamples[Low].Y) * Fraction;
   end;
   ASample.Time := Target;
+end;
+
+function TSidecarLog.MaxInterpolatedGap: Double;
+begin
+  // A header with no sample rate in it — an older writer, or a file from
+  // something else — gets the floor rather than a division.
+  //
+  // The guard is a FLOOR on the rate and not merely `> 0`, because this
+  // number came out of a file: one sample a minute is 0.0167 Hz, and
+  // anything below that is not a claim about sampling but a damaged or
+  // hostile header. Dividing by a denormal overflows before the cap
+  // below ever sees the answer (measured, when a parser bug fed this a
+  // rate of 1.5E-322: an access violation, not a large number).
+  Result := MinInterpolatedGapSeconds;
+  if FHeader.SampleHz >= MinBelievableSampleHz then
+    Result := Max(Result, InterpolatedGapSamples / FHeader.SampleHz);
+  Result := Min(MaxInterpolatedGapSeconds, Result);
 end;
 
 function TSidecarLog.CursorAt(AMovieSeconds: Double;
@@ -1061,7 +1165,8 @@ begin
 end;
 
 function InterpolatePath(const ASamples: TSidecarSampleArray;
-  ACount: Integer; ATime: Double; out AX, AY: Double): Boolean;
+  ACount: Integer; ATime, AMaxGapSeconds: Double;
+  out AX, AY: Double): Boolean;
 var
   Low, High, Middle: Integer;
   Span, Fraction: Double;
@@ -1094,7 +1199,9 @@ begin
       High := Middle;
   end;
   Span := ASamples[High].Time - ASamples[Low].Time;
-  if Span <= 0 then
+  // Too long a silence to draw a line through — see the header. The
+  // earlier sample is the last thing the track actually knows.
+  if (Span <= 0) or ((AMaxGapSeconds > 0) and (Span > AMaxGapSeconds)) then
   begin
     AX := ASamples[Low].X;
     AY := ASamples[Low].Y;
@@ -1138,9 +1245,20 @@ begin
     and (ALog.Header.BaseWidth > 0) and (ALog.Header.BaseHeight > 0);
   if not Mappable then
   begin
+    // A window take reaches this only when it was captured the
+    // desktop-independent way, and the app does that only when the user
+    // asked for no effects at all — so the actionable half of the truth
+    // is what to do about it, not the framework detail behind it. The
+    // detail is still there, because somebody reading a sidecar by hand
+    // needs to know why the samples cannot be placed.
     if ALog.Header.TargetKind = ctkWindow then
-      Result.Reason := 'a window recording''s frames have no fixed '
-        + 'relationship to the screen its pointer was measured against'
+      Result.Reason := 'this window recording was made with the effects '
+        + 'switched off, so it was captured as the window alone — which '
+        + 'is the cleaner picture, and the one kind of take nothing can '
+        + 'be drawn into afterwards (its frames have no fixed '
+        + 'relationship to the screen the pointer was measured against). '
+        + 'Record it again with an effect switched on for one that can '
+        + 'be edited'
     else if not ALog.HasAnchor then
       Result.Reason := 'the event sidecar has no anchor, so its times '
         + 'cannot be placed on the movie'
@@ -1150,20 +1268,28 @@ begin
   end;
   Result.CanDrawCursor := not Result.CursorAlreadyBaked;
   Result.FullyRenderable := IsRawTake(ALog.Header);
-  // The crop is taken against the BASE rectangle, so every way the
-  // capture could have moved its own source rectangle closes it: a live
-  // zoom (which would compound into one nobody chose), a Follow Mouse
-  // pan, and a composited window recording's poll. The last two are the
-  // ones this used to miss, and missing them was not a refusal that never
-  // came — it was a crop computed against a rectangle the frames were not
-  // showing.
+  // A live zoom is the one thing that closes this, because a crop
+  // applied to a crop compounds into a zoom nobody asked for and nothing
+  // can take the first one out again.
   //
-  // A pointer already baked into the pixels does NOT close it: that
-  // pointer is part of the picture and scales with the crop exactly as
-  // the live effect's would have. So this is HasUntouchedFraming and not
-  // IsRawTake — an ordinary `knips record` take can still be zoomed.
+  // A **panned** framing does not close it any more, and that is a
+  // change worth being explicit about. It used to, and for the code that
+  // existed the refusal was right: the crop was computed against the
+  // recording's base rectangle, so a Follow Mouse take rendered
+  // mis-cropped frames (measured: 36 of them). The answer is the
+  // composition rather than the refusal — the crop is taken inside the
+  // rectangle the capture was reading at that instant, which every
+  // sample records, exactly as the live effect composes zoom inside
+  // follow (Knips.Recording.LiveMath). See
+  // Knips.Export.ZoomTrack.ZoomWalkerSourceRectIn.
+  //
+  // A pointer already baked into the pixels does not close it either:
+  // that pointer is part of the picture and scales with the crop exactly
+  // as the live effect's would have. So an ordinary `knips record` take
+  // can still be zoomed, and so can a Follow Mouse take and a
+  // composited window recording.
   Result.CanZoomOnClick := (ALog.ButtonCount > 0)
-    and HasUntouchedFraming(ALog.Header);
+    and not ALog.Header.BakedZoomOnClick;
 
   // Per effect first, because each has exactly one answer.
   if not Result.CanDrawCursor then
@@ -1172,9 +1298,6 @@ begin
   if ALog.Header.BakedZoomOnClick then
     Result.ZoomReason := 'this recording already zooms: the capture '
       + 'itself followed the clicks'
-  else if not HasUntouchedFraming(ALog.Header) then
-    Result.ZoomReason := 'this recording''s framing was panned by the '
-      + 'capture, so it cannot be re-framed from scratch'
   else if ALog.ButtonCount = 0 then
     Result.ZoomReason := 'nothing was clicked during this recording';
 
@@ -1191,10 +1314,13 @@ begin
   else if not Result.FullyRenderable then
     // Reachable on its own: a take whose pointer can still be drawn and
     // whose clicks are still usable, but whose framing was panned by the
-    // capture. Without this branch it came back not-fully-renderable with
-    // no reason at all.
+    // capture. That pan is in the pixels for good — it decided which
+    // pixels were read off the screen at all — so the take is not
+    // *fully* renderable even though both effects are open; a zoom is
+    // composed inside the pan rather than replacing it.
     Result.Reason := 'this recording''s framing was panned by the capture, '
-      + 'so it cannot be re-framed from scratch'
+      + 'so the pan is in its pixels for good; a zoom is composed inside '
+      + 'it rather than replacing it'
   else
     Result.Reason := Result.ZoomReason;
 end;
