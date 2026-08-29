@@ -101,17 +101,20 @@ tools/make-app.sh                        # wrap the built binary in build/Knips.
 | `source/Knips.Export.MovieTrim.pas` | AVAssetExportSession passthrough trim (no decode, no re-encode) |
 | `source/Knips.Export.Pipeline.pas` | Orchestrator: reader → decimate → crop → scale → GIF or APNG sink |
 | `source/Knips.Recording.pas` | Orchestrator: target → geometry → writer → stream → finish |
-| `source/Knips.Mcp.Params.pas` | Platform-neutral MCP tool table, JSON argument mapping, default paths, flag→argument message rewriting (tested) |
-| `source/Knips.Mcp.pas` | `knips mcp`: the tool handlers on pascal-mcp-sdk's stdio transport; one recording at a time |
+| `source/Knips.Mcp.Params.pas` | Platform-neutral MCP tool table, the tools' output schemas, JSON argument mapping (recording, export effects, default paths), the take-info answer, flag→argument message rewriting (tested) |
+| `source/Knips.Mcp.pas` | `knips mcp`: the tool handlers on pascal-mcp-sdk's stdio transport; one recording at a time; raw takes, `render`, `take_info` |
 | `source/capture/` | Vendored bindings: CoreMedia/CoreVideo/VideoToolbox/GCD, ScreenCaptureKit, pthread mutex |
 | `source/capture-linux/` | X11/MIT-SHM capture **spike** and its runner — not shipped, not an lwpt build entry; run against Xvfb by `tools/linux-ci.sh` ([docs/ports.md](docs/ports.md)) |
 | `tools/linux-ci.sh`, `tools/win64-cross.sh`, `tools/wine-smoke.sh` | Cross-platform gates in Docker: the neutral suites on Linux, an `x86_64-win64` compile-and-link, a Wine smoke ([docs/ports.md](docs/ports.md)) |
 | `docs/` | Architecture, quick-start, tooling, code style, deployment, ports, porting notes, spikes, ADRs |
 
 Layering: `knips.pas` → {`Knips.App`, `Knips.Mcp`, `Knips.Recording`,
-`Knips.Export.Pipeline`, `Knips.Export.MovieTrim`} (`Knips.Mcp` reaches
-the same session classes the CLI does, so an MCP tool and a subcommand
-are one implementation; `Knips.App.Playback` likewise reaches
+`Knips.Export.Pipeline`, `Knips.Export.MovieTrim`, `Knips.Export.Render`}
+(`Knips.Mcp` reaches
+the same session classes the CLI does — `TRecordingSession`,
+`TExportSession`, `TMovieTrimSession` and `TRenderSession` — so an MCP
+tool and a subcommand are one implementation, `render` included;
+`Knips.App.Playback` likewise reaches
 `Knips.Export.Pipeline`, so the *Export as GIF…* button runs the same
 session `knips export` does) →
 {`Knips.Capture.*`, `Knips.Export.MovieWriter`,
@@ -146,8 +149,17 @@ under the mutex its capture-queue appends already take.
 `Knips.Options` is used by every layer and depends on nothing;
 `Knips.App.State`, `Knips.Recording.LiveMath` and
 `Knips.Recording.CursorMath` depend only on it;
-`Knips.Mcp.Params` sits beside them (on it plus fpjson and
-`Knips.App.State`, whose path helpers it reuses). `Knips.App.Live`
+`Knips.Options` also owns the words a finished render reports
+(`RenderAppliedSummary`, `RenderSummaryLine`, the two effect-note
+wrappers) and `ValidateRenderOutputPath`, so `knips render` and the MCP
+render tool describe and refuse identically — they used to hold a
+byte-identical copy of the summary each.
+`Knips.Mcp.Params` sits beside them (on it plus fpjson,
+`Knips.App.State`, whose path helpers it reuses,
+`Knips.Recording.Sidecar`, whose take-availability answer `take_info`
+reports, and `Knips.Export.ZoomTrack`, for the usable-click count that
+answer carries — so the whole take-info payload is neutral and tested).
+`Knips.App.Live`
 consumes `Knips.Recording.LiveMath`, the way `Knips.App.Playback`
 consumes `Knips.Export.Pipeline`. The GIF encoder, the APNG encoder, the delay
 planner, the MCP argument mapping, the live-effect maths, the post-hoc
@@ -181,6 +193,11 @@ no `{$IFDEF DARWIN}` at all and are tested on every host.
   ScreenCaptureKit's desktop-independent capture is kept; otherwise it is
   composited from the display and split like any region take
   (`WindowTakeNeedsCompositing`).
+  Over **MCP** the model is the same and the trigger is not: `record_stop`
+  writes one movie and its sidecar and renders nothing, and the separate
+  `render` tool writes the second pair when a client asks for it. A
+  recording that asked for `smooth_cursor` and named no output takes the
+  `-raw` name, so the pair lands exactly where the app's would.
   `render` builds into `<out>.knips-render-tmp` and renames it into place,
   so a killed render cannot damage an existing deliverable; the recovery
   pass sweeps any temporary a killed render left behind. The

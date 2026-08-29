@@ -171,6 +171,20 @@ type
     procedure TestBitRateScalesWithArea;
   end;
 
+  // The words `knips render` and the MCP render tool both report with.
+  // They used to be a byte-identical copy in each front end; these
+  // assert the one implementation they now share.
+  TRenderWordingTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestNothingAppliedSaysNothing;
+    procedure TestEveryClauseAppears;
+    procedure TestReEncodedAudioIsShouted;
+    procedure TestACopyDoesNotClaimWork;
+    procedure TestNoteLinesWrapOnlyWhenThereIsANote;
+    procedure TestRenderOutputMustBeAMovie;
+  end;
+
 { TRegionTests }
 
 procedure TRegionTests.SetupTests;
@@ -1690,6 +1704,125 @@ begin
     .ToBe('framing');
 end;
 
+{ TRenderWordingTests }
+
+procedure TRenderWordingTests.SetupTests;
+begin
+  Test('a render that applied nothing says nothing',
+    TestNothingAppliedSaysNothing);
+  Test('every clause appears when every fact is set',
+    TestEveryClauseAppears);
+  Test('re-encoded audio is shouted', TestReEncodedAudioIsShouted);
+  Test('a copy does not claim work it did not do',
+    TestACopyDoesNotClaimWork);
+  Test('a note line is wrapped only when there is a note',
+    TestNoteLinesWrapOnlyWhenThereIsANote);
+  Test('a render output must be a movie container',
+    TestRenderOutputMustBeAMovie);
+end;
+
+procedure TRenderWordingTests.TestNothingAppliedSaysNothing;
+begin
+  Expect<string>(RenderAppliedSummary(RenderAppliedFacts)).ToBe('');
+end;
+
+procedure TRenderWordingTests.TestEveryClauseAppears;
+var
+  Facts: TRenderAppliedFacts;
+  Line: string;
+begin
+  Facts := RenderAppliedFacts;
+  Facts.ZoomApplied := True;
+  Facts.ZoomedFrames := 34;
+  Facts.FramesWritten := 100;
+  Facts.UsableClicks := 1;
+  Facts.CursorDrawn := True;
+  Facts.CursorFrames := 100;
+  Facts.CursorOffFrameFrames := 2;
+  Facts.SynthesizedFrames := 7;
+  Facts.SynthesisFramesPerSecond := 30;
+  Facts.AudioTracks := 2;
+  Facts.AudioPassthrough := True;
+  Facts.AudioSamples := 480;
+  Line := RenderAppliedSummary(Facts);
+  // The exact sentence both front ends now report. It is asserted
+  // whole rather than by substring because the point of moving it here
+  // was that the CLI and the MCP tool say the SAME thing, and two
+  // substring checks would pass on two different sentences.
+  Expect<string>(Line).ToBe(', zoom on 34 of 100 frames from 1 clicks'
+    + ', pointer on 100 frames (2 off frame)'
+    + ', 7 frames filled in at 30 fps where the capture had none'
+    + ', 2 audio track(s) copied (480 samples, not re-encoded)');
+end;
+
+procedure TRenderWordingTests.TestReEncodedAudioIsShouted;
+var
+  Facts: TRenderAppliedFacts;
+begin
+  // The render pass has no re-encoding path, so this branch should
+  // never fire — and if it ever does, it must be impossible to miss in
+  // the summary rather than buried in a comment.
+  Facts := RenderAppliedFacts;
+  Facts.AudioTracks := 1;
+  Facts.AudioSamples := 9;
+  Facts.AudioPassthrough := False;
+  Expect<Boolean>(Pos('RE-ENCODED', RenderAppliedSummary(Facts)) > 0)
+    .ToBe(True);
+  Facts.AudioPassthrough := True;
+  Expect<Boolean>(Pos('RE-ENCODED', RenderAppliedSummary(Facts)) > 0)
+    .ToBe(False);
+  Expect<Boolean>(Pos('not re-encoded', RenderAppliedSummary(Facts)) > 0)
+    .ToBe(True);
+end;
+
+procedure TRenderWordingTests.TestACopyDoesNotClaimWork;
+var
+  Line: string;
+begin
+  // A render with nothing to apply is a byte copy. Reporting
+  // "1280x720, 300 frames" about one would claim an encode that never
+  // happened and hide that the deliverable IS the take.
+  Line := RenderSummaryLine('/tmp/demo.mp4', 1280, 720, 300, 10.0,
+    5 * 1024, True, ', zoom on 12 frames');
+  Expect<string>(Line).ToBe('wrote /tmp/demo.mp4: nothing to render, so '
+    + 'the take was copied unchanged (5 kB)');
+  Line := RenderSummaryLine('/tmp/demo.mp4', 1280, 720, 300, 10.0,
+    5 * 1024, False, ', zoom on 12 frames');
+  Expect<string>(Line).ToBe('wrote /tmp/demo.mp4: 1280x720, 300 frames, '
+    + '10.0s, 5 kB, zoom on 12 frames');
+end;
+
+procedure TRenderWordingTests.TestNoteLinesWrapOnlyWhenThereIsANote;
+begin
+  Expect<string>(EffectCursorNoteLine('')).ToBe('');
+  Expect<string>(EffectZoomNoteLine('')).ToBe('');
+  Expect<string>(EffectCursorNoteLine('the pointer is already there'))
+    .ToBe('no cursor drawn (the pointer is already there)');
+  Expect<string>(EffectZoomNoteLine('nothing was clicked'))
+    .ToBe('no zoom applied (nothing was clicked)');
+end;
+
+procedure TRenderWordingTests.TestRenderOutputMustBeAMovie;
+var
+  Error: string;
+begin
+  Expect<Boolean>(ValidateRenderOutputPath('/tmp/demo.mp4', Error))
+    .ToBe(True);
+  Expect<string>(Error).ToBe('');
+  Expect<Boolean>(ValidateRenderOutputPath('/tmp/demo.mov', Error))
+    .ToBe(True);
+  // A render writes H.264 into a QuickTime-family container. It used to
+  // write exactly that into a file called demo.gif and report success —
+  // a name that lies about its contents, which is worse than a refusal.
+  Expect<Boolean>(ValidateRenderOutputPath('/tmp/demo.gif', Error))
+    .ToBe(False);
+  Expect<string>(Error).ToBe('unsupported output extension ".gif" '
+    + '(use .mp4 or .mov)');
+  Expect<Boolean>(ValidateRenderOutputPath('/tmp/demo', Error))
+    .ToBe(False);
+  Expect<Boolean>(ValidateRenderOutputPath('', Error)).ToBe(False);
+end;
+
 begin
   TestRunnerProgram.AddSuite(TRegionTests.Create('ParseCaptureRegion'));
   TestRunnerProgram.AddSuite(TContainerTests.Create('ContainerForPath'));
@@ -1704,6 +1837,8 @@ begin
   TestRunnerProgram.AddSuite(TAfterTheStopTests.Create(
     'what knips says after a stop'));
   TestRunnerProgram.AddSuite(TDerivedValueTests.Create('derived values'));
+  TestRunnerProgram.AddSuite(TRenderWordingTests.Create(
+    'what a render reports, in both front ends'' words'));
   TestRunnerProgram.Run;
   ExitCode := TestResultToExitCode;
 end.

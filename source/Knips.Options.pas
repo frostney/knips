@@ -267,6 +267,28 @@ type
     Effects: TExportEffects;
   end;
 
+  // What a finished render actually did, flattened out of
+  // Knips.Export.Render's TRenderReport so the sentence describing it
+  // can live below the Darwin line. See RenderAppliedSummary.
+  TRenderAppliedFacts = record
+    ZoomApplied: Boolean;
+    ZoomedFrames: Int64;
+    FramesWritten: Int64;
+    UsableClicks: Integer;
+    CursorDrawn: Boolean;
+    CursorFrames: Int64;
+    CursorOffFrameFrames: Int64;
+    // Frames the capture never made, and the cadence they were made at.
+    SynthesizedFrames: Int64;
+    SynthesisFramesPerSecond: Integer;
+    AudioTracks: Integer;
+    // Stated rather than assumed, because it is the one claim about the
+    // file a listener cannot check: a track that had been through AAC
+    // twice sounds like a track that had not, until it does not.
+    AudioPassthrough: Boolean;
+    AudioSamples: Int64;
+  end;
+
 function DefaultRecordingOptions: TRecordingOptions;
 
 // "left,top,width,height" in points. Rejects anything else.
@@ -354,6 +376,55 @@ function BigCursorIdleWarning(AEnabled: Boolean;
 // refused for a cosmetic reason could hide the framing note entirely.
 function EffectNoteSummary(const AFramingNote, ACursorNote,
   AZoomNote: string): string;
+
+// The two effect notes with the words that say what they are notes
+// ABOUT. '' for an empty note, so a caller can concatenate without
+// asking twice.
+//
+// They are here rather than at each call site because there are now two
+// call sites — `knips render` printing to stderr and the MCP render tool
+// composing a result — and a note that reads "no cursor drawn (…)" on a
+// console and "the cursor was skipped (…)" over JSON would be two
+// different claims about one field. The framing note has no such
+// wrapper: it is not about an effect that did not happen, it is about
+// the pixels, and it is said in the report's own words.
+function EffectCursorNoteLine(const ACursorNote: string): string;
+
+function EffectZoomNoteLine(const AZoomNote: string): string;
+
+// Everything a finished render can say about what it DID, in one clause
+// list — ", zoom on 34 of 100 frames from 1 clicks, pointer on 100
+// frames (0 off frame)" — or '' when nothing applied.
+//
+// A plain record of scalars rather than TRenderReport, because that
+// record lives in Knips.Export.Render behind the Darwin line and this
+// has to be reachable from here, which everything reaches. Both the CLI
+// and the MCP tool fill it from the same report and get the same
+// sentence; they used to hold a byte-identical 25-line copy each, which
+// is exactly the kind of duplication that drifts the first time one of
+// the four clauses is reworded.
+function RenderAppliedFacts: TRenderAppliedFacts;
+
+function RenderAppliedSummary(const AFacts: TRenderAppliedFacts): string;
+
+// The line a finished render reports: the deliverable, its shape, and
+// AApplied. A render that applied nothing copied the take byte for byte
+// rather than re-encoding it to produce the same movie, and says so
+// instead of claiming work it did not do.
+function RenderSummaryLine(const APath: string; APixelWidth,
+  APixelHeight: Integer; AFrames: Int64; ADurationSeconds: Double;
+  AOutputBytes: Int64; ACopied: Boolean; const AApplied: string): string;
+
+// Whether a render may write APath. Only the two movie containers, for
+// the reason the tool descriptions and `--out=demo.mp4` already give:
+// this pass re-encodes H.264 into a QuickTime-family container and can
+// write nothing else. It used to accept any name at all, so
+// `--out=demo.gif` produced an MP4 called demo.gif and reported success
+// — a file whose extension lies, which is worse than a refusal. Asked by
+// `knips render` and by the MCP render tool, in one place, so the two
+// cannot disagree.
+function ValidateRenderOutputPath(const APath: string;
+  out AError: string): Boolean;
 
 // Container from the output path's extension; False for unknown ones.
 function ContainerForPath(const APath: string;
@@ -579,6 +650,93 @@ begin
   if ACursorNote <> '' then
     Exit(ACursorNote);
   Result := AZoomNote;
+end;
+
+function EffectCursorNoteLine(const ACursorNote: string): string;
+begin
+  Result := '';
+  if ACursorNote <> '' then
+    Result := 'no cursor drawn (' + ACursorNote + ')';
+end;
+
+function EffectZoomNoteLine(const AZoomNote: string): string;
+begin
+  Result := '';
+  if AZoomNote <> '' then
+    Result := 'no zoom applied (' + AZoomNote + ')';
+end;
+
+function RenderAppliedFacts: TRenderAppliedFacts;
+begin
+  Result := Default(TRenderAppliedFacts);
+end;
+
+function RenderAppliedSummary(const AFacts: TRenderAppliedFacts): string;
+begin
+  Result := '';
+  if AFacts.ZoomApplied then
+    Result := Format(', zoom on %d of %d frames from %d clicks',
+      [AFacts.ZoomedFrames, AFacts.FramesWritten, AFacts.UsableClicks]);
+  if AFacts.CursorDrawn then
+    Result := Result + Format(', pointer on %d frames (%d off frame)',
+      [AFacts.CursorFrames, AFacts.CursorOffFrameFrames]);
+  // Frames the capture never made. Said out loud rather than folded into
+  // the total, because it is the difference between a deliverable that
+  // animates and one that jumps, and because it is what the file grew
+  // for.
+  if AFacts.SynthesizedFrames > 0 then
+    Result := Result + Format(', %d frames filled in at %d fps where the '
+      + 'capture had none',
+      [AFacts.SynthesizedFrames, AFacts.SynthesisFramesPerSecond]);
+  // The render pass has no re-encoding path and would rather fail than
+  // take one, so the word is always "copied" — and if that ever stops
+  // being true, the summary says so on the take where it happened
+  // rather than in a comment.
+  if AFacts.AudioTracks > 0 then
+    if AFacts.AudioPassthrough then
+      Result := Result + Format(
+        ', %d audio track(s) copied (%d samples, not re-encoded)',
+        [AFacts.AudioTracks, AFacts.AudioSamples])
+    else
+      Result := Result + Format(
+        ', %d audio track(s) RE-ENCODED (%d samples)',
+        [AFacts.AudioTracks, AFacts.AudioSamples]);
+end;
+
+function RenderSummaryLine(const APath: string; APixelWidth,
+  APixelHeight: Integer; AFrames: Int64; ADurationSeconds: Double;
+  AOutputBytes: Int64; ACopied: Boolean; const AApplied: string): string;
+begin
+  if ACopied then
+    Exit(Format('wrote %s: nothing to render, so the take was copied '
+      + 'unchanged (%d kB)', [APath, AOutputBytes div 1024]));
+  Result := Format('wrote %s: %dx%d, %d frames, %.1fs, %d kB%s',
+    [APath, APixelWidth, APixelHeight, AFrames, ADurationSeconds,
+    AOutputBytes div 1024, AApplied]);
+end;
+
+function ValidateRenderOutputPath(const APath: string;
+  out AError: string): Boolean;
+var
+  Container: TOutputContainer;
+begin
+  AError := '';
+  Result := False;
+  if APath = '' then
+  begin
+    AError := 'an output path is required (--out=demo.mp4)';
+    Exit;
+  end;
+  if not ContainerForPath(APath, Container) then
+  begin
+    // The same sentence ValidateRecordingOptions gives for the same
+    // mistake, because it IS the same mistake and a caller should not
+    // have to learn two spellings of it.
+    AError := 'unsupported output extension "' + ExtractFileExt(APath)
+      + '" (use .mp4 or .mov)';
+    Exit;
+  end;
+  Result := True;
 end;
 
 function ParseCaptureRegion(const AText: string;

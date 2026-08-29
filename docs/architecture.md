@@ -123,7 +123,7 @@
 | Layer | Units | Notes |
 | --- | --- | --- |
 | CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `render`, `export`, `displays`, `windows`, `mcp`, `probe`; SIGINT/SIGTERM → `StopRequested` |
-| MCP | `Knips.Mcp`, `Knips.Mcp.Params` | The tool surface over pascal-mcp-sdk's stdio transport; the neutral half is the tool table, argument mapping, and default paths (tested) |
+| MCP | `Knips.Mcp`, `Knips.Mcp.Params` | The tool surface over pascal-mcp-sdk's stdio transport; the neutral half is the tool table, the output schemas, argument mapping, default paths, and the take-info answer (tested) |
 | App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Camera.Blur`, `Knips.App.Live`, `Knips.App.Hotkey`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window and its background-blur pipeline, the live-effect animator, the global stop hotkey, and the neutral state machine (tested) |
 | Recording | `Knips.Recording`, `Knips.Recording.LiveMath`, `Knips.Recording.CursorMath`, `Knips.Recording.CursorOverlay`, `Knips.Recording.Heartbeat`, `Knips.Recording.Sidecar`, `Knips.Recording.Recovery` | Target → filter + geometry → writer → stream; progress; report. The live-effect, big-cursor and idle-heartbeat arithmetic are neutral and tested; the overlay is the Darwin half that makes the sprite and blits it. The event sidecar is the neutral, tested file format (docs/event-sidecar.md) and recovery is the Darwin pass that finishes off a take whose process died |
 | Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
@@ -177,23 +177,75 @@ anchored to token boundaries: these templates interpolate the caller's
 own text, and a file named `x.--fps.mp4` must come back spelled the way
 it was passed.
 
-**MCP takes are CLI-shaped.** `record_start` builds the same
-`TRecordingOptions` the CLI does, so an agent's recording has the system
-pointer baked into its pixels and its framing untouched, exactly as
-`knips record` does — the raw-take flow and the automatic render belong to
-the menu-bar app, which has a playback window to choose effects in. An
-agent that wants the render pass has the same door a script has:
-`knips record --smooth-cursor` for a raw take, then `knips render`. This
-lane added nothing to the MCP surface, and that is the reason.
+**MCP takes are CLI-shaped, including the raw ones.** `record_start`
+builds the same `TRecordingOptions` the CLI does, and
+`"smooth_cursor": true` is `--smooth-cursor`: no pointer in the pixels,
+the track in the sidecar, and a `render` tool running the same
+`TRenderSession` `knips render` runs. The automatic render on every stop
+belongs to the menu-bar app and to it alone — see below.
 
-Two places where the MCP contract deliberately differs from the CLI's,
-both because the caller is a program rather than a person:
-`record_start` refuses an existing `out` unless `overwrite` is set (the
-CLI replaces what you named), and `export_trim` refuses `fps`/`width`/
-`dither` rather than warning and ignoring them (nothing is reading
-stderr). Paths are expanded and returned absolute for the same reason —
-an agent cannot resolve a relative path against a working directory it
-never saw.
+The one place where the two derive a name differently is the `-raw`
+suffix. On the command line `record --out=demo.mp4 --smooth-cursor`
+writes `demo.mp4`, because the caller named it. Over MCP a recording that
+asks for a smooth cursor and names *no* output gets
+`knips-…-raw.mp4`, so the pair that comes out is the pair the app writes
+and `render` can work its own output out with no argument at all. An
+explicit `out` always wins, and no other flag moves the name: an ordinary
+take and a Big Cursor take are finished pixels.
+
+**`record_stop` does not render, and that is a decision rather than an
+omission.** The app renders on every stop because a person clicked once
+and wants a file. An agent is a different caller: a render is seconds of
+work with no progress a stdio client can see, it needs a second output
+path, and *which effects* is a decision the stop has no arguments for.
+So the stop hands back the take, its sidecar, the samples that arrived
+and the path a render would write, and `render` is the separate call.
+`take_info` answers the planning question — what is this movie, what is
+already baked into it, which effects can it still have and why not — for
+any path on disk, read-only, so an agent can decide before it acts
+rather than by recording something and looking at the result.
+
+**The words are shared, not merely the work.** `knips render` and the
+render tool run one `TRenderSession`, and since this round they also
+compose one sentence about it: `RenderAppliedSummary`,
+`RenderSummaryLine`, `EffectCursorNoteLine` and `EffectZoomNoteLine` live
+in `Knips.Options`, below the Darwin line, filled from the same report by
+both front ends. They used to be a byte-identical 25-line copy in each,
+which is the shape that drifts the first time one clause is reworded —
+and a note reading "no cursor drawn (…)" on a console and something else
+over JSON would be two different claims about one field.
+`ValidateRenderOutputPath` is there for the same reason: both faces now
+refuse `--out=demo.gif`, which used to produce an H.264 MP4 under that
+name and report success.
+
+Three places where the MCP contract deliberately differs from the CLI's,
+all because the caller is a program rather than a person:
+`record_start` **and `render`** refuse an existing output unless
+`overwrite` is set (the CLI replaces what you named, and `render`
+replaces the deliverable atomically on every stop — right for a file
+somebody is watching, wrong for a path an agent guessed); `export_trim`
+and `render` refuse the arguments they cannot honour rather than warning
+and ignoring them, each naming the tool that can (nothing is reading
+stderr, so a dropped argument would be perfectly silent); and the effects
+are two flat arguments, `zoom` and `cursor`, rather than the CLI's
+comma-separated `--effects` list. Flat because the SDK's server-enforced schema subset
+*is* flat scalars: a nested `effects` object would have to be marked
+`ApplicationValidated`, which switches off call-time argument checking
+for the whole tool — the same trade the region already refuses by being
+four integers. Paths are expanded and returned absolute for the same
+reason as ever: an agent cannot resolve a relative path against a working
+directory it never saw.
+
+**The pointer track is as dense as the client's polling, and the server
+says so.** Nothing here runs between tool calls, so a raw take is sampled
+at the start, at each `record_status`, and at the stop — and a smooth
+cursor drawn from three samples is a straight line. There is no handshake
+in which a client could promise to poll, so `record_start` warns
+unconditionally whenever `smooth_cursor` is on rather than waiting for a
+promise it can never be given; `record_stop` then reports the samples
+that actually arrived, and `take_info` the largest gap between them
+beside the longest gap a reader will draw through. Warned up front,
+measured afterwards.
 
 The protocol comes from
 [pascal-mcp-sdk](https://github.com/frostney/pascal-mcp-sdk) (FPC RTL +

@@ -24,22 +24,51 @@ uses
 
   fpjson,
   Knips.App.State,
-  Knips.Options;
+  Knips.Export.ZoomTrack,
+  Knips.Options,
+  Knips.Recording.Sidecar;
 
 const
   McpServerName = 'knips';
   // The trim export writes beside its input under this suffix rather
   // than over it; ValidateExportOptions refuses in = out outright.
   TrimFileSuffix = '-trim';
+  // Where a render writes when its input is NOT a raw take and the
+  // caller named no output. A raw take has an obvious deliverable name
+  // (its own, without the `-raw`), and `knips render` uses it; anything
+  // else has none, and the CLI answers by demanding `--out`. Over MCP
+  // that refusal buys nothing — the input path already names a
+  // directory, which is the only thing the CLI's asymmetry is about —
+  // so a name is derived instead. It is deliberately NOT the input:
+  // rendering over the take destroys the raw material the whole
+  // raw-take model exists to keep (and TRenderSession refuses in = out
+  // outright anyway).
+  RenderedFileSuffix = '-rendered';
   ApngFileExtension = '.apng';
 
 type
-  TKnipsMcpTool = (kmtListDisplays, kmtListWindows, kmtRecordStart,
-    kmtRecordStop, kmtRecordStatus, kmtExportGif, kmtExportApng,
-    kmtExportTrim);
+  TKnipsMcpTool = (kmtListDisplays, kmtListWindows, kmtTakeInfo,
+    kmtRecordStart, kmtRecordStop, kmtRecordStatus, kmtRender,
+    kmtExportGif, kmtExportApng, kmtExportTrim);
 
 function KnipsMcpToolName(ATool: TKnipsMcpTool): string;
 function KnipsMcpToolDescription(ATool: TKnipsMcpTool): string;
+
+// The JSON Schema a tool's structuredContent is promised to match.
+//
+// These live here, beside the names and the descriptions, rather than
+// with the handlers that fill them: they are a promise about a shape,
+// the shape is decided by the neutral mapping, and a schema no test can
+// reach is a schema that goes stale. Every one of them is parsed and
+// checked against its own "required" list by this unit's suite, on every
+// host.
+//
+// Only inputSchema is subset-checked by the SDK at freeze time, so a
+// rich outputSchema costs the input validation nothing. "required" lists
+// only the keys EVERY path through a handler emits — record_status has
+// three different answers, and the notes are present only when there is
+// something to say.
+function KnipsMcpOutputSchema(ATool: TKnipsMcpTool): string;
 
 // Optional scalar readers. Absent leaves AValue alone and returns True;
 // present-but-wrong-type returns False with a message naming the
@@ -63,8 +92,18 @@ function McpHasArgument(AArguments: TJSONObject;
 // ~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4 — the same name and folder
 // the menu-bar app records into, so a client's recordings land where a
 // user already looks for them.
+//
+// BuildMcpRecordingOptions adds the app's own `-raw` suffix to this when
+// the recording asked for a smooth cursor and named no "out" — see
+// there.
 function DefaultMcpRecordingPath(const AHomeDirectory: string;
   const AWhen: TDateTime): string;
+
+// Where the render tool writes when the caller named no output:
+// `demo-raw.mp4` -> `demo.mp4` exactly as `knips render` derives it, and
+// anything else -> `demo-rendered.mp4` beside its input. See
+// RenderedFileSuffix for why the input itself is never the answer.
+function DefaultMcpRenderPath(const AInputPath: string): string;
 
 // Beside the input movie, same stem, the format's extension (and the
 // trim suffix for a passthrough trim, which may not overwrite its own
@@ -99,6 +138,27 @@ function BuildMcpRecordingOptions(AArguments: TJSONObject;
 function McpMayWriteRecording(AArguments: TJSONObject;
   const APath: string; AExists: Boolean; out AError: string): Boolean;
 
+// The post-recording effects, read off a tools/call arguments object.
+//
+// **Two flat scalars, not one nested object.** A `{"zoom": true,
+// "cursor": "smooth"}` argument reads better in isolation and is what a
+// JSON-RPC surface would reach for first — but the SDK's server-enforced
+// schema subset is flat scalar properties, and a schema that leaves it
+// has to be marked ApplicationValidated, which switches off call-time
+// argument checking for the WHOLE tool. Paying for one nested object
+// with the type checking of every other argument on export_gif is a bad
+// trade, and it is the same trade the region already refused: left/top/
+// width/height are four integers for exactly this reason. So the effects
+// are `zoom` and `cursor`, checked here.
+//
+// The four tunable fields of TExportEffects — the magnification, the
+// smoothing window, the zoom factor and its hold — are deliberately not
+// exposed. They are reserved: every one of them defaults to the value
+// that makes a rendered effect match the live one, which is the property
+// worth keeping, and an agent has no way to judge a better number.
+function ReadMcpExportEffects(AArguments: TJSONObject;
+  var AEffects: TExportEffects; out AError: string): Boolean;
+
 // export_gif / export_apng / export_trim arguments -> a validated
 // export request. AFormat is the tool's own format; an "out" whose
 // extension disagrees with it is refused rather than quietly
@@ -117,31 +177,263 @@ function McpExportSummary(const APath: string; AFormat: TExportFormat;
   APixelWidth, APixelHeight: Integer; AFrames: Int64;
   ADurationSeconds: Double; AOutputBytes: Int64): string;
 
+// What record_start says about the pointer track it is about to write,
+// or '' when there is nothing to say.
+//
+// An MCP recording has no main thread between tool calls: the stdio
+// transport is a blocking read-handle-write loop, so the pointer is
+// sampled at the start, once per record_status, and at the stop, and
+// nowhere else. A take polled twice has a three-sample track, and a
+// smooth cursor drawn from three samples is a straight line — which is
+// not a smooth cursor, it is a lie about where the pointer was.
+//
+// So it is said, up front, on the tool that decides it. Not
+// conditionally: MCP has no handshake in which a client could promise to
+// poll, so a warning that waited for one would never fire. It costs a
+// sentence, and the alternative is a take that cannot be recorded again
+// with the truth in it. record_stop then reports the samples that
+// actually arrived and take_info the largest gap between them, so the
+// claim is measured as well as made.
+function McpSparseTrackNote(ASmoothCursor: Boolean): string;
+
+// Arguments the render tool has no use for, refused rather than
+// dropped.
+//
+// The SDK deliberately ignores properties a schema does not declare, so
+// an agent that sent `width` to render would otherwise get a full-size
+// movie and no hint that the request went nowhere — the same trap
+// export_trim already documents and refuses for. A render re-encodes the
+// take at the take's own size, rate and length; scaling and slowing down
+// are what the animation exports are for, and cutting a range is what
+// export_trim is for, so the refusal names the tool that CAN do it
+// instead of merely turning the caller away.
+function McpRenderRefusesArguments(AArguments: TJSONObject;
+  out AError: string): Boolean;
+
+// The longest silence a take's pointer track actually contains, in
+// seconds; 0 for a track with fewer than two samples.
+//
+// TSidecarLog.MaxInterpolatedGap is a different number entirely — it is
+// the POLICY, the longest silence a reader may draw a straight line
+// through — and confusing the two is easy enough to be worth a function
+// with a name that cannot be. take_info reports both, and the comparison
+// between them is what says whether a drawn pointer will glide or stand
+// still.
+function LargestSampleGap(ALog: TSidecarLog): Double;
+
+// take_info's answer about one take on disk: what is already in its
+// pixels, what its event sidecar holds, and which post-recording effects
+// a render or an export could still give it.
+//
+// ALog is a loaded sidecar or nil; ALoadError is why it is nil, when it
+// is, because "there is no sidecar" and "this sidecar is a version this
+// knips cannot read" are different facts and only one of them is worth
+// re-recording over. The caller owns ALog; the returned object is the
+// caller's.
+function McpTakeInfoObject(const AMoviePath, ASidecarPath: string;
+  AMovieBytes: Int64; ALog: TSidecarLog;
+  const ALoadError: string): TJSONObject;
+
+// The same answer as one line of text, for a client that shows the
+// content block rather than the structured one.
+function McpTakeInfoSummary(const AMoviePath: string; ALog: TSidecarLog;
+  const ALoadError: string): string;
+
 implementation
 
 const
   ToolNames: array[TKnipsMcpTool] of string = (
-    'list_displays', 'list_windows', 'record_start', 'record_stop',
-    'record_status', 'export_gif', 'export_apng', 'export_trim');
+    'list_displays', 'list_windows', 'take_info', 'record_start',
+    'record_stop', 'record_status', 'render', 'export_gif',
+    'export_apng', 'export_trim');
 
   ToolDescriptions: array[TKnipsMcpTool] of string = (
     'List the displays that can be recorded, with their index, size in '
       + 'points, and backing scale.',
     'List the on-screen application windows that can be recorded, with '
       + 'their window id, size, application, and title.',
+    'Describe a recorded movie without changing anything: whether it is '
+      + 'a raw take, what is already baked into its pixels, what its '
+      + 'event sidecar holds, and which effects render, export_gif and '
+      + 'export_apng could still apply to it — with the reason when one '
+      + 'cannot. Ask this before render or an export rather than '
+      + 'guessing.',
     'Start recording a display, a region of one, or a single window to '
       + 'an .mp4/.mov file. Returns immediately; the recording runs '
-      + 'until record_stop. Only one recording at a time.',
+      + 'until record_stop. Only one recording at a time. Pass '
+      + 'smooth_cursor to record a RAW take — no pointer in the pixels, '
+      + 'the pointer track in a sidecar — which is the only kind of '
+      + 'recording whose effects can still be chosen afterwards, with '
+      + 'render.',
     'Stop the running recording and finalise the file. Returns the '
-      + 'output path and the frame counters.',
-    'Report whether a recording is running, and for how long. If the '
-    + 'writer has failed, this stops the recording and finalises the '
-    + 'partial file.',
-    'Convert a recorded movie to an animated GIF.',
+      + 'output path, the frame counters, and — for a raw take — where '
+      + 'render would write the deliverable. Nothing is rendered here: '
+      + 'the stop is the raw take plus its sidecar, and render is the '
+      + 'separate call that applies effects.',
+    'Report whether a recording is running, and for how long. Also '
+      + 'takes one pointer sample into the event sidecar, so polling '
+      + 'this is what makes a raw take''s pointer track dense enough to '
+      + 'draw from. If the writer has failed, this stops the recording '
+      + 'and finalises the partial file.',
+    'Render a raw take into a deliverable .mp4: the pointer drawn back '
+      + 'from the event sidecar''s track and a zoom driven by its '
+      + 'clicks, with the audio copied sample-for-sample rather than '
+      + 're-encoded. The take is left on disk, so the same recording can '
+      + 'be rendered again with different effects. Ask take_info first '
+      + 'for which effects this take can still have.',
+    'Convert a recorded movie to an animated GIF, optionally with the '
+      + 'post-recording effects applied from its event sidecar.',
     'Convert a recorded movie to an animated PNG (APNG): truecolour, '
-      + 'larger than a GIF, no palette banding.',
+      + 'larger than a GIF, no palette banding. Takes the same effects '
+      + 'as export_gif.',
     'Cut a movie down to a time range by copying the coded samples into '
       + 'a new container — no decode, no re-encode, no quality loss.');
+
+  // See KnipsMcpOutputSchema.
+  DisplaysOutputSchema =
+    '{"type":"object","properties":{"displays":{"type":"array","items":'
+    + '{"type":"object","properties":{"index":{"type":"integer"},'
+    + '"display_id":{"type":"integer"},"width":{"type":"integer"},'
+    + '"height":{"type":"integer"},"scale":{"type":"integer"},'
+    + '"main":{"type":"boolean"}}}}},"required":["displays"]}';
+  WindowsOutputSchema =
+    '{"type":"object","properties":{"windows":{"type":"array","items":'
+    + '{"type":"object","properties":{"window_id":{"type":"integer"},'
+    + '"width":{"type":"integer"},"height":{"type":"integer"},'
+    + '"application":{"type":"string"},"title":{"type":"string"}}}}},'
+    + '"required":["windows"]}';
+  TakeInfoOutputSchema =
+    '{"type":"object","properties":{"path":{"type":"string"},'
+    + '"bytes":{"type":"integer"},"sidecar_path":{"type":"string"},'
+    + '"has_sidecar":{"type":"boolean"},"raw":{"type":"boolean"},'
+    + '"fully_renderable":{"type":"boolean"},'
+    + '"can_draw_cursor":{"type":"boolean"},'
+    + '"can_zoom_on_click":{"type":"boolean"},'
+    + '"cursor_already_baked":{"type":"boolean"},'
+    + '"cursor_render":{"type":"string"},"target":{"type":"string"},'
+    + '"baked_zoom_on_click":{"type":"boolean"},'
+    + '"baked_follow_mouse":{"type":"boolean"},'
+    + '"baked_window_follow":{"type":"boolean"},'
+    + '"width":{"type":"integer"},"height":{"type":"integer"},'
+    + '"scale":{"type":"integer"},"fps":{"type":"integer"},'
+    + '"audio":{"type":"string"},'
+    + '"duration_seconds":{"type":"number"},"frames":{"type":"integer"},'
+    + '"pointer_samples":{"type":"integer"},"clicks":{"type":"integer"},'
+    + '"usable_clicks":{"type":"integer"},'
+    + '"sample_hz":{"type":"number"},'
+    + '"max_sample_gap_seconds":{"type":"number"},'
+    + '"interpolation_limit_seconds":{"type":"number"},'
+    + '"finished":{"type":"boolean"},"reason":{"type":"string"},'
+    + '"cursor_reason":{"type":"string"},"zoom_reason":{"type":"string"},'
+    + '"sidecar_error":{"type":"string"},'
+    + '"render_output_path":{"type":"string"}},'
+    + '"required":["path","bytes","sidecar_path","has_sidecar","raw",'
+    + '"fully_renderable","can_draw_cursor","can_zoom_on_click",'
+    + '"cursor_already_baked","render_output_path"]}';
+  RecordStartOutputSchema =
+    '{"type":"object","properties":{"recording":{"type":"boolean"},'
+    + '"path":{"type":"string"},"width":{"type":"integer"},'
+    + '"height":{"type":"integer"},"fps":{"type":"integer"},'
+    + '"audio":{"type":"string"},"big_cursor":{"type":"boolean"},'
+    + '"smooth_cursor":{"type":"boolean"},"raw":{"type":"boolean"},'
+    + '"note":{"type":"string"}},'
+    + '"required":["recording","path",'
+    + '"width","height","fps","audio","big_cursor","smooth_cursor",'
+    + '"raw"]}';
+  RecordStopOutputSchema =
+    '{"type":"object","properties":{"path":{"type":"string"},'
+    + '"width":{"type":"integer"},"height":{"type":"integer"},'
+    + '"duration_seconds":{"type":"number"},"frames":{"type":"integer"},'
+    + '"dropped_frames":{"type":"integer"},'
+    + '"failed_appends":{"type":"integer"},'
+    + '"heartbeats":{"type":"integer"},'
+    + '"heartbeats_refused":{"type":"integer"},'
+    + '"raw":{"type":"boolean"},"sidecar_path":{"type":"string"},'
+    + '"pointer_samples":{"type":"integer"},'
+    + '"render_output_path":{"type":"string"},'
+    + '"advice":{"type":"string"},'
+    + '"bytes":{"type":"integer"}},'
+    + '"required":["path","width","height","duration_seconds","frames",'
+    + '"dropped_frames","failed_appends","heartbeats",'
+    + '"heartbeats_refused","raw","pointer_samples",'
+    + '"render_output_path","bytes"]}';
+  RecordStatusOutputSchema =
+    '{"type":"object","properties":{"recording":{"type":"boolean"},'
+    + '"failed":{"type":"boolean"},"finalised":{"type":"boolean"},'
+    + '"path":{"type":"string"},"elapsed_seconds":{"type":"number"},'
+    + '"frames":{"type":"integer"},"dropped_frames":{"type":"integer"},'
+    + '"failed_appends":{"type":"integer"},'
+    + '"heartbeats":{"type":"integer"},'
+    + '"heartbeats_refused":{"type":"integer"},'
+    + '"pointer_samples":{"type":"integer"},'
+    + '"width":{"type":"integer"},'
+    + '"height":{"type":"integer"},"fps":{"type":"integer"}},'
+    + '"required":["recording"]}';
+  RenderOutputSchema =
+    '{"type":"object","properties":{"path":{"type":"string"},'
+    + '"input_path":{"type":"string"},"width":{"type":"integer"},'
+    + '"height":{"type":"integer"},"frames":{"type":"integer"},'
+    + '"duration_seconds":{"type":"number"},"bytes":{"type":"integer"},'
+    + '"copied":{"type":"boolean"},"zoom":{"type":"boolean"},'
+    + '"cursor":{"type":"string"},"zoom_applied":{"type":"boolean"},'
+    + '"zoomed_frames":{"type":"integer"},"clicks":{"type":"integer"},'
+    + '"cursor_drawn":{"type":"boolean"},'
+    + '"cursor_frames":{"type":"integer"},'
+    + '"cursor_off_frame_frames":{"type":"integer"},'
+    + '"synthesized_frames":{"type":"integer"},'
+    + '"synthesis_fps":{"type":"integer"},'
+    + '"unframed_frames":{"type":"integer"},'
+    + '"audio_tracks":{"type":"integer"},'
+    + '"audio_samples":{"type":"integer"},'
+    + '"audio_passthrough":{"type":"boolean"},'
+    + '"elapsed_seconds":{"type":"number"},'
+    + '"realtime_factor":{"type":"number"},'
+    + '"sidecar_path":{"type":"string"},"framing_note":{"type":"string"},'
+    + '"cursor_note":{"type":"string"},"zoom_note":{"type":"string"}},'
+    // Every key the handler emits on every successful path, which is the
+    // rule this file states at the top and used to keep only half of:
+    // eight of these were emitted unconditionally and promised
+    // conditionally, which tells a client to guard for an absence that
+    // cannot happen. Only sidecar_path and the three notes are genuinely
+    // conditional.
+    + '"required":["path","input_path","width","height","frames",'
+    + '"duration_seconds","bytes","copied","zoom","cursor",'
+    + '"zoom_applied","zoomed_frames","clicks","cursor_drawn",'
+    + '"cursor_frames","cursor_off_frame_frames","synthesized_frames",'
+    + '"synthesis_fps","unframed_frames","audio_tracks","audio_samples",'
+    + '"audio_passthrough","elapsed_seconds","realtime_factor"]}';
+  ExportOutputSchema =
+    '{"type":"object","properties":{"path":{"type":"string"},'
+    + '"format":{"type":"string"},"width":{"type":"integer"},'
+    + '"height":{"type":"integer"},"frames":{"type":"integer"},'
+    + '"duration_seconds":{"type":"number"},"bytes":{"type":"integer"},'
+    + '"zoom":{"type":"boolean"},"cursor":{"type":"string"},'
+    + '"zoom_applied":{"type":"boolean"},'
+    + '"zoomed_frames":{"type":"integer"},"clicks":{"type":"integer"},'
+    + '"cursor_drawn":{"type":"boolean"},'
+    + '"cursor_frames":{"type":"integer"},'
+    + '"cursor_off_frame_frames":{"type":"integer"},'
+    + '"framing_note":{"type":"string"},"cursor_note":{"type":"string"},'
+    + '"zoom_note":{"type":"string"},'
+    // As RenderOutputSchema: everything the handler always emits.
+    // framing_note, cursor_note, zoom_note and advice are the only
+    // conditional keys.
+    + '"advice":{"type":"string"}},"required":["path","format","width",'
+    + '"height","frames","duration_seconds","bytes","zoom","cursor",'
+    + '"zoom_applied","zoomed_frames","clicks","cursor_drawn",'
+    + '"cursor_frames","cursor_off_frame_frames"]}';
+  TrimOutputSchema =
+    '{"type":"object","properties":{"path":{"type":"string"},'
+    + '"start_seconds":{"type":"number"},"end_seconds":{"type":"number"},'
+    + '"source_duration_seconds":{"type":"number"},'
+    + '"bytes":{"type":"integer"}},"required":["path","start_seconds",'
+    + '"end_seconds","source_duration_seconds","bytes"]}';
+
+  ToolOutputSchemas: array[TKnipsMcpTool] of string = (
+    DisplaysOutputSchema, WindowsOutputSchema, TakeInfoOutputSchema,
+    RecordStartOutputSchema, RecordStopOutputSchema,
+    RecordStatusOutputSchema, RenderOutputSchema, ExportOutputSchema,
+    ExportOutputSchema, TrimOutputSchema);
 
 function KnipsMcpToolName(ATool: TKnipsMcpTool): string;
 begin
@@ -151,6 +443,11 @@ end;
 function KnipsMcpToolDescription(ATool: TKnipsMcpTool): string;
 begin
   Result := ToolDescriptions[ATool];
+end;
+
+function KnipsMcpOutputSchema(ATool: TKnipsMcpTool): string;
+begin
+  Result := ToolOutputSchemas[ATool];
 end;
 
 function McpHasArgument(AArguments: TJSONObject;
@@ -251,6 +548,16 @@ begin
   Result := RecordingsDirectory(AHomeDirectory) + RecordingFileName(AWhen);
 end;
 
+function DefaultMcpRenderPath(const AInputPath: string): string;
+begin
+  if AInputPath = '' then
+    Exit('');
+  if IsRawTakePath(AInputPath) then
+    Exit(DeliverablePathFor(AInputPath));
+  Result := ChangeFileExt(AInputPath, '') + RenderedFileSuffix
+    + ExtractFileExt(AInputPath);
+end;
+
 function DefaultMcpExportPath(const AInputPath: string;
   AFormat: TExportFormat): string;
 var
@@ -288,7 +595,7 @@ end;
 // actually use. Inside a path or a quoted extension, a flag-looking run
 // is preceded by '.', '/', or '"' and passes through untouched.
 const
-  RewriteCount = 27;
+  RewriteCount = 29;
   McpMessageRewrites: array[0..RewriteCount - 1, 0..1] of string = (
     ('--scale must be 1, 2, or 0 for auto',
       'scale must be "auto", "1", or "2"'),
@@ -302,40 +609,42 @@ const
       + 'one asks for no pointer and the other for a bigger one. Pass '
       + 'exactly one of them'),
     ('--no-cursor and --smooth-cursor are mutually exclusive',
-      '"cursor": false and a smooth cursor are mutually exclusive: one '
-      + 'asks for no pointer at all and the other for one drawn in '
-      + 'afterwards'),
+      '"cursor": false and "smooth_cursor": true are mutually exclusive: '
+      + 'one asks for no pointer at all and the other leaves the movie '
+      + 'cursorless so that render can draw one back in'),
     ('--big-cursor and --smooth-cursor are mutually exclusive',
-      '"big_cursor": true and a smooth cursor are mutually exclusive: '
-      + 'one bakes an enlarged pointer into the movie and the other '
-      + 'leaves the movie cursorless for a later render'),
+      '"big_cursor": true and "smooth_cursor": true are mutually '
+      + 'exclusive: one bakes an enlarged pointer into the movie and the '
+      + 'other leaves the movie cursorless for a later render'),
     ('--effects=none cannot be combined with another effect',
       'an empty effect list cannot be combined with another effect'),
     ('--window and --rect are mutually exclusive',
       'a window and a region are mutually exclusive'),
     ('(see `knips windows`)', '(see list_windows)'),
     ('(see `knips displays`)', '(see list_displays)'),
+    // The one command name that now has a tool of the same shape behind
+    // it. `use \`knips render\` for an MP4 with effects` is advice an MCP
+    // client can act on — but only if it is told the name of the thing
+    // it can call.
+    ('`knips render`', 'the render tool'),
     ('--trim=1.5,3.5', 'trim_start=1.5 and trim_end=3.5'),
     ('--trim=0,3.5', 'trim_start=0 and trim_end=3.5'),
     ('--trim starts at', 'trim_start is at'),
     ('--rect', 'a region of left/top/width/height'),
     ('--trim', 'trim_start/trim_end'),
     ('--no-dither', 'dither'),
-    // Neither of these two has a JSON argument in this server today —
-    // the smooth cursor and the render's effects are CLI-only, and the
-    // MCP render surface is deliberately not built yet. They are here
-    // because the point of this table is that NO knips flag ever
-    // escapes into an MCP response, and a message naming one would
-    // otherwise send an agent looking for an argument that does not
-    // exist. Naming the thing rather than a key is the honest rewrite.
-    ('--smooth-cursor',
-      'a smooth cursor (recorded with the knips command line, not '
-      + 'offered by this server)'),
-    ('--effects',
-      'render effects (chosen with `knips render` on the command line, '
-      + 'not offered by this server)'),
+    // Both of these have a JSON argument now: record_start takes
+    // smooth_cursor, and render and the two animation exports take zoom
+    // and cursor. They used to be rewritten into a sentence explaining
+    // that the server did not offer them, which was true and is not any
+    // more.
+    ('--smooth-cursor', 'smooth_cursor'),
+    // Plural, because one flag became two arguments; a refusal that
+    // named `--effects` was about the pair.
+    ('--effects', 'the zoom and cursor arguments'),
     ('--big-cursor', 'big_cursor'),
     ('--no-cursor', 'cursor'),
+    ('--cursor', 'cursor'),
     ('--bitrate', 'bitrate'),
     ('--display', 'display'),
     ('--window', 'window'),
@@ -444,13 +753,14 @@ function BuildMcpRecordingOptions(AArguments: TJSONObject;
 var
   Audio, Scale: string;
   WindowID: Integer;
-  ShowsCursor, BigCursor: Boolean;
+  ShowsCursor, BigCursor, SmoothCursor, NamedOutput: Boolean;
 begin
   Result := False;
   AError := '';
   ARecording := DefaultRecordingOptions;
   ARecording.OutputPath := ADefaultPath;
 
+  NamedOutput := McpHasArgument(AArguments, 'out');
   if not McpOptionalString(AArguments, 'out', ARecording.OutputPath,
     AError) then
     Exit;
@@ -459,6 +769,26 @@ begin
     AError := 'no output path, and no default could be derived';
     Exit;
   end;
+  SmoothCursor := False;
+  if not McpOptionalBoolean(AArguments, 'smooth_cursor', SmoothCursor,
+    AError) then
+    Exit;
+  ARecording.SmoothCursor := SmoothCursor;
+  // The one flag that says this movie is deliberately incomplete: the
+  // pointer is left out of the pixels for a render to draw back from the
+  // sidecar. A take like that is not the deliverable, and naming it as
+  // though it were is what makes a client render over its own raw
+  // material later. So the derived name takes the menu-bar app's `-raw`
+  // suffix, and the pair on disk comes out exactly as the app writes it
+  // — `knips-….mp4` beside `knips-…-raw.mp4` — which is also what lets
+  // the render tool work out its own output with no argument at all.
+  //
+  // Only the DERIVED name: a caller that chose a path gets the path it
+  // chose. And only for the smooth cursor — an ordinary take and a big
+  // cursor take are finished pixels (still zoomable, but nothing is
+  // waiting to be put into them), so they keep the plain name.
+  if SmoothCursor and not NamedOutput then
+    ARecording.OutputPath := RawTakePathFor(ARecording.OutputPath);
   ARecording.OutputPath := ExpandFileName(ARecording.OutputPath);
   if not McpOptionalInteger(AArguments, 'display', ARecording.DisplayIndex,
     AError) then
@@ -558,11 +888,40 @@ begin
   end;
 end;
 
+function ReadMcpExportEffects(AArguments: TJSONObject;
+  var AEffects: TExportEffects; out AError: string): Boolean;
+var
+  Zoom: Boolean;
+  Cursor: string;
+begin
+  Result := False;
+  AError := '';
+  Zoom := AEffects.ZoomOnClick;
+  if not McpOptionalBoolean(AArguments, 'zoom', Zoom, AError) then
+    Exit;
+  AEffects.ZoomOnClick := Zoom;
+  Cursor := ExportCursorModeName(AEffects.Cursor);
+  if not McpOptionalString(AArguments, 'cursor', Cursor, AError) then
+    Exit;
+  if not ParseExportCursorMode(Cursor, AEffects.Cursor) then
+  begin
+    AError := '"cursor" must be "as-recorded", "none", "smooth", or '
+      + '"big"';
+    Exit;
+  end;
+  Result := True;
+end;
+
 function BuildMcpExportOptions(AArguments: TJSONObject;
   AFormat: TExportFormat; out AExport: TExportOptions;
   out AError: string): Boolean;
 const
   TrimInapplicable: array[0..2] of string = ('fps', 'width', 'dither');
+  // Refused separately from the three above, because the answer is
+  // different: those cannot be honoured by any movie output, while these
+  // can — by the render tool, which is where a caller that wants an MP4
+  // with effects should be sent rather than merely turned away.
+  TrimNoEffects: array[0..1] of string = ('zoom', 'cursor');
 var
   Requested: TExportFormat;
   Dither: Boolean;
@@ -612,6 +971,15 @@ begin
           + 'copies the coded samples unchanged', [TrimInapplicable[I]]);
         Exit;
       end;
+    for I := Low(TrimNoEffects) to High(TrimNoEffects) do
+      if McpHasArgument(AArguments, TrimNoEffects[I]) then
+      begin
+        AError := Format('"%s" does not apply to a passthrough trim: it '
+          + 'copies the coded samples unchanged, and an effect would '
+          + 'mean decoding and re-encoding the whole video. Use the '
+          + 'render tool for an MP4 with effects', [TrimNoEffects[I]]);
+        Exit;
+      end;
   end
   else
   begin
@@ -625,6 +993,8 @@ begin
     if not McpOptionalBoolean(AArguments, 'dither', Dither, AError) then
       Exit;
     AExport.Dither := Dither;
+    if not ReadMcpExportEffects(AArguments, AExport.Effects, AError) then
+      Exit;
   end;
 
   if not McpOptionalNumber(AArguments, 'trim_start',
@@ -656,6 +1026,222 @@ begin
   Result := Format('wrote %s: %s, %dx%d, %d frames, %.1fs, %d kB',
     [APath, ExportFormatName(AFormat), APixelWidth, APixelHeight, AFrames,
     ADurationSeconds, AOutputBytes div 1024]);
+end;
+
+function McpSparseTrackNote(ASmoothCursor: Boolean): string;
+begin
+  Result := '';
+  if not ASmoothCursor then
+    Exit;
+  Result := 'this is a raw take: no pointer is in its pixels, and the '
+    + 'pointer track is written to the event sidecar beside it. Over MCP '
+    + 'that track is only as dense as your polling — one sample at the '
+    + 'start, one for every record_status call, and one at the stop — '
+    + 'because nothing in this server runs between tool calls. A pointer '
+    + 'drawn from three samples is a straight line. Call record_status '
+    + 'every second or so while the take runs; record_stop reports how '
+    + 'many samples arrived, and take_info reports the largest gap '
+    + 'between them.';
+end;
+
+function McpRenderRefusesArguments(AArguments: TJSONObject;
+  out AError: string): Boolean;
+const
+  Rescaling: array[0..2] of string = ('fps', 'width', 'dither');
+  Ranging: array[0..1] of string = ('trim_start', 'trim_end');
+var
+  I: Integer;
+begin
+  AError := '';
+  Result := False;
+  for I := Low(Rescaling) to High(Rescaling) do
+    if McpHasArgument(AArguments, Rescaling[I]) then
+    begin
+      AError := Format('"%s" does not apply to a render: it re-encodes '
+        + 'the take at the take''s own size and rate. Use export_gif or '
+        + 'export_apng to scale a movie down or slow it', [Rescaling[I]]);
+      Exit;
+    end;
+  for I := Low(Ranging) to High(Ranging) do
+    if McpHasArgument(AArguments, Ranging[I]) then
+    begin
+      AError := Format('"%s" does not apply to a render: it renders the '
+        + 'whole take. Use export_trim to cut a movie down to a range',
+        [Ranging[I]]);
+      Exit;
+    end;
+  Result := True;
+end;
+
+function LargestSampleGap(ALog: TSidecarLog): Double;
+var
+  I: Integer;
+  Gap: Double;
+begin
+  Result := 0;
+  if (ALog = nil) or (ALog.SampleCount < 2) then
+    Exit;
+  for I := 1 to ALog.SampleCount - 1 do
+  begin
+    Gap := ALog.Sample(I).Time - ALog.Sample(I - 1).Time;
+    if Gap > Result then
+      Result := Gap;
+  end;
+end;
+
+// The two words the sidecar's target kind gets in a JSON answer.
+// SidecarTargetName is the format's own spelling and is not exported;
+// these are the same two words and are pinned by this unit's suite.
+function McpTargetName(AKind: TCaptureTargetKind): string;
+begin
+  if AKind = ctkWindow then
+    Result := 'window'
+  else
+    Result := 'display';
+end;
+
+function McpTakeInfoObject(const AMoviePath, ASidecarPath: string;
+  AMovieBytes: Int64; ALog: TSidecarLog;
+  const ALoadError: string): TJSONObject;
+var
+  Available: TSidecarEffectAvailability;
+begin
+  Available := AvailableExportEffects(ALog);
+  Result := TJSONObject.Create([
+    'path', AMoviePath,
+    'bytes', AMovieBytes,
+    'sidecar_path', ASidecarPath,
+    'has_sidecar', ALog <> nil,
+    // The two questions a caller planning a render asks first, and the
+    // three that say how much of the answer is already decided.
+    'raw', (ALog <> nil) and IsRawTake(ALog.Header),
+    'fully_renderable', Available.FullyRenderable,
+    'can_draw_cursor', Available.CanDrawCursor,
+    'can_zoom_on_click', Available.CanZoomOnClick,
+    'cursor_already_baked', Available.CursorAlreadyBaked,
+    // Where the render tool would write if it were called with this
+    // path and no "out". Answered here so a client can see the pair it
+    // is about to end up with before it commits to one.
+    //
+    // It is a NAME, not a promise that a render would succeed: a take
+    // with nothing left to apply is refused outright rather than
+    // duplicated, and this field is filled for it just the same. The two
+    // can_ flags above are what say whether the render would happen —
+    // both false means it would not, whatever this path says.
+    'render_output_path', DefaultMcpRenderPath(AMoviePath)]);
+  if Available.Reason <> '' then
+    Result.Add('reason', Available.Reason);
+  if Available.CursorReason <> '' then
+    Result.Add('cursor_reason', Available.CursorReason);
+  if Available.ZoomReason <> '' then
+    Result.Add('zoom_reason', Available.ZoomReason);
+  // Why there is no sidecar, when there is none and somebody said. An
+  // absent file and a file this knips is too old to read are different
+  // problems and only one of them is worth recording again over.
+  if (ALog = nil) and (ALoadError <> '') then
+    Result.Add('sidecar_error', ALoadError);
+  if ALog = nil then
+    Exit;
+
+  Result.Add('cursor_render',
+    SidecarCursorRenderName(ALog.Header.CursorRender));
+  Result.Add('target', McpTargetName(ALog.Header.TargetKind));
+  Result.Add('baked_zoom_on_click', ALog.Header.BakedZoomOnClick);
+  Result.Add('baked_follow_mouse', ALog.Header.BakedFollowMouse);
+  Result.Add('baked_window_follow', ALog.Header.BakedWindowFollow);
+  Result.Add('width', ALog.Header.PixelWidth);
+  Result.Add('height', ALog.Header.PixelHeight);
+  Result.Add('scale', ALog.Header.Scale);
+  Result.Add('fps', ALog.Header.FramesPerSecond);
+  Result.Add('audio', AudioModeName(ALog.Header.AudioMode));
+  Result.Add('sample_hz', ALog.Header.SampleHz);
+  Result.Add('pointer_samples', Int64(ALog.SampleCount));
+  Result.Add('clicks', ALog.ButtonCount);
+  // The clicks a zoom would actually answer, which is a smaller number
+  // than `clicks` and sometimes zero when `clicks` is not.
+  // AvailableExportEffects asks only whether the track has any button
+  // event at all; the render then drops the ones a zoom cannot use — a
+  // right button, a click in the menu-bar band, a click outside the
+  // rectangle the recording was showing at that instant. So a take could
+  // answer can_zoom_on_click: true and still come back from a render
+  // saying "nothing was clicked inside the recorded rectangle". Reported
+  // here so the planning answer carries the number the render will use,
+  // rather than only the one the availability check looked at.
+  Result.Add('usable_clicks', Length(ZoomClicksFromLog(ALog)));
+  // The density answer, and the reason it is here rather than left to be
+  // inferred from the sample count: a track can be dense for most of a
+  // take and have one two-minute hole in it, and it is the hole that
+  // decides whether a drawn pointer tells the truth.
+  //
+  // The pair is what makes it actionable. The first is measured — the
+  // longest silence this track actually contains. The second is the
+  // longest silence a reader is willing to draw a straight line through
+  // (docs/event-sidecar.md); past it the pointer HOLDS its last position
+  // instead. So a first number above the second says, precisely, that
+  // some stretch of the rendered take will show a pointer standing
+  // still. Over MCP that is the client's own polling, and no one else's,
+  // deciding it.
+  Result.Add('max_sample_gap_seconds', LargestSampleGap(ALog));
+  Result.Add('interpolation_limit_seconds', ALog.MaxInterpolatedGap);
+  // A take with no trailer did not finish: the process died, and the
+  // recovery pass has not been over it yet.
+  Result.Add('finished', ALog.HasTrailer);
+  if ALog.HasTrailer then
+  begin
+    Result.Add('duration_seconds', ALog.Trailer.DurationSeconds);
+    Result.Add('frames', ALog.Trailer.Frames);
+  end;
+end;
+
+function McpTakeInfoSummary(const AMoviePath: string; ALog: TSidecarLog;
+  const ALoadError: string): string;
+var
+  Available: TSidecarEffectAvailability;
+  Effects: string;
+begin
+  Available := AvailableExportEffects(ALog);
+  if ALog = nil then
+  begin
+    Result := AMoviePath + ': no readable event sidecar, so nothing can '
+      + 'be applied to it after the fact';
+    if ALoadError <> '' then
+      Result := Result + ' (' + ALoadError + ')';
+    Exit;
+  end;
+  Effects := '';
+  if Available.CanDrawCursor then
+    Effects := 'cursor';
+  if Available.CanZoomOnClick then
+    if Effects = '' then
+      Effects := 'zoom'
+    else
+      Effects := Effects + ' and zoom';
+  if Effects = '' then
+    Effects := 'nothing'
+  else
+    Effects := Effects + ' can still be applied';
+  Result := Format('%s: %dx%d, %d pointer samples, %d clicks, cursor %s '
+    + 'in the pixels; %s',
+    [AMoviePath, ALog.Header.PixelWidth, ALog.Header.PixelHeight,
+    ALog.SampleCount, ALog.ButtonCount,
+    SidecarCursorRenderName(ALog.Header.CursorRender), Effects]);
+  if Available.Reason <> '' then
+    Result := Result + ' (' + Available.Reason + ')';
+  // The structured answer carries both numbers, and comparing them is
+  // the whole point — but a client reading the text block would have to
+  // already know the rule to see it. So when this take's longest silence
+  // is longer than the longest one a reader will draw a line through,
+  // the consequence is said rather than left to be derived. Only for a
+  // take a pointer can still be drawn into: a baked take's track is
+  // nothing anybody will render from, and "poll record_status" is no
+  // advice for a file this server did not record.
+  if Available.CanDrawCursor
+    and (LargestSampleGap(ALog) > ALog.MaxInterpolatedGap) then
+    Result := Result + Format('. Its pointer track has a %.1fs gap, '
+      + 'longer than the %.1fs a reader will draw a straight line '
+      + 'through, so a drawn pointer stands still across it rather than '
+      + 'gliding — poll record_status more often for a denser track',
+      [LargestSampleGap(ALog), ALog.MaxInterpolatedGap]);
 end;
 
 end.

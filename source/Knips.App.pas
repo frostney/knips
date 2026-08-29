@@ -3229,12 +3229,12 @@ begin
           NoteError(Session.Report.Note);
           if (Session.Report.CursorNote <> '')
             and (Session.Report.CursorNote <> Session.Report.Note) then
-            LogMessage('render: no cursor drawn ('
-              + Session.Report.CursorNote + ')');
+            LogMessage('render: '
+              + EffectCursorNoteLine(Session.Report.CursorNote));
           if (Session.Report.ZoomNote <> '')
             and (Session.Report.ZoomNote <> Session.Report.Note) then
-            LogMessage('render: no zoom applied ('
-              + Session.Report.ZoomNote + ')');
+            LogMessage('render: '
+              + EffectZoomNoteLine(Session.Report.ZoomNote));
         end;
       finally
         Session.Free;
