@@ -23,7 +23,6 @@ program Knips.Export.Cadence.Test;
 {$I Knips.inc}
 
 uses
-  Math,
   SysUtils,
 
   Knips.Export.Cadence,

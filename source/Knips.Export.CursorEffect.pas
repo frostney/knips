@@ -5,13 +5,15 @@ unit Knips.Export.CursorEffect;
 // with the screen.
 //
 // This is the first member of the export-effects set (TExportEffects in
-// Knips.Options), and it is shaped as a member rather than as a feature so
-// the next one does not have to unpick it: post-hoc Zoom on Click will
-// drive a per-frame crop from the same sidecar's click track, and the
-// pointer's position will have to be transformed by that crop. The seam is
-// TCursorFrameMapping, which is already rebuilt per frame from whatever
-// rectangle the frame shows — a crop is one more thing that decides that
-// rectangle. Nothing here implements it.
+// Knips.Options), and it was shaped as a member rather than as a feature
+// so the next one would not have to unpick it. That paid off: post-hoc
+// Zoom on Click (Knips.Export.ZoomTrack) now drives a per-frame crop
+// from the same sidecar's click track, and the pointer is transformed by
+// that crop through the seam this unit was built with —
+// TCursorFrameMapping, rebuilt per frame from whatever rectangle the
+// frame shows. `DrawIntoCropped` and `DrawIntoPixels` are that seam
+// taken up; the crop is one more thing that decides the rectangle, and
+// nothing about the placement had to change to admit it.
 //
 // **What it is for.** A captured pointer is a captured pointer: it sits
 // wherever the compositor put it in each frame, and at twenty frames a
@@ -30,14 +32,21 @@ unit Knips.Export.CursorEffect;
 // scaled frame with the same premultiplied source-over Big Cursor uses
 // (Knips.Recording.CursorMath).
 //
-// **Only GIF and APNG, in this version.** They are the two formats the
-// pipeline re-encodes frame by frame, so they are the two that have a
-// frame to draw into. A movie output of `knips export` is a passthrough
-// trim — the same coded samples copied into a new container, no decode at
-// all — and putting a pointer into that would mean re-encoding the video,
-// which is a different feature with different costs. Nothing here does it,
-// and both the recorder and the exporter say so rather than leaving
-// somebody to find a cursorless MP4 later.
+// **Not only GIF and APNG any more.** They were the first two, because
+// they are the formats the export pipeline re-encodes frame by frame and
+// so the two that have a frame to draw into. A movie output of `knips
+// export` is still a passthrough trim — the same coded samples copied
+// into a new container, no decode at all — and still cannot take a
+// pointer, which the exporter says out loud rather than leaving somebody
+// to find a cursorless MP4 later.
+//
+// The MP4 that CAN take one is the deliverable: `knips render`
+// (Knips.Export.Render) decodes the raw take, draws the pointer through
+// `DrawIntoPixels` straight into the writer's own CVPixelBuffer, and
+// re-encodes. That is the third caller of this unit and the one the
+// menu-bar app uses on every stop; the re-encode this comment called "a
+// different feature with different costs" was built, and the costs are
+// measured in that unit's own header.
 //
 // **The smoothing.** A centred moving average over a short time window
 // (DefaultCursorSmoothingSeconds), which is
@@ -168,14 +177,29 @@ type
     // the reported count the number of frames in the file rather than
     // twice it.
     procedure ResetCounters;
-    property Ready: Boolean read FReady;
     // Whether the movie's sidecar asked for a synthetic pointer at all.
     // The difference between "no sidecar, nothing to do" and "the sidecar
     // asked and something went wrong" — the first is the ordinary case
     // for every movie ever recorded, the second is worth a line.
     property Asked: Boolean read FAsked;
-    property SpriteWidth: Integer read FSpriteWidth;
-    property SpriteHeight: Integer read FSpriteHeight;
+    // True when the drawn pointer never moves: every sample of the
+    // smoothed track holds exactly the position the first one does.
+    //
+    // Exact, not a tolerance, and asked of the RAW track. A pointer
+    // nobody touched is sampled from CGEventGetLocation over and over
+    // and comes back byte-identical — measured on a real take, 201
+    // samples with exactly one distinct x (3013.867) and one distinct y
+    // — so equality is the honest test and a threshold would only
+    // invent a boundary to be wrong at.
+    //
+    // It exists for the frame-synthesis bound: a render fills a gap only
+    // where the next instant would be a DIFFERENT picture, and with no
+    // zoom in play the only thing that can make one different is the
+    // pointer moving. A track that never moves therefore cannot produce
+    // a single synthesised frame, which is a fact about the take and not
+    // a guess about it. False when there is no track to answer from,
+    // which keeps the caller on the generous bound.
+    function TrackIsStationary: Boolean;
     // Frames the pointer went into, and frames where it was off the
     // captured rectangle. Reported by the exporter, for the same reason
     // Big Cursor reports its own: a synthetic cursor that silently drew
@@ -259,6 +283,23 @@ begin
   end;
 end;
 
+// **This function has a near-identical twin**, and the duplication is
+// deliberate rather than overlooked: Knips.Recording.CursorOverlay's TCursorOverlay.RenderSprite
+// builds the same sprite the same way — +[NSCursor arrowCursor], the
+// image's bitmap representation, a CGBitmapContextCreate at
+// premultiplied BGRA, one CGContextDrawImage at the scaled extent.
+//
+// What differs is the kernel, and it is not a parameter. This one draws at EXPORT time, at the OUTPUT's scale, into a
+// sprite the render and the GIF pipeline composite into scaled frames;
+// the other draws at record time at the capture's scale.
+// Unifying them would mean a third unit owning a Quartz drawing routine
+// that neither of these layers could then reach without importing it,
+// for a saving of about thirty lines — and the two are free to diverge
+// (a different magnification rule, a different colour space at export)
+// in a way a shared routine would fight. See docs/architecture.md.
+//
+// **Change them together.** A fix to one is a fix to the other, and the
+// only thing keeping them in step is this note in both files.
 function TExportCursor.RenderSprite(APixelsPerPoint: Double;
   out AError: string): Boolean;
 var
@@ -533,6 +574,33 @@ begin
   BlitPremultipliedBgra(APixels, ABytesPerRow, FPixels, FSpriteBytesPerRow,
     Plan);
   Inc(FDrawnFrames);
+end;
+
+function TExportCursor.TrackIsStationary: Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  if (FLog = nil) or (FLog.SampleCount <= 0) then
+    Exit;
+  // The RAW track, not the smoothed one, and that is the whole reason
+  // this reads the log rather than FSmoothed. Smoothing a constant track
+  // gives a constant track in arithmetic and not in floating point:
+  // SmoothSidecarPath sums a window and divides by its width, the width
+  // shrinks at both ends, and 3013.867 summed eleven times and divided
+  // by eleven need not come back as the bits it started as — so exact
+  // equality over the smoothed path answers False for a pointer that
+  // demonstrably never moved. The raw samples are what CGEventGetLocation
+  // actually returned, and a parked pointer returns them byte-identical.
+  //
+  // The implication runs the safe way, too: a raw track that never moves
+  // cannot produce a smoothed one that does by more than the last bit of
+  // a Double, and a sprite is blitted at a whole output pixel.
+  for I := 1 to FLog.SampleCount - 1 do
+    if (FLog.RawSamples[I].X <> FLog.RawSamples[0].X)
+      or (FLog.RawSamples[I].Y <> FLog.RawSamples[0].Y) then
+      Exit;
+  Result := True;
 end;
 
 function TExportCursor.SpritePlacement(AWidth, AHeight: Integer;

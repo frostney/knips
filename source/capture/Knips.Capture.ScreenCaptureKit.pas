@@ -53,7 +53,15 @@ const
 
   { SCFrameStatus — value of the SCStreamFrameInfoStatus attachment on
     every video sample buffer. Only Complete frames carry pixels worth
-    encoding; Idle/Blank/Suspended/Started/Stopped do not. }
+    encoding; Idle/Blank/Suspended/Started/Stopped do not.
+
+    The whole enum is transcribed although knips compares against
+    Complete and nothing else. That is deliberate and DOCUMENTARY: the
+    five unused names are what make the one used name a filter rather
+    than a magic zero, and a reader chasing "why was this frame dropped"
+    can put the number the attachment carried against them. The same
+    goes for the AVFoundation status enums transcribed in
+    Knips.Export.MovieReader, .MovieWriter and .MovieTrim. }
   SCFrameStatusComplete  = 0;
   SCFrameStatusIdle      = 1;
   SCFrameStatusBlank     = 2;

@@ -51,7 +51,44 @@ version-1 reader would **misread** rather than merely miss. **A reader must
 refuse a file whose `version` is above its own** — not skip it, not
 half-read it. `TSidecarLog.LoadFromFile` fails with a message and sets
 `TooNew`. A file whose `format` is not `knips-events` is refused for the
-same reason and more bluntly: it is not one of these at all.
+same reason and more bluntly: it is not one of these at all —
+`LoadFromFile` fails with its own message and sets `ForeignFormat`.
+
+Those are the only ways a file's *contents* can fail a load. There are
+two more that are not about contents at all: the file is not there, and
+the file could not be read (a permission, a vanished volume) — both of
+which `LoadFromFile` reports with the underlying message. Everything else
+a bad file can do is a skipped line.
+
+### What a reader must survive
+
+A sidecar is not a file knips was handed. The recovery pass reads every
+`*.knips.jsonl` in the recording directory at every `knips record` and at
+every launch of the menu-bar app, before anything else happens — so the
+reader's input is whatever is in that directory. Knips' own reader
+therefore refuses three shapes, and each refusal is a **skipped line**,
+counted in `SkippedLines`, never fatal. Two of them are decided *before*
+the line is handed to a JSON parser at all, because by then it is too
+late; the third is decided after the parse, on the values it returned:
+
+| refused | limit | why |
+| --- | --- | --- |
+| a deeply nested line | more than **64** levels of `[`/`{` | JSON parsers recurse. Fifty thousand `[` on one line is fifty thousand stack frames, and the process dies of a stack overflow — a *signal*, which a `try` around the parse cannot catch. Measured: one such file in the recording directory made `knips record` exit 139, silently, at every start. The format's deepest real line is one object of scalars |
+| an enormous line | more than **1 MB** | a line need not nest to be pathological, and this is a thousand times the longest line the format writes |
+| a number that cannot be its field | **after the parse**: any of `t`, `x`, `y`, `sx`/`sy`/`sw`/`sh`, `host`, `duration` or a header measurement that is not finite, and any *integer* field (`version`, `pid`, `pixelWidth`, `pixelHeight`, `scale`, `fps`, `displayId`, `frames`, `samples`, `n`, `b`) that is not finite or does not fit the field | `1e999` is legal JSON and parses to `+Inf`. Two infinities subtracted are a `NaN`, and a `NaN` walks through interpolation and staleness tests into a render that is quietly wrong. The integer fields are worse than that: rounding an infinity into an integer **raises**, and on knips' own reader that used to escape the load and kill the process — so this is the check that has to be a reader's, not a caller's. On macOS the same read is *masked* rather than fatal and comes back as `-1`, which is how a `"version":-1` slips past a version test and a `"pid":-1` reads as a live process |
+
+A reader that cannot check every field should at least wrap the reading
+of a line, not only its parse: knips' own does both, and the wrapper is
+what makes the promise above true for record kinds nobody has written
+yet.
+
+A header carrying a non-finite number is skipped **whole**, not
+field-by-field: `baseWidth` seeds every sample's carried-forward source
+rectangle and `sampleHz` is divided by, so half a header is worse than
+none.
+
+These are knips' numbers, not requirements of the format. Another reader
+should pick its own — but it should pick some.
 
 ## The clock
 
@@ -121,6 +158,17 @@ screen position cannot be mapped into them. The header says
 `"target":"window"` for those, the samples stay in *global* screen points,
 and a reader must not try the arithmetic above. Display recordings, with or
 without a region, map exactly.
+
+On a window take the recorder has no rectangle to report, so
+`baseX`/`baseY`/`baseWidth`/`baseHeight` — and every sample's
+`sx`/`sy`/`sw`/`sh`, which are carried forward from them — are all **zero**.
+That is not a rectangle at the origin; it is the absence of one, and a
+reader dividing by `sw` gets a division by zero rather than a wrong answer.
+Test `target` before the arithmetic, not the numbers: they are zero because
+the mapping does not exist, which is the same thing `"target":"window"`
+already says. (Knips' own reader answers this as a named reason —
+`AvailableExportEffects` refuses a window take before it looks at the
+rectangle at all.)
 
 ## Sampling
 
@@ -338,7 +386,9 @@ is not a click into it.
 `frames` is how many frames reached the movie, `duration` is the movie's
 own length in seconds (last frame PTS minus first), and `samples` is how
 many `cursor` records were written. `recovered` is `true` when this trailer
-was written by the recovery pass rather than by the recording itself.
+was written by the recovery pass rather than by the recording itself — and
+on one of those `frames` is `0` rather than a count, for the reason under
+*Recovery*.
 
 **`frames` counts what is in the file, which is no longer the same as
 what the capture delivered.** Since the idle heartbeat, a take whose
@@ -371,14 +421,48 @@ another machine on a shared volume — spelled out in
 writing its own recovery should read them before trusting `kill(pid, 0)`.
 
 One layout rule follows from how knips scans: **the trailer must be the
-last record, within the final 4096 bytes of the file.** Knips' recovery
-pass reads only that tail to decide whether a take is finished; a writer
-that appends anything after the trailer, or pads the file past that
-window, makes its takes look permanently unfinished to knips. The next `knips record`, and the menu-bar app at launch,
+last record, within the final 4096 bytes of the file.** That is not a
+request — it is `TailBytes = 4096` in
+`Knips.Recording.Recovery.TailLooksFinished`, which seeks to the end,
+reads that many bytes and asks whether `"k":"trailer"` occurs in them.
+Nothing else is parsed for a take that answers yes. So a writer that
+appends anything after the trailer, or pads the file past that window,
+makes its takes look permanently unfinished to knips — and one that
+manages to put the string `"k":"trailer"` into the tail some other way
+makes an unfinished take look finished, which is the direction that
+loses data. (Knips' own writer cannot: `QuoteJsonString` escapes every
+quote in a movie name, so no name can fake the match.) The window is a
+cost decision, not an arbitrary one: parsing every sidecar to find the
+one without a trailer cost 5.12 s over fifty finished takes and would go
+on climbing, and this check runs at every start.
+
+The next `knips record`, and the menu-bar app at launch,
 run that check over the directory and finish off anything they find — a
 passthrough re-mux into an ordinary non-fragmented movie — then append the
 trailer with `"recovered":true` so the take is never picked up twice. See
 `Knips.Recording.Recovery`.
+
+**A recovery-written trailer reports `"frames":0`, and it is not a count.**
+Counting honestly means decoding the whole movie, and a recovery pass that
+runs before every recording and at every launch must not do that; the
+recorder's own counter died with the process. So `CloseSidecar` writes zero
+deliberately, and `duration` — read back from the recovered movie itself —
+plus `samples` are what actually say how much survived.
+
+**`duration` can be `0` on a recovered take as well**, and for a
+different reason: it is read back off the movie, so it exists only where
+the movie could be read. Three of the four paths that close a sidecar
+off pass `0` — the movie is empty (the crash beat the first fragment),
+the movie will not open at all, or it opens and reports no duration —
+and each of those leaves the file exactly as it was found. Only the
+fourth, where the movie really was read, carries a length; a *failed
+re-mux* still does, because the duration was known before the re-mux was
+attempted. So on a `"recovered":true` trailer, `frames` is never a count
+and `duration` is one only when it is non-zero. **A reader must
+therefore not divide by `frames`, or treat `frames = 0` as an empty movie,
+without first testing `recovered`.** On a normally finished take the field
+means what the *trailer* section says it means; on a recovered one it means
+"nobody counted".
 
 The crash itself costs at most one movie fragment (two seconds) and one
 buffer of samples (about a second): the anchor and every button record are
@@ -407,6 +491,27 @@ and the crop in its framing. The deliverable's copy therefore carries
 `"cursor":"baked"` and `"bakedZoomOnClick":true` where the render applied
 them, so `AvailableExportEffects` refuses to apply either a second time —
 which is what makes a rendered file safe to hand back to knips.
+
+Two more header fields are the render's own rather than the take's, and
+both matter to anything that runs the recovery test over a directory:
+
+- **`pid` is the *rendering* process, not the recorder.** The field is
+  documented as "the process that wrote the file" and recovery tests it
+  with `kill(pid, 0)`; carrying the recorder's pid across would name a
+  process that has nothing to do with this file, and on a pid that had
+  since been reused would name a live one. `WriteDeliverableSidecar` sets
+  it to its own. A `knips render` run days later therefore stamps that
+  day's pid on the deliverable, which is correct and is also why the two
+  sidecars of one take routinely disagree here.
+- **`recovered` in the trailer is inherited from the raw take's**, not
+  recomputed. The render copies the take's trailer and overwrites only
+  `frames` (the deliverable's own count) and `samples`. So a deliverable
+  rendered from a crash-recovered take says `"recovered":true` even though
+  the render itself completed normally. Read it as a fact about the
+  *pixels' provenance* — this movie descends from a take that was finished
+  off after a crash — and not as a claim about how this file was written.
+  It also means the deliverable's `frames` is a real count while the raw
+  take's beside it is `0`.
 
 Everything else is carried across unchanged, and one thing deliberately is
 not:
@@ -444,6 +549,19 @@ not:
   and recovery re-muxes without trimming), and a crop is only as good as
   the rectangle it is measured from, so those frames are passed through
   whole and the render says how many.
+
+**A deliverable's sidecar is not time-ordered the way a recorded one is.**
+A recording writes each record as it happens, so a recorded file's lines
+ascend in `t` whatever their kind — a `button` sits between the two
+`cursor` samples that bracket it. `WriteDeliverableSidecar` replays the
+loaded log instead, and it replays it by kind: the header, the anchor,
+**every** `cursor` sample, then **every** `button` record, then the
+trailer. Within each kind the times still ascend; across kinds they jump
+backwards once, at the seam. Nothing in the format ever promised
+otherwise — the rule has always been that a reader uses each record's own
+`t` — but code that grew up on recorded files and quietly assumed a
+monotonic stream will find its first counter-example here. Sort by `t`, or
+read each kind into its own array, as `TSidecarLog` does.
 
 **A take that cannot be rendered is never split in the first place.** The
 app asks before it names the file, and the answer is written straight to

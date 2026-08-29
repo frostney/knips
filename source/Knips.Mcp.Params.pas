@@ -288,10 +288,29 @@ end;
 // actually use. Inside a path or a quoted extension, a flag-looking run
 // is preceded by '.', '/', or '"' and passes through untouched.
 const
-  RewriteCount = 21;
+  RewriteCount = 27;
   McpMessageRewrites: array[0..RewriteCount - 1, 0..1] of string = (
     ('--scale must be 1, 2, or 0 for auto',
       'scale must be "auto", "1", or "2"'),
+    // The three cursor refusals, as whole sentences. A token-for-token
+    // rewrite of these produces "cursor and big_cursor are mutually
+    // exclusive", which is true of the flags and useless as advice: the
+    // JSON argument is a BOOLEAN, so the client has to be told which
+    // value of which key to change, not which two words disagree.
+    ('--no-cursor and --big-cursor are mutually exclusive',
+      '"cursor": false and "big_cursor": true are mutually exclusive: '
+      + 'one asks for no pointer and the other for a bigger one. Pass '
+      + 'exactly one of them'),
+    ('--no-cursor and --smooth-cursor are mutually exclusive',
+      '"cursor": false and a smooth cursor are mutually exclusive: one '
+      + 'asks for no pointer at all and the other for one drawn in '
+      + 'afterwards'),
+    ('--big-cursor and --smooth-cursor are mutually exclusive',
+      '"big_cursor": true and a smooth cursor are mutually exclusive: '
+      + 'one bakes an enlarged pointer into the movie and the other '
+      + 'leaves the movie cursorless for a later render'),
+    ('--effects=none cannot be combined with another effect',
+      'an empty effect list cannot be combined with another effect'),
     ('--window and --rect are mutually exclusive',
       'a window and a region are mutually exclusive'),
     ('(see `knips windows`)', '(see list_windows)'),
@@ -302,6 +321,19 @@ const
     ('--rect', 'a region of left/top/width/height'),
     ('--trim', 'trim_start/trim_end'),
     ('--no-dither', 'dither'),
+    // Neither of these two has a JSON argument in this server today —
+    // the smooth cursor and the render's effects are CLI-only, and the
+    // MCP render surface is deliberately not built yet. They are here
+    // because the point of this table is that NO knips flag ever
+    // escapes into an MCP response, and a message naming one would
+    // otherwise send an agent looking for an argument that does not
+    // exist. Naming the thing rather than a key is the honest rewrite.
+    ('--smooth-cursor',
+      'a smooth cursor (recorded with the knips command line, not '
+      + 'offered by this server)'),
+    ('--effects',
+      'render effects (chosen with `knips render` on the command line, '
+      + 'not offered by this server)'),
     ('--big-cursor', 'big_cursor'),
     ('--no-cursor', 'cursor'),
     ('--bitrate', 'bitrate'),

@@ -27,12 +27,18 @@ unit Knips.Export.Cadence;
 // new instant. The picture behind the effect is unchanged, which is
 // true: nothing on screen changed, or there would have been a frame.
 //
-// **What it does not do.** It fills gaps *between* captured frames. A
-// take whose screen went static loses its tail at capture time — there
-// is no later frame to interleave towards, and no arithmetic here can
-// invent one. Putting that back is a recorder-side heartbeat that
-// re-presents the last frame while ScreenCaptureKit is idle; this unit
-// is the other half and not the whole of it.
+// **What it does not do.** It fills gaps *between* captured frames, and
+// only those. A take whose screen went static has no later frame to
+// interleave towards, and no arithmetic here can invent one.
+//
+// That used to be a live hole in the product and is now only a division
+// of labour: the missing half shipped as the recorder-side **idle
+// heartbeat** (Knips.Recording.Heartbeat), which re-presents the last
+// frame about twice a second while ScreenCaptureKit is idle and once
+// more at the stop, so the movie spans the take whatever the screen was
+// doing. This unit fills the gaps inside a movie; the heartbeat is what
+// makes sure the movie reaches the end of the recording. Neither
+// replaces the other.
 //
 // **What this unit is.** The two decisions that must not live inside a
 // framework loop:

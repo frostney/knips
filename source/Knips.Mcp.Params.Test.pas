@@ -666,12 +666,17 @@ begin
   // The two cursor arguments contradict each other. The builder hands
   // back the shared message in the CLI's words — Knips.Mcp rewrites it
   // at the one boundary where every failure becomes an MCP result — so
-  // what is checked here is that the rewrite has both flags to work
-  // from and leaves an agent nothing it has never seen.
+  // what is checked here is that the rewrite leaves an agent nothing it
+  // has never seen, AND that it says which value of which key to change.
+  // "cursor and big_cursor are mutually exclusive" was true of the flags
+  // and useless as advice: both arguments are booleans, and the two that
+  // clash are `false` and `true` rather than the keys themselves.
   Expect<Boolean>(Build('{"big_cursor": true, "cursor": false}', Recording,
     Error)).ToBe(False);
   Expect<string>(McpArgumentMessage(Error))
-    .ToBe('cursor and big_cursor are mutually exclusive');
+    .ToBe('"cursor": false and "big_cursor": true are mutually '
+    + 'exclusive: one asks for no pointer and the other for a bigger '
+    + 'one. Pass exactly one of them');
   // A window recording cannot have one; the reason travels unchanged.
   Expect<Boolean>(Build('{"big_cursor": true, "window": 42}', Recording,
     Error)).ToBe(False);
@@ -1195,8 +1200,13 @@ begin
   // And the layers a builder never sees.
   for I := Low(SessionMessages) to High(SessionMessages) do
   begin
-    Expect<Boolean>(Pos('--', SessionMessages[I]) > 0)
-      .ToBe(Pos('--', SessionMessages[I]) > 0);
+    // The fixture really does carry something to be rewritten — a
+    // `--flag` or a `knips <command>` — because without this the two
+    // assertions below would pass just as well on a message that never
+    // had one, which is the one thing they must not do. (This used to
+    // assert a value against itself, which is true of anything.)
+    Expect<Boolean>((Pos('--', SessionMessages[I]) > 0)
+      or (Pos('knips ', SessionMessages[I]) > 0)).ToBe(True);
     Expect<Boolean>(Pos('--', McpArgumentMessage(SessionMessages[I])) > 0)
       .ToBe(False);
     Expect<Boolean>(Pos('knips ',

@@ -157,9 +157,11 @@ type
       out ASumRed, ASumGreen, ASumBlue: Int64;
       out AErrorRed, AErrorGreen, AErrorBlue: Double);
     function GetDistinctColors: Integer;
+    // Zeroes both histograms. Private: it is what the constructor does,
+    // and a quantiser is built per pass rather than reused.
+    procedure Reset;
   public
     constructor Create;
-    procedure Reset;
     // Accumulates one frame's colours. Sub-samples internally so one
     // frame costs at most GifMaxSampledPixelsPerFrame pixels of work,
     // whatever the frame size. There is no ceiling on how many frames
@@ -330,18 +332,7 @@ type
     property BytesWritten: Int64 read FBytesWritten;
     // Colour table entries actually written (a power of two).
     property TableEntries: Integer read FTableEntries;
-    // The reserved "unchanged" index, one past the last real colour.
-    property TransparentIndex: Integer read FTransparentIndex;
   end;
-
-// The packed 24-bit key an 8-bit colour has in the exact histogram and
-// in the encoder's nearest-colour memo.
-function GifColorKey(ARed, AGreen, ABlue: Integer): Integer; inline;
-
-// Histogram cell index for an 8-bit colour (the 6-bit fallback).
-function GifCellIndex(ARed, AGreen, ABlue: Integer): Integer; inline;
-
-function GifClampDelay(ACentiseconds: Integer): Integer;
 
 implementation
 
@@ -356,6 +347,10 @@ const
   DitherDownRight = 1;
   DitherTotal = 16;
 
+// The packed 24-bit key an 8-bit colour has in the exact histogram and
+// in the encoder's nearest-colour memo. Implementation-only: the three
+// helpers below are this unit's own arithmetic, and the unit's public
+// surface is the quantiser, the encoder and the palette record.
 function GifColorKey(ARed, AGreen, ABlue: Integer): Integer;
 begin
   Result := (ARed shl 16) or (AGreen shl 8) or ABlue;
@@ -370,6 +365,7 @@ begin
     and ((1 shl ABits) - 1);
 end;
 
+// Histogram cell index for an 8-bit colour (the 6-bit fallback).
 function GifCellIndex(ARed, AGreen, ABlue: Integer): Integer;
 begin
   Result := ((ARed shr (8 - GifHistogramBits)) shl (2 * GifHistogramBits))

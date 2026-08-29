@@ -41,6 +41,8 @@ uses
 
 const
   // AVAssetExportSessionStatus, verified against AVAssetExportSession.h.
+  // Transcribed whole though only three of the six are compared against;
+  // the rest are documentary, as in Knips.Export.MovieWriter.
   AVAssetExportSessionStatusUnknown = 0;
   AVAssetExportSessionStatusWaiting = 1;
   AVAssetExportSessionStatusExporting = 2;

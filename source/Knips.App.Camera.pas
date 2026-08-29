@@ -425,15 +425,9 @@ type
     // and wrong in the middle of a recording.
     class function IsAuthorized: Boolean;
     property Visible: Boolean read FVisible;
-    property Docked: Boolean read FDocked;
     // Whether a dock armed a ride that is still live. False once the
     // recording undocks.
     property Riding: Boolean read FRiding;
-    // Whether the preview layer's connection really did come back
-    // mirrored. Cosmetic, so a False is not an error — but it is the one
-    // thing about this window that cannot be seen from the outside
-    // without a camera pointed at something asymmetric.
-    property Mirrored: Boolean read FMirrored;
     // Assigning applies immediately when the window is up: the window
     // resizes about its own centre and the layer's corner radius follows.
     property Shape: TCameraShape read FShape write SetShape;
@@ -892,8 +886,16 @@ begin
   if (Screens = nil) or (Screens.count = 0) then
     Exit;
 
-  // objectForKey: separates "never saved" from a legitimate 0.
-  if Defaults.objectForKey(DefaultsKey(CameraOriginXDefaultsKey)) <> nil then
+  // objectForKey: separates "never saved" from a legitimate 0 — and it
+  // is asked of BOTH keys. They are written together, so in practice
+  // either both are there or neither is; but `defaults write` is a
+  // public interface (see SanitizeStoredRegion for the same reasoning
+  // about the region), so somebody really can leave one of the two
+  // behind, and reading Y under X's guard turned that into a window
+  // pinned to the bottom of the screen rather than into the fallback.
+  if (Defaults.objectForKey(DefaultsKey(CameraOriginXDefaultsKey)) <> nil)
+    and (Defaults.objectForKey(DefaultsKey(CameraOriginYDefaultsKey))
+    <> nil) then
   begin
     Result.X := Defaults.doubleForKey(DefaultsKey(CameraOriginXDefaultsKey));
     Result.Y := Defaults.doubleForKey(DefaultsKey(CameraOriginYDefaultsKey));

@@ -525,7 +525,14 @@ begin
   try
     if not Log.LoadFromFile(SidecarPathFor(FRawPath), Error) then
     begin
-      FEffectsReason := 'there is no event sidecar for this recording';
+      // The loader's own reason, not a guess at it. A load fails in
+      // exactly three ways — the file is not there, it was written by a
+      // newer knips (TooNew), or it is not a knips sidecar at all
+      // (ForeignFormat) — and this used to report all three as the
+      // first. The version refusal in particular exists to be SEEN:
+      // telling somebody their sidecar is missing when it is sitting
+      // right there is worse than saying nothing.
+      FEffectsReason := Error;
       FCursorReason := FEffectsReason;
       FZoomReason := FEffectsReason;
       Exit;
@@ -624,6 +631,12 @@ begin
     // having had one, and saying so beats a Re-export that fails.
     FRawPath := '';
   FEffects := AEffects;
+  // With the effects, and for the same reason: this window is reused
+  // take after take, and a note belongs to the take it was written
+  // about. Without this, "no mic audio" from one recording sat in the
+  // title of the next one that had perfectly good audio, for as long as
+  // the app ran.
+  FTitleNote := '';
   FPixelWidth := APixelWidth;
   FPixelHeight := APixelHeight;
   FScale := AScale;
@@ -1076,7 +1089,7 @@ var
   Session: TRenderSession;
   Pool: NSAutoreleasePool;
   Effects: TExportEffects;
-  Error: string;
+  Error, Note: string;
   Succeeded: Boolean;
 begin
   if (FWindow = nil) or FExporting or (FPath = '') then
@@ -1102,6 +1115,7 @@ begin
 
   Succeeded := False;
   Error := '';
+  Note := '';
   try
     Pool := NSAutoreleasePool(NSAutoreleasePool.alloc.init);
     try
@@ -1111,6 +1125,16 @@ begin
         Session.Verbose := False;
         Session.OnProgress := HandleRenderProgress;
         Succeeded := Session.Run(Error);
+        // Read before the session goes. A render that SUCCEEDS can
+        // still have failed to apply what was asked for — a zoom on a
+        // take nobody clicked in, a pointer that was never in shot,
+        // frames past the end of the track — and the whole point of
+        // this window's Effects control is to say which. The report was
+        // thrown away here, so the user pressed Re-export, watched a
+        // progress title, and got a file with nothing changed in it and
+        // not a word about why.
+        if Succeeded then
+          Note := Session.Report.Note;
       finally
         Session.Free;
       end;
@@ -1122,11 +1146,15 @@ begin
     SetButtonsEnabled(True);
     RefreshEffects;
     ReloadPlayer;
-    if FWindow <> nil then
-      FWindow.setTitle(PascalToNSString(TitleWithNote));
   end;
   if not Succeeded then
     ReportError('re-export: ' + Error);
+  // After FExporting has been cleared, or SetTitleNote refuses to touch
+  // the title. A render that applied everything asked for leaves this
+  // empty, which clears whatever the previous one said.
+  SetTitleNote(Note);
+  if Note <> '' then
+    ReportError('re-export: ' + Note);
 end;
 
 procedure TPlaybackWindow.SetTitleNote(const ANote: string);

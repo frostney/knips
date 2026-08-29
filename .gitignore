@@ -23,3 +23,7 @@ build/
 
 # ScreenCaptureKit/AVFoundation sandbox temp files (x.mp4.sb-*)
 *.sb-*
+
+# Firecrawl's local cache, written by the research skill when it is used
+# from this checkout. Session-local, never part of the project.
+.firecrawl/

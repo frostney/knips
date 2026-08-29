@@ -100,6 +100,13 @@ type
     LiveUpdatesCompleted: Int64;
     LiveUpdatesFailed: Int64;
     LiveUpdateErrorCode: NSInteger;
+    // The stop was asked for and ScreenCaptureKit never confirmed it
+    // within the timeout (Knips.Capture.Stream.Stop). Never a failure —
+    // the movie is finalised either way — but worth reporting: it is the
+    // only state in which the stream may still have been delivering
+    // while the writer was closing, so a take that comes back a frame or
+    // two short has an explanation instead of a mystery.
+    StopUnconfirmed: Boolean;
     // Big Cursor. Whether the recording drew its own pointer at all, and
     // then what the capture queue did with it: frames the sprite went
     // into, frames where the pointer was off the captured rectangle, and
@@ -708,6 +715,12 @@ begin
     FWriter.Cancel;
     FreeAndNil(FStream);
     FreeAndNil(FWriter);
+    // The sprite goes with them. A session is used once today, so this
+    // is latent rather than a leak anybody has seen — but ResolveFilter
+    // built the overlay a few lines above, and a second StartCapture on
+    // the same session would build another over it. Freed here, where
+    // the rest of the half-built capture is freed.
+    FreeAndNil(FCursorOverlay);
     ReleaseFilter;
     Exit;
   end;
@@ -728,7 +741,7 @@ begin
   if FGeometry.FramesPerSecond > 0 then
     Result := 1 / FGeometry.FramesPerSecond
   else
-    Result := 1 / 30;
+    Result := 1 / DefaultFramesPerSecond;
 end;
 
 procedure TRecordingSession.EmitIdleHeartbeat(AIntervalSeconds: Double);
@@ -1050,6 +1063,13 @@ begin
   // reading here counts it rather than reporting one fewer than was sent.
   if FStream <> nil then
   begin
+    // ScreenCaptureKit never called the stop's completion handler back.
+    // The teardown ran anyway — there is nothing else to do with a
+    // stream that will not answer — but it is the one state in which
+    // frames may still have been arriving while the writer was being
+    // finalised, so the report says so rather than claiming a clean
+    // stop.
+    FReport.StopUnconfirmed := FStream.StopUnconfirmed;
     FReport.LiveUpdatesSent := FStream.LiveUpdatesSent;
     FReport.LiveUpdatesCompleted := FStream.LiveUpdatesCompleted;
     FReport.LiveUpdatesFailed := FStream.LiveUpdatesFailed;

@@ -109,7 +109,6 @@ type
     procedure Remove;
     // Called by the cdecl handler. Public only for that.
     procedure Fire;
-    property Installed: Boolean read FInstalled;
     property OnPressed: TStopHotKeyEvent read FOnPressed write FOnPressed;
     property OnError: TStopHotKeyErrorEvent read FOnError write FOnError;
   end;

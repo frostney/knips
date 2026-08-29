@@ -147,6 +147,21 @@ type
     procedure TestPassthroughTrimNeverWarns;
   end;
 
+  // The sentences knips says after a stop about something that went
+  // quietly wrong. Every one of them is a fact nothing failed over, so
+  // nothing else would ever notice them being lost.
+  TAfterTheStopTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestSilentSourceIsToldFromAnAbsentOne;
+    procedure TestAnOffSourceSaysNothing;
+    procedure TestUnmeasuredLevelSaysNothing;
+    procedure TestLevelNoteNamesWhatArrived;
+    procedure TestBigCursorIdleOnlyFiresOnAnIdleTake;
+    procedure TestBigCursorIdleNamesBothCounts;
+    procedure TestNoteSummaryPutsTheFramingFirst;
+  end;
+
   TDerivedValueTests = class(TTestSuite)
   public
     procedure SetupTests; override;
@@ -1238,10 +1253,16 @@ begin
     .ToBe('as-recorded');
   Expect<Boolean>(EffectsDrawCursor(Options.Effects)).ToBe(True);
   Expect<Boolean>(EffectsDrawCursor(DefaultExportEffects)).ToBe(True);
-  // Zero means "the feature's own default" everywhere, so a caller that
-  // fills nothing in gets the sensible thing.
-  Expect<Boolean>(Options.Effects.CursorMagnification = 0).ToBe(True);
-  Expect<Boolean>(Options.Effects.CursorSmoothingSeconds = 0).ToBe(True);
+  // Zero means "the feature's own default" everywhere. Asserting that
+  // the fields ARE zero says nothing worth knowing — a record nobody
+  // fills in is zero by construction. What is worth pinning is the rule
+  // the zero buys: every reader of these four fields substitutes a named
+  // default for it, so a caller that fills nothing in gets the sensible
+  // thing rather than a magnification of zero and a hold of nothing.
+  // Knips.Export.ZoomTrack.ZoomWalkerStart is where the zoom half of
+  // that rule lives and is tested; this is the half the record itself
+  // owns, which is that the default really is the unfilled record.
+  Expect<TExportEffects>(DefaultExportEffects).ToBe(Default(TExportEffects));
 end;
 
 procedure TExportValidationTests.TestCursorModeNamesRoundTrip;
@@ -1544,6 +1565,131 @@ begin
   Expect<Boolean>(Faster > Small).ToBe(True);
 end;
 
+{ TAfterTheStopTests }
+
+procedure TAfterTheStopTests.SetupTests;
+begin
+  Test('nothing arrived and nothing was audible are different faults',
+    TestSilentSourceIsToldFromAnAbsentOne);
+  Test('a source that was off is never warned about',
+    TestAnOffSourceSaysNothing);
+  Test('a level nothing could be measured over says nothing',
+    TestUnmeasuredLevelSaysNothing);
+  Test('the live level note says what has arrived so far',
+    TestLevelNoteNamesWhatArrived);
+  Test('the big-cursor idle note fires only on a mostly idle take',
+    TestBigCursorIdleOnlyFiresOnAnIdleTake);
+  Test('and names the frames and the repeats among them',
+    TestBigCursorIdleNamesBothCounts);
+  Test('the note summary leads with the framing, not with an effect',
+    TestNoteSummaryPutsTheFramingFirst);
+end;
+
+procedure TAfterTheStopTests.TestSilentSourceIsToldFromAnAbsentOne;
+var
+  Nothing, Silent: string;
+begin
+  // The distinction is the whole point of the function: "check the
+  // privacy grant and the device" is the wrong advice for a muted mixer
+  // and wastes an afternoon.
+  Nothing := AudioSilenceWarning('system audio', True, 0, 0, 0);
+  Silent := AudioSilenceWarning('system audio', True, 4000, 12, 0);
+  Expect<Boolean>(Nothing <> '').ToBe(True);
+  Expect<Boolean>(Silent <> '').ToBe(True);
+  Expect<Boolean>(Nothing = Silent).ToBe(False);
+  Expect<Boolean>(Pos('grant', Nothing) > 0).ToBe(True);
+  Expect<Boolean>(Pos('muted', Silent) > 0).ToBe(True);
+  // The source's own name is in both, because a take can have two.
+  Expect<Boolean>(Pos('system audio', Nothing) > 0).ToBe(True);
+  Expect<Boolean>(Pos('system audio', Silent) > 0).ToBe(True);
+  // Audible: nothing to say.
+  Expect<string>(AudioSilenceWarning('the microphone', True, 4000, 12,
+    0.4)).ToBe('');
+end;
+
+procedure TAfterTheStopTests.TestAnOffSourceSaysNothing;
+begin
+  Expect<string>(AudioSilenceWarning('the microphone', False, 0, 0, 0))
+    .ToBe('');
+  Expect<string>(AudioSilenceWarning('the microphone', False, 4000, 12, 0))
+    .ToBe('');
+end;
+
+procedure TAfterTheStopTests.TestUnmeasuredLevelSaysNothing;
+begin
+  // Samples arrived but the format could not be read, so the peak means
+  // nothing. Claiming silence on that would be an accusation with no
+  // evidence behind it.
+  Expect<string>(AudioSilenceWarning('system audio', True, 4000, 0, 0))
+    .ToBe('');
+end;
+
+procedure TAfterTheStopTests.TestLevelNoteNamesWhatArrived;
+var
+  Off, Waiting, Silent, Sound: string;
+begin
+  Off := AudioLevelNote(False, 4000, 12, 0.5);
+  Waiting := AudioLevelNote(True, 0, 0, 0);
+  Silent := AudioLevelNote(True, 4000, 12, 0);
+  Sound := AudioLevelNote(True, 4000, 12, 0.5);
+  Expect<string>(Off).ToBe('');
+  Expect<Boolean>(Waiting <> '').ToBe(True);
+  Expect<Boolean>(Silent <> '').ToBe(True);
+  Expect<Boolean>(Sound <> '').ToBe(True);
+  // Three different answers, because they are three different states —
+  // and the note hangs off a menu item, so each is a few characters.
+  Expect<Boolean>(Waiting = Silent).ToBe(False);
+  Expect<Boolean>(Silent = Sound).ToBe(False);
+  Expect<Boolean>(Length(Sound) <= 16).ToBe(True);
+end;
+
+procedure TAfterTheStopTests.TestBigCursorIdleOnlyFiresOnAnIdleTake;
+begin
+  // Off: never.
+  Expect<string>(BigCursorIdleWarning(False, 0, 15, 16)).ToBe('');
+  // On, but the screen never stopped changing: no heartbeats, nothing
+  // to say.
+  Expect<string>(BigCursorIdleWarning(True, 300, 0, 300)).ToBe('');
+  // On, and a few heartbeats in a busy take: still nothing. The note is
+  // about a take that is MOSTLY repeats, not about one that paused.
+  Expect<string>(BigCursorIdleWarning(True, 290, 10, 300)).ToBe('');
+  // And a take with no frames at all cannot be described.
+  Expect<string>(BigCursorIdleWarning(True, 0, 0, 0)).ToBe('');
+end;
+
+procedure TAfterTheStopTests.TestBigCursorIdleNamesBothCounts;
+var
+  Note: string;
+begin
+  // The measured shape: 16 frames, 15 of them repeats, the sprite in
+  // none of them.
+  Note := BigCursorIdleWarning(True, 0, 15, 16);
+  Expect<Boolean>(Note <> '').ToBe(True);
+  Expect<Boolean>(Pos('16', Note) > 0).ToBe(True);
+  Expect<Boolean>(Pos('15', Note) > 0).ToBe(True);
+  // And it points at the way out rather than only naming the problem.
+  Expect<Boolean>(Pos('--smooth-cursor', Note) > 0).ToBe(True);
+  // Exactly at the threshold, which is a share and not a strict
+  // majority: half the frames being repeats is already the take.
+  Expect<Boolean>(BigCursorIdleWarning(True, 50, 50, 100) <> '').ToBe(True);
+end;
+
+procedure TAfterTheStopTests.TestNoteSummaryPutsTheFramingFirst;
+begin
+  // The framing note is the only one of the three about the PIXELS
+  // being other than the take could account for; the other two say an
+  // effect did not happen. So it leads, whatever else is set.
+  Expect<string>(EffectNoteSummary('framing', 'cursor', 'zoom'))
+    .ToBe('framing');
+  Expect<string>(EffectNoteSummary('', 'cursor', 'zoom')).ToBe('cursor');
+  Expect<string>(EffectNoteSummary('', '', 'zoom')).ToBe('zoom');
+  Expect<string>(EffectNoteSummary('', '', '')).ToBe('');
+  // A cosmetic zoom note can never hide the framing one, which is the
+  // bug this replaced: one field, first writer wins.
+  Expect<string>(EffectNoteSummary('framing', '', 'nothing was clicked'))
+    .ToBe('framing');
+end;
+
 begin
   TestRunnerProgram.AddSuite(TRegionTests.Create('ParseCaptureRegion'));
   TestRunnerProgram.AddSuite(TContainerTests.Create('ContainerForPath'));
@@ -1555,6 +1701,8 @@ begin
   TestRunnerProgram.AddSuite(TRawTakePathTests.Create('raw take paths'));
   TestRunnerProgram.AddSuite(TExportFormatTests.Create('ExportFormatForPath'));
   TestRunnerProgram.AddSuite(TLargeExportTests.Create('LargeExportWarning'));
+  TestRunnerProgram.AddSuite(TAfterTheStopTests.Create(
+    'what knips says after a stop'));
   TestRunnerProgram.AddSuite(TDerivedValueTests.Create('derived values'));
   TestRunnerProgram.Run;
   ExitCode := TestResultToExitCode;

@@ -16,6 +16,12 @@ type
   TObjCType = (
     otVoid,
     otObject,           // id / any objcclass
+    // No producer in knips today: nothing this program builds at run
+    // time takes or returns a Class or a single-precision float. Both
+    // are kept because the enum is a transcription of Objective-C's
+    // encoding alphabet, and an alphabet with holes in it is worse than
+    // one with two unused letters — the next runtime-built method that
+    // needs either finds it already there and already tested.
     otClass,            // Class
     otSelector,         // SEL
     otPointer,          // any C pointer (^v)

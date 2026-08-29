@@ -106,6 +106,34 @@ const
   // number: one sample a minute is 0.0167 Hz, and this reader divides by
   // the value.
   MinBelievableSampleHz = 0.01;
+  // The two limits a line has to be inside before it is handed to the
+  // JSON parser at all.
+  //
+  // They are here because the per-line `try` below is not the safety net
+  // it looks like. fpjson's parser is RECURSIVE: a line of fifty
+  // thousand `[` characters is fifty thousand stack frames, and the
+  // process dies of a stack overflow — a signal, not an exception, so
+  // nothing above can catch it. And the one thing that reads sidecars
+  // nobody has vetted is the recovery scan, which runs before anything
+  // else: the menu-bar app over ~/Movies/knips at every launch, and
+  // `knips record` over whatever directory its `--out` points at — so
+  // the CLI's exposure is not one blessed folder but any directory
+  // somebody records into. One poisoned file in either would kill knips
+  // at every start, silently, for ever.
+  //
+  // So the shape is measured first and a line outside these limits is
+  // counted in SkippedLines — which is exactly what the format already
+  // promises for a line this reader cannot make sense of. Sixty-four
+  // levels is far past anything the format writes (its deepest line is
+  // one object of scalars: depth 1) and past any plausible extension of
+  // it, and a megabyte is a thousand times its longest line.
+  MaxSidecarLineDepth = 64;
+  MaxSidecarLineBytes = 1024 * 1024;
+  // 2^53: the largest integer a Double still represents exactly, and so
+  // the point past which an integer field read through one stops being
+  // a number and starts being an approximation. Every count this format
+  // carries is many orders of magnitude below it.
+  MaxExactIntegerInDouble = 9007199254740992.0;
   // Bit 0 of a sample's button mask. Only the left button is sampled —
   // see the sampler's own comment for why the others are not.
   SidecarLeftButton = 1;
@@ -382,15 +410,27 @@ type
     FButtonCount: Integer;
     FSkippedLines: Integer;
     FTooNew: Boolean;
+    FForeignFormat: Boolean;
+    FForeignFormatName: string;
     procedure AddSample(const ASample: TSidecarSample);
     procedure AddButton(const AEvent: TSidecarButtonEvent);
     function ReadObject(AObject: TJSONObject): Boolean;
   public
     constructor Create;
-    // False with a message when the file cannot be read at all. A file
-    // whose *last* line is half-written still loads: the truncated line is
-    // counted in SkippedLines and everything before it is kept, which is
-    // the whole reason the format is one object per line.
+    // False with a message when the file cannot be read at all — which
+    // is two cases and only two: a header naming a format that is not
+    // knips-events (ForeignFormat), and one naming a version above this
+    // reader's (TooNew). A file whose *last* line is half-written still
+    // loads: the truncated line is counted in SkippedLines and
+    // everything before it is kept, which is the whole reason the format
+    // is one object per line. So does a line too deeply nested or too
+    // long to hand to the parser (MaxSidecarLineDepth), and so does one
+    // whose numbers are not finite — all of them skipped, none of them
+    // fatal.
+    //
+    // Every call resets this object completely, header included: a
+    // TSidecarLog loaded twice must not carry anything of the first
+    // file into the second.
     function LoadFromFile(const APath: string; out AError: string): Boolean;
     function LoadFromText(const AText: string; out AError: string): Boolean;
     // Seconds on the movie's own timeline for a host-clock time. Only
@@ -442,6 +482,12 @@ type
     // decline the file. LoadFromFile fails with a message when this is
     // set; nothing is half-read.
     property TooNew: Boolean read FTooNew;
+    // The file has a header and its `format` is not knips-events. That
+    // is refused more bluntly than a version that has moved: this is not
+    // one of these files at all, so nothing in it can be trusted to mean
+    // what this reader would take it to mean. LoadFromFile fails with a
+    // message, exactly as for TooNew.
+    property ForeignFormat: Boolean read FForeignFormat;
   end;
 
 // `demo.mp4` -> `demo.knips.jsonl`. The movie's own extension is replaced,
@@ -450,17 +496,12 @@ type
 // one's sidecar should replace the first's.
 function SidecarPathFor(const AMoviePath: string): string;
 
-function SidecarTargetName(ATarget: TCaptureTargetKind): string;
-
 // JSON string escaping, exposed because it is the one place a file name
 // can break the format: a movie called `say "hi".mp4` is a legal file
 // name and an illegal JSON string until this has run over it.
 function QuoteJsonString(const AText: string): string;
 
 function SidecarCursorRenderName(ARender: TSidecarCursorRender): string;
-
-function ParseSidecarCursorRender(const AText: string;
-  out ARender: TSidecarCursorRender): Boolean;
 
 // True when the capture never moved its own source rectangle: no live
 // zoom, no Follow Mouse pan, no composited window follow. This is the
@@ -569,6 +610,124 @@ begin
     Result := 'false';
 end;
 
+// A number this reader is willing to carry. `1e999` is legal JSON and
+// parses to +Inf; two of those subtracted are a NaN, and a NaN walked
+// through the staleness test, the interpolation and the edge snap comes
+// out the other side as a frame count silently wrong (measured: a render
+// reporting 40 frames where the take had 257) — or, in a plain FPC build
+// with the FPU exceptions unmasked, as an EAccessViolation in somebody
+// else's reader. Neither is a thing to pass on, so a record carrying one
+// is skipped like any other line this reader cannot make sense of.
+function IsFiniteNumber(const AValue: Double): Boolean;
+begin
+  Result := not IsNan(AValue) and not IsInfinite(AValue);
+end;
+
+function AllFinite(const AValues: array of Double): Boolean;
+var
+  I: Integer;
+begin
+  for I := Low(AValues) to High(AValues) do
+    if not IsFiniteNumber(AValues[I]) then
+      Exit(False);
+  Result := True;
+end;
+
+// One integer field, read the long way round because the short way
+// raises.
+//
+// `TJSONObject.Get(name, Integer)` finds the number and calls AsInteger
+// on it, and AsInteger on a `1e999` — legal JSON, parsed to +Inf —
+// rounds an infinity into an integer. On a plain FPC build that is an
+// exception from inside the read; on macOS it is worse, because
+// MacOSAll masks the invalid-operation trap at unit initialisation and
+// the same read comes back as -1 with nothing said at all. A
+// `"version":-1` then walks straight past the too-new refusal and a
+// `"pid":-1` reads as a live process. Neither answer is one to build a
+// recovery decision on.
+//
+// So the value is taken as a Double, which cannot raise, and only
+// converted once it is known to be a real number inside the range of
+// the field it is going into. Out of range is a SKIP and not a clamp:
+// a `"scale":5000000000` is not a scale that needs rounding down, it is
+// a number that cannot have come from a recorder.
+//
+// Absent, or present as something that is not a number at all, gives
+// ADefault and True — which is exactly what Get(name, default) did,
+// because it looks the name up as jtNumber and falls back otherwise.
+function ReadIntegerField(AObject: TJSONObject; const AName: string;
+  ADefault, AMinimum, AMaximum: Int64; out AValue: Int64): Boolean;
+var
+  Item: TJSONData;
+  Number: Double;
+begin
+  AValue := ADefault;
+  Result := True;
+  Item := AObject.Find(AName);
+  if (Item = nil) or (Item.JSONType <> jtNumber) then
+    Exit;
+  Number := Item.AsFloat;
+  if not IsFiniteNumber(Number) then
+    Exit(False);
+  // Beyond 2^53 a Double no longer represents consecutive integers, so
+  // a number that large is not a count of anything — and the comparison
+  // against the field's own bounds below would itself be inexact.
+  if Abs(Number) > MaxExactIntegerInDouble then
+    Exit(False);
+  if (Number < AMinimum) or (Number > AMaximum) then
+    Exit(False);
+  AValue := Round(Number);
+end;
+
+// Whether a line is shallow and short enough to hand to fpjson at all —
+// see MaxSidecarLineDepth for why this is measured before the parse
+// rather than caught after it. Quoted strings are skipped over, escapes
+// included, so a bracket inside a file name does not count.
+function SidecarLineWithinLimits(const ALine: string): Boolean;
+var
+  I, Depth: Integer;
+  InString, Escaped: Boolean;
+begin
+  Result := False;
+  if Length(ALine) > MaxSidecarLineBytes then
+    Exit;
+  Depth := 0;
+  InString := False;
+  Escaped := False;
+  for I := 1 to Length(ALine) do
+  begin
+    if InString then
+    begin
+      if Escaped then
+        Escaped := False
+      else if ALine[I] = '\' then
+        Escaped := True
+      else if ALine[I] = '"' then
+        InString := False;
+      Continue;
+    end;
+    case ALine[I] of
+      '"':
+        InString := True;
+      '[', '{':
+        begin
+          Inc(Depth);
+          if Depth > MaxSidecarLineDepth then
+            Exit;
+        end;
+      ']', '}':
+        // Floored. An unbalanced line cannot be valid JSON and the
+        // parser refuses it anyway, so this is defence in depth rather
+        // than a case anybody has met — but a counter allowed to go
+        // negative is a counter that hands the rest of the line an
+        // allowance it did not earn, and the floor costs one compare.
+        if Depth > 0 then
+          Dec(Depth);
+    end;
+  end;
+  Result := True;
+end;
+
 // JSON string escaping, for the two string fields the header has. Both
 // come from a file name and a version constant, so this is a guard rather
 // than a workhorse — but a file name really can contain a quote.
@@ -606,6 +765,9 @@ begin
   Result := ChangeFileExt(AMoviePath, SidecarExtension);
 end;
 
+// The header's `target` word. Implementation-only: WriteHeader is the
+// only writer of it, and a reader wanting the enum has Header.TargetKind
+// already parsed for it.
 function SidecarTargetName(ATarget: TCaptureTargetKind): string;
 begin
   if ATarget = ctkWindow then
@@ -625,6 +787,9 @@ begin
   end;
 end;
 
+// The inverse of SidecarCursorRenderName, which stays public because a
+// caller reporting on a loaded take needs the word for it. This one is
+// the reader's own and has no caller outside it.
 function ParseSidecarCursorRender(const AText: string;
   out ARender: TSidecarCursorRender): Boolean;
 var
@@ -878,34 +1043,66 @@ var
   Kind: string;
   Sample: TSidecarSample;
   Button: TSidecarButtonEvent;
+  Trailer: TSidecarTrailer;
   Render: TSidecarCursorRender;
   Mode: TAudioMode;
   DefaultHz: TJSONFloat;
+  Candidate: TSidecarHeader;
+  Anchor: Double;
+  Whole: Int64;
 begin
   Result := False;
   Kind := AObject.Get('k', '');
   if Kind = 'header' then
   begin
     if AObject.Get('format', '') <> SidecarFormatName then
-      Exit;
-    FHeader.Version := AObject.Get('version', 0);
-    if FHeader.Version > SidecarFormatVersion then
     begin
+      // Not one of these files. Recorded rather than skipped, because
+      // the answer is to refuse the whole file with a reason and not to
+      // carry on reading lines out of it — see ForeignFormat, and
+      // docs/event-sidecar.md, which promises the blunter refusal.
+      FForeignFormat := True;
+      FForeignFormatName := AObject.Get('format', '');
+      Exit(True);
+    end;
+    Candidate := Default(TSidecarHeader);
+    if not ReadIntegerField(AObject, 'version', 0, Low(Integer),
+      High(Integer), Whole) then
+      Exit(False);
+    Candidate.Version := Integer(Whole);
+    if Candidate.Version > SidecarFormatVersion then
+    begin
+      FHeader.Version := Candidate.Version;
       FTooNew := True;
       Exit(True);
     end;
-    FHeader.KnipsVersion := AObject.Get('knips', '');
-    FHeader.MovieName := AObject.Get('movie', '');
-    FHeader.CreatedUtc := AObject.Get('created', '');
-    FHeader.ProcessID := AObject.Get('pid', 0);
+    Candidate.KnipsVersion := AObject.Get('knips', '');
+    Candidate.MovieName := AObject.Get('movie', '');
+    Candidate.CreatedUtc := AObject.Get('created', '');
+    if not ReadIntegerField(AObject, 'pid', 0, Low(Integer),
+      High(Integer), Whole) then
+      Exit(False);
+    Candidate.ProcessID := Integer(Whole);
     if AObject.Get('target', 'display') = 'window' then
-      FHeader.TargetKind := ctkWindow
+      Candidate.TargetKind := ctkWindow
     else
-      FHeader.TargetKind := ctkDisplay;
-    FHeader.PixelWidth := AObject.Get('pixelWidth', 0);
-    FHeader.PixelHeight := AObject.Get('pixelHeight', 0);
-    FHeader.Scale := AObject.Get('scale', 0);
-    FHeader.FramesPerSecond := AObject.Get('fps', 0);
+      Candidate.TargetKind := ctkDisplay;
+    if not ReadIntegerField(AObject, 'pixelWidth', 0, Low(Integer),
+      High(Integer), Whole) then
+      Exit(False);
+    Candidate.PixelWidth := Integer(Whole);
+    if not ReadIntegerField(AObject, 'pixelHeight', 0, Low(Integer),
+      High(Integer), Whole) then
+      Exit(False);
+    Candidate.PixelHeight := Integer(Whole);
+    if not ReadIntegerField(AObject, 'scale', 0, Low(Integer),
+      High(Integer), Whole) then
+      Exit(False);
+    Candidate.Scale := Integer(Whole);
+    if not ReadIntegerField(AObject, 'fps', 0, Low(Integer),
+      High(Integer), Whole) then
+      Exit(False);
+    Candidate.FramesPerSecond := Integer(Whole);
     // Through a typed local, and that is not a style choice. In Delphi
     // mode `TJSONFloat(DefaultSidecarSampleHz)` REINTERPRETS the integer
     // constant's bits as a Double rather than converting them —
@@ -916,29 +1113,45 @@ begin
     // `sampleHz` field came back claiming a sample rate of 1.5E-322
     // instead of the documented 30. An assignment converts.
     DefaultHz := DefaultSidecarSampleHz;
-    FHeader.SampleHz := AObject.Get('sampleHz', DefaultHz);
-    FHeader.DisplayID := Cardinal(AObject.Get('displayId', Int64(0)));
-    FHeader.DisplayWidth := AObject.Get('displayWidth', TJSONFloat(0));
-    FHeader.DisplayHeight := AObject.Get('displayHeight', TJSONFloat(0));
-    FHeader.BaseX := AObject.Get('baseX', TJSONFloat(0));
-    FHeader.BaseY := AObject.Get('baseY', TJSONFloat(0));
-    FHeader.BaseWidth := AObject.Get('baseWidth', TJSONFloat(0));
-    FHeader.BaseHeight := AObject.Get('baseHeight', TJSONFloat(0));
+    Candidate.SampleHz := AObject.Get('sampleHz', DefaultHz);
+    if not ReadIntegerField(AObject, 'displayId', 0, 0,
+      Int64(High(Cardinal)), Whole) then
+      Exit(False);
+    Candidate.DisplayID := Cardinal(Whole);
+    Candidate.DisplayWidth := AObject.Get('displayWidth', TJSONFloat(0));
+    Candidate.DisplayHeight := AObject.Get('displayHeight', TJSONFloat(0));
+    Candidate.BaseX := AObject.Get('baseX', TJSONFloat(0));
+    Candidate.BaseY := AObject.Get('baseY', TJSONFloat(0));
+    Candidate.BaseWidth := AObject.Get('baseWidth', TJSONFloat(0));
+    Candidate.BaseHeight := AObject.Get('baseHeight', TJSONFloat(0));
     // Absent in a sidecar written before the field existed, which reads
     // as "not measured" and is exactly what a zero means anyway.
-    FHeader.MenuBarInset := AObject.Get('menuBarInset', TJSONFloat(0));
+    Candidate.MenuBarInset := AObject.Get('menuBarInset', TJSONFloat(0));
     if ParseSidecarCursorRender(AObject.Get('cursor', 'system'), Render) then
-      FHeader.CursorRender := Render;
-    FHeader.BakedZoomOnClick := AObject.Get('bakedZoomOnClick', False);
-    FHeader.BakedFollowMouse := AObject.Get('bakedFollowMouse', False);
-    FHeader.BakedWindowFollow := AObject.Get('bakedWindowFollow', False);
+      Candidate.CursorRender := Render;
+    Candidate.BakedZoomOnClick := AObject.Get('bakedZoomOnClick', False);
+    Candidate.BakedFollowMouse := AObject.Get('bakedFollowMouse', False);
+    Candidate.BakedWindowFollow := AObject.Get('bakedWindowFollow', False);
     if ParseAudioMode(AObject.Get('audio', 'none'), Mode) then
-      FHeader.AudioMode := Mode;
+      Candidate.AudioMode := Mode;
+    // The header is committed only once every number in it is a real
+    // one — see IsFiniteNumber. A half-applied header would be worse
+    // than none: BaseWidth seeds every sample's carried-forward source
+    // rectangle, and MaxInterpolatedGap divides by SampleHz.
+    if not AllFinite([Candidate.SampleHz, Candidate.DisplayWidth,
+      Candidate.DisplayHeight, Candidate.BaseX, Candidate.BaseY,
+      Candidate.BaseWidth, Candidate.BaseHeight,
+      Candidate.MenuBarInset]) then
+      Exit(False);
+    FHeader := Candidate;
     Exit(True);
   end;
   if Kind = 'anchor' then
   begin
-    FAnchorHost := AObject.Get('host', TJSONFloat(0));
+    Anchor := AObject.Get('host', TJSONFloat(0));
+    if not IsFiniteNumber(Anchor) then
+      Exit(False);
+    FAnchorHost := Anchor;
     FHasAnchor := True;
     Exit(True);
   end;
@@ -947,7 +1160,10 @@ begin
     Sample.Time := AObject.Get('t', TJSONFloat(0));
     Sample.X := AObject.Get('x', TJSONFloat(0));
     Sample.Y := AObject.Get('y', TJSONFloat(0));
-    Sample.Buttons := AObject.Get('b', 0);
+    if not ReadIntegerField(AObject, 'b', 0, Low(Integer),
+      High(Integer), Whole) then
+      Exit(False);
+    Sample.Buttons := Integer(Whole);
     // Carried forward from the last sample that named one; the header's
     // base rectangle seeded that in LoadFromText.
     Sample.SourceX := AObject.Get('sx', TJSONFloat(FHeader.BaseX));
@@ -965,6 +1181,13 @@ begin
       if AObject.Find('sh') = nil then
         Sample.SourceHeight := FSamples[FSampleCount - 1].SourceHeight;
     end;
+    // A sample with an infinity in it poisons everything downstream: the
+    // binary search in StateAt, the interpolation across it, and the
+    // source rectangle every later sample carries forward from it. It is
+    // dropped, and the drop is a skipped line like any other.
+    if not AllFinite([Sample.Time, Sample.X, Sample.Y, Sample.SourceX,
+      Sample.SourceY, Sample.SourceWidth, Sample.SourceHeight]) then
+      Exit(False);
     AddSample(Sample);
     Exit(True);
   end;
@@ -973,18 +1196,32 @@ begin
     Button.Time := AObject.Get('t', TJSONFloat(0));
     Button.X := AObject.Get('x', TJSONFloat(0));
     Button.Y := AObject.Get('y', TJSONFloat(0));
-    Button.Button := AObject.Get('n', 0);
+    if not ReadIntegerField(AObject, 'n', 0, Low(Integer),
+      High(Integer), Whole) then
+      Exit(False);
+    Button.Button := Integer(Whole);
     Button.Down := AObject.Get('d', False);
+    if not AllFinite([Button.Time, Button.X, Button.Y]) then
+      Exit(False);
     AddButton(Button);
     Exit(True);
   end;
   if Kind = 'trailer' then
   begin
-    FTrailer.Time := AObject.Get('t', TJSONFloat(0));
-    FTrailer.Frames := AObject.Get('frames', Int64(0));
-    FTrailer.DurationSeconds := AObject.Get('duration', TJSONFloat(0));
-    FTrailer.Samples := AObject.Get('samples', Int64(0));
-    FTrailer.Recovered := AObject.Get('recovered', False);
+    Trailer.Time := AObject.Get('t', TJSONFloat(0));
+    if not ReadIntegerField(AObject, 'frames', 0, 0,
+      Round(MaxExactIntegerInDouble), Whole) then
+      Exit(False);
+    Trailer.Frames := Whole;
+    Trailer.DurationSeconds := AObject.Get('duration', TJSONFloat(0));
+    if not ReadIntegerField(AObject, 'samples', 0, 0,
+      Round(MaxExactIntegerInDouble), Whole) then
+      Exit(False);
+    Trailer.Samples := Whole;
+    Trailer.Recovered := AObject.Get('recovered', False);
+    if not AllFinite([Trailer.Time, Trailer.DurationSeconds]) then
+      Exit(False);
+    FTrailer := Trailer;
     FHasTrailer := True;
     Exit(True);
   end;
@@ -999,12 +1236,25 @@ var
   Data: TJSONData;
 begin
   AError := '';
+  // Every scrap of per-load state, and the header with it. A TSidecarLog
+  // is loaded more than once in a couple of places, and a header left
+  // standing from the previous file is the worst kind of stale: it names
+  // the wrong movie, it seeds the wrong base rectangle into every sample
+  // that does not carry one, and a file with no header at all would
+  // silently inherit the last one's baked-effect flags.
+  FHeader := Default(TSidecarHeader);
+  FHeader.Version := SidecarFormatVersion;
+  FHeader.SampleHz := DefaultSidecarSampleHz;
   FSampleCount := 0;
   FButtonCount := 0;
   FSkippedLines := 0;
   FHasAnchor := False;
+  FAnchorHost := 0;
   FHasTrailer := False;
+  FTrailer := Default(TSidecarTrailer);
   FTooNew := False;
+  FForeignFormat := False;
+  FForeignFormatName := '';
   Lines := TStringList.Create;
   try
     Lines.Text := AText;
@@ -1013,27 +1263,67 @@ begin
       Line := Trim(Lines[I]);
       if Line = '' then
         Continue;
-      Data := nil;
-      try
-        Data := GetJSON(Line);
-      except
-        // A half-written last line, or a line from a newer writer that
-        // this parser cannot make sense of. Counted, never fatal — that
-        // is the whole reason the format is one object per line.
-        on Exception do
-          Data := nil;
-      end;
-      if (Data <> nil) and (Data is TJSONObject) then
+      // Measured before the parser is allowed near it: fpjson recurses,
+      // and a deep enough line is a stack overflow rather than an
+      // exception. See MaxSidecarLineDepth.
+      if not SidecarLineWithinLimits(Line) then
       begin
-        if not ReadObject(TJSONObject(Data)) then
-          Inc(FSkippedLines);
-      end
-      else
         Inc(FSkippedLines);
-      Data.Free;
+        Continue;
+      end;
+      Data := nil;
+      // The guard covers the READ as well as the parse, and that is the
+      // structural half of this rule rather than a belt on a brace.
+      //
+      // It used to wrap `GetJSON` alone, on the reasoning that parsing is
+      // where a malformed line bites. It is not: fpjson hands back a
+      // document happily and the coercions in ReadObject are where a
+      // number that is not a number raises — measured, an
+      // EAccessViolation out of `Get('fps', 0)` on a `1e999`, escaping
+      // LoadFromFile, killing the process and leaking the document with
+      // it. Every field is checked below now, but the checks are a list
+      // and lists go stale; this is the rule that does not. Anything
+      // that raises anywhere in a line's reading is a skipped line, for
+      // ever, including whatever a future record kind does.
+      try
+        try
+          Data := GetJSON(Line);
+          if (Data <> nil) and (Data is TJSONObject) then
+          begin
+            if not ReadObject(TJSONObject(Data)) then
+              Inc(FSkippedLines);
+          end
+          else
+            Inc(FSkippedLines);
+        except
+          // A half-written last line, a line from a newer writer this
+          // parser cannot make sense of, or a value that blew up on the
+          // way out. Counted, never fatal — that is the whole reason the
+          // format is one object per line.
+          on Exception do
+            Inc(FSkippedLines);
+        end;
+      finally
+        // In a finally, not after the read: the read can now be left
+        // early by an exception, and the document is ours either way.
+        Data.Free;
+      end;
     end;
   finally
     Lines.Free;
+  end;
+  // The blunter refusal first: a file that is not one of these at all
+  // has no version worth reporting.
+  if FForeignFormat then
+  begin
+    if FForeignFormatName = '' then
+      AError := 'this is not a knips event sidecar: its header names no '
+        + 'format at all, and this reader wants "' + SidecarFormatName + '"'
+    else
+      AError := Format('this is not a knips event sidecar: its header '
+        + 'says format "%s", not "%s"',
+        [FForeignFormatName, SidecarFormatName]);
+    Exit(False);
   end;
   if FTooNew then
   begin
@@ -1262,8 +1552,18 @@ begin
     else if not ALog.HasAnchor then
       Result.Reason := 'the event sidecar has no anchor, so its times '
         + 'cannot be placed on the movie'
+    else if ALog.SampleCount = 0 then
+      Result.Reason := 'the event sidecar has no pointer samples'
     else
-      Result.Reason := 'the event sidecar has no pointer samples';
+      // The rectangle the recording was sized from is what every point
+      // in the file is measured against, and the mapping in
+      // docs/event-sidecar.md divides by its width and height. A zero
+      // one is a header that cannot place its own samples — an older
+      // or third-party writer that left the fields out, or a window
+      // take's header being read past the arm above.
+      Result.Reason := 'the event sidecar records no recorded rectangle '
+        + '(its base width or height is zero), so its samples cannot be '
+        + 'mapped into the movie''s pixels';
     Exit;
   end;
   Result.CanDrawCursor := not Result.CursorAlreadyBaked;

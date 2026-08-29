@@ -108,6 +108,12 @@ type
     // export, and never silent either.
     SmoothCursor: Boolean;
     SmoothCursorFrames: Int64;
+    // Frames where the pointer was outside the rectangle the movie
+    // shows. Not a fault; the difference between "drawn on 0 frames" and
+    // "the pointer was never in shot", which the count alone cannot
+    // say. Mirrors Big Cursor's CursorOffFrame and the render's
+    // CursorOffFrameFrames.
+    SmoothCursorOffFrame: Int64;
     SmoothCursorNote: string;
     // Post-hoc Zoom on Click (Knips.Export.ZoomTrack), applied to the
     // decoded frames before they are scaled — the same effect, from the
@@ -121,6 +127,12 @@ type
     // had nothing to say about what they were showing. See the MP4
     // render's field of the same name.
     UnframedFrames: Int64;
+    // What UnframedFrames means, in words. Its own field rather than a
+    // share of ZoomNote: it is the only note here about the PIXELS being
+    // other than the take could account for, and "nothing was clicked"
+    // must not be able to hide it. Same field, same reason, in
+    // TRenderReport.
+    FramingNote: string;
     // Frames the capture never made, put back on the decimation grid
     // where an effect was animating and ScreenCaptureKit had delivered
     // nothing (Knips.Export.Cadence). Zero on a take whose frames
@@ -248,6 +260,15 @@ type
     // What the palette pass counted. Zero until it has run, and it never
     // runs for APNG.
     FMeasuredFrames: Int64;
+    // Whether this export can put a frame where the capture never made
+    // one — decided once, in EnsureTargetSize, as soon as the effects
+    // are prepared, and then held. Held rather than re-asked because
+    // ExpectedFrameCount is the progress denominator and an answer that
+    // moved would move the total under a bar already drawing against
+    // it. False until it is known, which is the tighter of the two
+    // bounds and the one the palette seed has always wanted.
+    FSynthesisKnown: Boolean;
+    FSynthesisPossible: Boolean;
     FVerbose: Boolean;
     FOnProgress: TGifExportProgressEvent;
     procedure Progress(AStage: TGifExportStage; AFramesDone,
@@ -274,6 +295,7 @@ type
       var ADestination: TBgraImage; out AError: string): Boolean;
     function RangeSeconds: Double;
     function ExpectedFrameCount: Integer;
+    procedure DecideSynthesis;
     // Fills the report's estimate from the settings and the source
     // movie's density, and returns the line to print. '' when there is
     // nothing to estimate.
@@ -492,10 +514,17 @@ begin
   Result.CropY := Crop.Y;
   Result.CropWidth := Crop.Width;
   Result.CropHeight := Crop.Height;
+  // Exactly the condition ScaleFrame's HasCrop is, and for the same
+  // reason the render states beside its own copy of this line: the
+  // dedupe has to ask about the frame the draw is going to make. On a
+  // panned take whose track has run out, FramingAt falls back to the
+  // BASE rectangle and says so — the draw then places the pointer
+  // against the last rectangle the track holds, and this used to answer
+  // about a base rectangle nothing was ever rendered against.
   if FCursorEffect <> nil then
     Result.HasCursor := FCursorEffect.SpritePlacement(FReport.PixelWidth,
-      FReport.PixelHeight, ASeconds, FReport.ZoomOnClick, Source.X,
-      Source.Y, Source.Width, Source.Height, Result.CursorX,
+      FReport.PixelHeight, ASeconds, FReport.ZoomOnClick and FramingKnown,
+      Source.X, Source.Y, Source.Width, Source.Height, Result.CursorX,
       Result.CursorY);
 end;
 
@@ -567,7 +596,12 @@ begin
         FHasLastShape := True;
         AFrame.PixelBuffer := FHeld;
         AFrame.Seconds := FillSeconds;
-        AFrame.Time := CMTimeMakeWithSeconds(FillSeconds, TrimTimeScale);
+        // No CMTime. This pipeline writes a GIF or an APNG, whose frame
+        // delays come from Seconds through Knips.Export.Timing — nothing
+        // downstream of here reads TMovieReaderFrame.Time, and a
+        // synthesised frame has no source stamp to carry anyway. (The MP4
+        // render is the one that needs a stamp, and it builds its own on
+        // the SOURCE's timescale rather than on a trim's.)
         Inc(FEmitted);
         Inc(FReport.SynthesizedFrames);
         Exit(True);
@@ -646,6 +680,9 @@ begin
   BgraImageResize(FPending, FReport.PixelWidth, FReport.PixelHeight);
   PrepareSmoothCursor;
   PrepareZoom;
+  // Both effects are settled now and neither is touched again, so this
+  // is the one moment the question has a stable answer.
+  DecideSynthesis;
 end;
 
 // The post-hoc zoom, when it was asked for and the take can take it.
@@ -662,7 +699,12 @@ begin
   FZoomLog := TSidecarLog.Create;
   if not FZoomLog.LoadFromFile(SidecarPathFor(FOptions.InputPath), Error) then
   begin
-    FReport.ZoomNote := 'there is no event sidecar for this recording';
+    // The loader's own reason. It is "no event sidecar at <path>" for
+    // the ordinary case and something quite different for a file from a
+    // newer knips or one that is not a knips sidecar at all — see
+    // TSidecarLog.TooNew and .ForeignFormat, which had no reader
+    // anywhere until this line stopped overwriting them.
+    FReport.ZoomNote := Error;
     FreeAndNil(FZoomLog);
     Exit;
   end;
@@ -721,11 +763,16 @@ end;
 // The note a run leaves behind about frames it could not place. Kept
 // beside the zoom's own note rather than replacing it: "the zoom was
 // refused" and "the zoom applied to all but the last thirty frames" are
-// different facts and a caller with one line to show wants the first.
+// different facts, and this one is the only one about the PIXELS.
+//
+// It used to say that and not do it — the guard was `ZoomNote = ''`, so
+// a zoom refused for a cosmetic reason ("nothing was clicked") silently
+// swallowed the one note about frames that came out wrong. Its own field
+// is what actually keeps both.
 procedure TExportSession.NoteUnframedFrames;
 begin
-  if (FReport.UnframedFrames > 0) and (FReport.ZoomNote = '') then
-    FReport.ZoomNote := Format('%d frame(s) run past the end of this '
+  if FReport.UnframedFrames > 0 then
+    FReport.FramingNote := Format('%d frame(s) run past the end of this '
       + 'recording''s pointer track, so what they were showing is not '
       + 'recorded; nothing was cropped for them and the pointer was '
       + 'placed from the last position the track holds',
@@ -867,27 +914,45 @@ end;
 // available and the answer is the smaller.
 //
 // The range times the requested rate is the number of grid slots, and
-// the decimator emits at most one frame a slot. On its own it is far too
-// generous, because ScreenCaptureKit emits a frame when the screen
-// changes: a recording that idles holds nothing like its length times
-// the rate it was asked for. On a 220 s capture asked for at 20 fps this
-// bound says 4412 frames against 1723 real ones, which put the palette's
-// stride at 138 and built it from 13 frames rather than 32.
+// the decimator emits at most one frame a slot. That is the bound.
 //
-// The movie's own frame count is the other, and it bounds any part of
-// the movie as surely as the whole. AVAssetTrack's nominalFrameRate is
-// the average a variable-rate track really achieved — on the recordings
-// measured here it agrees to four figures with the container's frame
-// count over its duration — so the duration times that rate is how many
-// frames exist at all. On the same capture it says 2428, and the palette
-// gets 23 sample frames.
+// It used to be taken as the *lesser* of that and the movie's own frame
+// count — duration times AVAssetTrack's nominalFrameRate — on the
+// reasoning that a frame has to come from somewhere and ScreenCaptureKit
+// emits one only when the screen changes, so an idling recording holds
+// nothing like its length times the rate it was asked for.
 //
-// Taking the *duration* rather than the range is what keeps this a bound
-// and not a guess. A --trim over a busy stretch of an otherwise idle
-// recording holds frames far denser than the movie's average, so the
-// range times the average rate would sit below what that stretch really
-// emits, and a seed that runs low costs the schedule a phase of thinning
-// it did not need.
+// **That reasoning stopped being true when this pass learned to fill.**
+// A frame no longer has to come from the movie: an empty slot between
+// two source frames is filled by re-presenting the earlier one with the
+// effect evaluated at that slot's time (see NextEmittedFrame), so a
+// sparse take with a pointer drawn over it emits close to one frame a
+// slot however few the capture made. Measured on an 8.4 s take of a
+// still screen — 19 source frames, nominal rate 2.2 — exported at 20 fps
+// with a drawn pointer: 166 frames written against a bound of 19, so the
+// progress line read "100 of ~19 frames", the projection was disabled
+// from frame 19 onwards, and the size estimate said 219 kB against
+// 1524 kB actual.
+//
+// So the source-frame count is gone and the slot count stands alone. The
+// cost is the one the old comment was written about — a seed that is too
+// generous on a take nothing is animating over — and it is bounded:
+// TGifPaletteSampler caps the stride it *starts* from at
+// GifPaletteMaxSeedStride whatever it is told, precisely so a nonsense
+// estimate still samples the whole movie.
+//
+// Taking the *range* rather than the duration is right for the same
+// reason the old comment took the duration: the range is what will be
+// walked, and every slot in it can now be filled.
+//
+// **Except when nothing can be filled**, and that is not a guess — see
+// SynthesisPossible. An export that will synthesise nothing emits at
+// most one frame per SOURCE frame, so the old bound is still the right
+// one and is far tighter: measured on a 5.5 s take of 12 frames
+// exported at 20 fps with no effect asked for, the slot count says 110
+// against the 12 that were written, and the size estimate came out at
+// 3.4 MB against 1.2 MB actual. Keeping the slot count there would have
+// traded one wrong direction for another.
 function TExportSession.ExpectedFrameCount: Integer;
 var
   Seconds, Slots, SourceFrames: Double;
@@ -898,17 +963,58 @@ begin
   if Seconds <= 0 then
     Exit(1);
   Slots := Seconds * FOptions.FramesPerSecond;
-  if (FReader.NominalFrameRate > 0) and (FReader.DurationSeconds > 0) then
+  if not (FSynthesisKnown and FSynthesisPossible) then
   begin
-    SourceFrames := FReader.DurationSeconds * FReader.NominalFrameRate;
-    if SourceFrames < Slots then
-      Slots := SourceFrames;
+    // AVAssetTrack's nominalFrameRate is the average a variable-rate
+    // track really achieved — on the recordings measured here it agrees
+    // to four figures with the container's frame count over its
+    // duration — so the DURATION times that rate is how many frames
+    // exist at all, and it bounds any part of the movie as surely as
+    // the whole. The duration rather than the range, because a --trim
+    // over a busy stretch of an otherwise idle recording is denser than
+    // the average and the range would put this below what that stretch
+    // really emits.
+    if (FReader.NominalFrameRate > 0) and (FReader.DurationSeconds > 0) then
+    begin
+      SourceFrames := FReader.DurationSeconds * FReader.NominalFrameRate;
+      if SourceFrames < Slots then
+        Slots := SourceFrames;
+    end;
   end;
   // Ceil, never Round: this is a bound, and rounding a 32.4 down to 32
   // against 33 emitted frames would make it a guess.
   Result := Math.Ceil(Slots);
   if Result < 1 then
     Result := 1;
+end;
+
+// Can this export put a frame where the capture never made one?
+//
+// A gap is filled only where the next instant would be a DIFFERENT
+// picture (Knips.Export.Cadence), and exactly two things here can make
+// one different: a crop that moves, and a drawn pointer that moves. So
+// the question is answerable rather than guessable, and both arms are
+// facts about this take:
+//
+//   - no zoom applied and no cursor effect prepared. Nothing draws, so
+//     every frame is the frame before it and the fill has nothing to
+//     make. This is the ordinary `knips export` of an ordinary movie —
+//     asked from the OPTIONS it would be wrong, because the default
+//     cursor mode is `as-recorded`, which asks for a pointer only if the
+//     sidecar wanted one and is therefore "asked for" on every export
+//     ever run;
+//   - a cursor prepared, no zoom, and a track that never moves. A
+//     pointer nobody touched draws the same picture on every frame.
+//
+// The other direction is left generous on purpose. A pointer that moves
+// for two seconds of a minute animates, and no share of a track is a
+// safe rule for how much movement is enough — so the only
+// discriminations made here are the ones that are certain.
+procedure TExportSession.DecideSynthesis;
+begin
+  FSynthesisPossible := FReport.ZoomOnClick
+    or ((FCursorEffect <> nil) and not FCursorEffect.TrackIsStationary);
+  FSynthesisKnown := True;
 end;
 
 // The movie's own size against its own pixels. Everything here is
@@ -1042,20 +1148,34 @@ begin
       Exit;
     end;
     FReport.ExactPalette := Quantizer.IsExactHistogram;
-    // Observability only: the source-frame bound is an empirical
-    // property of this recorder's own output, and a foreign movie whose
-    // header under-reports its real average rate makes the seed run low.
-    // The schedule absorbs that by doubling its stride as it goes, so
-    // the palette still spans the whole movie — it just took more
-    // samples than the target to get there. Worth saying, because it
-    // means the header lied; not worth failing over.
+    // Observability only. The seed is the grid-slot count and the pass
+    // emits at most one frame a slot, so this is now close to
+    // unreachable — which is the point of saying it at all: an overrun
+    // means the bound was wrong, and the bound is arithmetic rather than
+    // a claim about the movie.
+    //
+    // It used to read "the movie held more frames than its header
+    // promised", because the seed was the lesser of the slot count and
+    // the movie's own frame count, and an overrun really did mean a
+    // header under-reporting its average rate. That stopped being the
+    // only reading when this pass learned to fill: knips' OWN filled
+    // frames tripped it, and the note then blamed the file for something
+    // the exporter had done. The fill count is printed beside the total
+    // so the two can never be confused again.
+    //
+    // The schedule absorbs an overrun either way, by doubling its stride
+    // as it goes, so the palette still spans the whole movie — it just
+    // took more samples than the target to get there. Not worth failing
+    // over.
     if FVerbose and (FEmitted > EstimatedBeforePass)
       and (EstimatedBeforePass > 0) then
     begin
-      WriteLn(Format('  note: the movie held more frames than its '
-        + 'header promised (%d vs %d); the palette schedule thinned '
-        + 'itself to span it (%d sample frames)',
-        [FEmitted, EstimatedBeforePass, FReport.SampledFrames]));
+      WriteLn(Format('  note: the pass emitted more frames than its own '
+        + 'bound allowed for (%d against %d, of which %d were filled '
+        + 'in); the palette schedule thinned itself to span them '
+        + '(%d sample frames)',
+        [FEmitted, EstimatedBeforePass, FReport.SynthesizedFrames,
+        FReport.SampledFrames]));
       Flush(Output);
     end;
     // Only now, after the pass has finished and its own progress has
@@ -1193,6 +1313,8 @@ begin
   // A fresh run measures afresh; a stale count would make
   // ExpectedFrameCount lie before any pass has run.
   FMeasuredFrames := 0;
+  FSynthesisKnown := False;
+  FSynthesisPossible := False;
   AError := '';
   FReport := Default(TExportReport);
   FReport.Format := FOptions.Format;
@@ -1273,7 +1395,20 @@ begin
   // are: a pointer that was asked for and silently drawn into nothing
   // looks exactly like one that was never asked for.
   if FCursorEffect <> nil then
+  begin
     FReport.SmoothCursorFrames := FCursorEffect.DrawnFrames;
+    FReport.SmoothCursorOffFrame := FCursorEffect.OffFrameFrames;
+    // The same sentence the render writes, for the same reason: "on 0
+    // frames" with no explanation reads as a bug and is usually the
+    // pointer having been somewhere this recording does not show.
+    if (FReport.SmoothCursorFrames = 0)
+      and (FReport.SmoothCursorOffFrame > 0)
+      and (FReport.SmoothCursorNote = '') then
+      FReport.SmoothCursorNote := Format('the pointer was outside the '
+        + 'rectangle this recording shows for all %d of its frames, so '
+        + 'none of them has one drawn into it',
+        [FReport.SmoothCursorOffFrame]);
+  end;
   Result := True;
 end;
 

@@ -103,6 +103,44 @@ release-tagging step; it does not produce the entries below.)
   a frame at 28 against 7.6–9.8 ms at 12, ranges that overlap almost
   entirely, with Vision ~78 % of each. Both are far under the 33 ms
   budget.
+- **A take is recorded raw and the deliverable is rendered from it.** The
+  effects used to be decisions you had to get right before you pressed
+  record: the pointer went into the pixels as they were captured and a
+  zoom cropped the stream itself, so a take made with the wrong ones was
+  a take made again. The menu-bar app now captures a *raw* take — no
+  pointer in the frames, no zoom in the framing — and renders the movie
+  you asked for from it on stop. The raw take stays beside the
+  deliverable as `<name>-raw.mp4`, so the playback window's **Effects**
+  pull-down and its **Re-export** button produce the file again with a
+  different choice, as often as you like, and `knips render
+  --in=<take>-raw.mp4 --effects=zoom,smooth-cursor` is the same pass from
+  a script.
+
+  The render re-encodes the video and **copies the audio sample for
+  sample**, and every source frame's presentation stamp is passed through
+  as a `CMTime` rather than through seconds — a stamp taken through a
+  `Double` and back at a 1/600 s timescale lands up to 1.7 ms out,
+  measured, which is why it is not done that way. So the deliverable's
+  timeline *is* the raw take's, and the take's event sidecar still
+  describes it. The output is built as `<out>.knips-render-tmp` and
+  renamed into place, so a killed render cannot damage a deliverable that
+  already existed.
+
+  Two consequences worth knowing. **A take is normally two movies and two
+  sidecars, and Knips deletes none of them** — `~/Movies/knips/` grows at
+  roughly twice the rate it used to, and the raw take is exactly what
+  makes the effects changeable, so throwing it away is a decision only
+  you can make. And **Zoom on Click, Smooth Cursor and Big Cursor left
+  the menu bar** for the playback window's Effects control, because they
+  are now things done to a take rather than choices about what is
+  recorded. *Follow Mouse* stayed where it was: a pan decides which
+  pixels are read off the screen at all, and nothing afterwards can
+  recover what was never captured. The three old menu toggles migrate
+  one-way into the new saved defaults (`KnipsEffectZoom`,
+  `KnipsEffectCursor`) on the first launch that finds them, and are never
+  written again. A take that can take no effect at all is **refused** by
+  `knips render` with the reason, rather than copied into a
+  byte-identical duplicate you would then have to find and delete.
 - **Event sidecar.** Every recording writes `<take>.knips.jsonl` beside
   its movie: the pointer's path at about thirty samples a second, mouse
   button edges, the rectangle the capture was reading at each instant, and
@@ -153,6 +191,51 @@ release-tagging step; it does not produce the entries below.)
   runs, and afterwards in the log, the menu and the playback window's
   title. "Nothing arrived" and "everything arrived and was silence" are
   told apart, because they send the user to different places.
+- **Windows and Linux port foundation.** No backend yet, and none is
+  claimed — what this lane bought is the ability to find out from a Mac
+  whether the neutral core is really neutral, which until now was an
+  assertion. `tools/linux-ci.sh` builds a Debian bookworm container with
+  FPC 3.2.2 and the real lwpt Linux binary and runs every `*.Test.pas`
+  suite plus `lwpt build` plus `lwpt format --check`, green on
+  `linux/arm64` and `linux/amd64`; the Linux `knips` it produces is a
+  working binary that serves MCP and refuses capture with exit 3 rather
+  than pretending. `tools/win64-cross.sh` bootstraps an FPC 3.2.2
+  `x86_64-win64` cross compiler inside a container and links `knips.exe`
+  and every suite as PE32+ binaries. `tools/wine-smoke.sh` then *runs*
+  those suites under Wine, which is the part the compiler had nothing to
+  say about: its first run failed eight of 323 tests, all in one file,
+  and tracing them found six stale POSIX literals and two predicates that
+  ask whether a path starts with a separator — plus the one genuine
+  product item, that a recording belongs in `~/Videos` off macOS and not
+  `~/Movies`. The checkout is mounted **read-only** and copied inside the
+  container, so a foreign `.ppu` or an ELF `build/knips` can never land in
+  a developer's Mac tree. There is also an X11/MIT-SHM
+  capture spike that grabs a verified frame off Xvfb in CI and writes it
+  through the neutral GIF encoder — proof that a Linux capture path can
+  be built and regression-tested from a Mac, and explicitly not a
+  backend. The stance, and what each platform will actually need, is
+  [ADR-0005](docs/adr/0005-windows-linux-ports.md) and
+  [docs/ports.md](docs/ports.md).
+- **⌘⇧2 stops a recording from anywhere.** It is the one thing the menu
+  bar icon cannot do: while Knips records the icon has no menu at all — a
+  single click stops it — and the window you are demonstrating in is the
+  last place you should have to leave. Registered with Carbon's
+  `RegisterEventHotKey` against the application event target, which is
+  the one route to a global chord that **costs no extra permission**:
+  `NSEvent`'s global monitor and a `CGEventTap` both need Input
+  Monitoring, which is a "Knips wants to read everything you type" dialog
+  in exchange for one shortcut. No key pressed anywhere else is ever seen
+  by Knips. It *only* stops — a global chord that could start a recording
+  starts one by accident — so outside a recording it does nothing, and
+  the stop goes through the same path the icon's click does rather than a
+  second one. If the chord cannot be registered the app says so on its
+  `Last error: …` line and carries on without it. Registration success is
+  deliberately not treated as proof: measured, `RegisterEventHotKey`
+  answers `noErr` for ⌘⇧3, the screenshot shortcut the system already
+  owns — what the system keeps is the delivery, not the registration — so
+  `knips probe` checks the registration and the constants and whether the
+  keys really fire is left to a human, since this project's tooling never
+  synthesises input.
 - Headless `record` to `.mp4`/`.mov` from a display, region, or window via
   ScreenCaptureKit and AVAssetWriter.
 - `app`: the Kap gesture as a menu-bar app — click the icon, drag a

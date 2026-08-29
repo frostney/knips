@@ -15,9 +15,10 @@ changed, and why. Written for whoever extends this next.
   the one semantic change a recorder forces on the streaming design.
 - AVAssetWriter replaces the VideoToolbox session + wire framing; there
   is no muxer to write.
-- Two things in the carried code are flagged as unverified rather than
-  fixed: the AudioEncoder's symbol convention and the exact SCK protocol
-  registration behaviour.
+- The one bet the port rested on — that ScreenCaptureKit accepts a
+  runtime-registered class as a stream output — is **closed on device**
+  ([spike 0001](spikes/0001-runtime-objc-class.md)), so nothing in the
+  carried path is asserted rather than proven any more.
 - One thing in it was wrong and is fixed: the pthread mutex declared its
   opaque storage as bytes, which under-states `pthread_mutex_t`'s 8-byte
   alignment and made every `--mode release` build bus-error. See
@@ -108,6 +109,35 @@ of `startCaptureWithCompletionHandler:`, so it takes the vendored
 anything sends it: an unrecognised selector is an Objective-C exception
 no Pascal handler can catch, and this one would be sent into a live
 recording thirty times a second.
+
+### Everything under the `knips additions` banner
+
+`source/capture/Knips.Capture.CoreMedia.pas` is the unit the additions
+accumulate in, and the banner is the only place they may go. The whole list,
+so that a future reader can tell an addition from carried code without
+diffing against lantaarn — one line each for what it is *for here*:
+
+| declaration | what it is for in knips |
+| --- | --- |
+| `CMSampleBufferGetPresentationTimeStamp` | the frame's own stamp; a recorder cannot count frames, because SCK only delivers on a change (see above) |
+| `CMSampleBufferGetDuration` | the length carried across when a colliding frame is retimed, so the copy describes the same span the original did |
+| `CMSampleBufferDataIsReady` | refuses an audio buffer whose data has not landed; appending one fails `AVAssetWriter` terminally, video track included (`TMovieWriter.AppendAudioTo`) |
+| `CMSampleBufferIsValid` | asked of the *held* frame before the idle heartbeat re-appends it — SCK is not documented to invalidate a buffer the client still holds, and this is what says so out loud instead of failing the writer for good |
+| `CMTimeGetSeconds` | every duration and stamp the reports carry, in the reader, the writer and the trim |
+| `CMClockGetHostTimeClock`, `CMClockGetTime`, and the `HostClockSeconds` helper on top of them | the sidecar's clock. The cursor is sampled on the main thread and has to be placed on the movie's timeline; reading the clock SCK stamps its frames against is what makes `event.t − anchor.host` exact rather than approximate ([event-sidecar.md](event-sidecar.md), "The clock"). Recovery reads the same clock for the trailer it writes |
+| `CMTimeCompare` | the one comparison on the capture queue: a frame arriving at or behind the last appended stamp is retimed one tick forward rather than handed to the writer out of order, which would end the recording |
+| `CVPixelBufferGetPixelFormatType`, `CVPixelBufferIsPlanar` | Big Cursor's layout check — see the section below |
+| `AudioStreamBasicDescription`, `kKnipsAudioFormatLinearPCM`, `kKnipsAudioFormatFlagIsFloat`, `CMAudioFormatDescriptionGetStreamBasicDescription` | the audio-silence check. A track that was enabled and came out silent is the failure nobody notices until the take is unrepeatable, and reading the samples is the only way to know; the format description is what says whether the bytes are 32-bit floats, so nothing guesses at a layout it was not told |
+| `CMSampleBufferCreateCopyWithNewTiming`, `CMSampleBufferRetain`, `InvalidCMTime` | the idle heartbeat — see the section below |
+
+Two shapes in that list are worth knowing before adding to it.
+`CMSampleBufferRetain` is an alias for `_CFRetain`, the way
+`CMSampleBufferRelease` already aliases `_CFRelease` in the carried code.
+And `InvalidCMTime` is *built*, not bound: `kCMTimeInvalid` is documented as
+an all-zero structure, so a local function is one fewer external global to
+get wrong. There is no `CMTimeIsValid` here and nothing needs one — validity
+is asserted by setting `kCMTimeFlags_Valid`, which the carried
+`kCMTimeFlags_*` constants already provide.
 
 ### Two CoreVideo checks for Big Cursor
 
@@ -221,26 +251,43 @@ spike.
 
 ## Verified
 
-- Neutral units: 27 assertions across two suites, `lwpt test` green on
-  Linux.
+- Neutral units: **523 test cases across sixteen co-located suites**,
+  `lwpt test` green on macOS and on Linux in `tools/linux-ci.sh`. The
+  carried code is the framework glue and nothing else; everything decidable
+  was moved out of it and is now tested on every host.
 - Every Darwin unit and the program type-check for `aarch64-darwin` with
   an FPC 3.2.2 cross compiler against the real `MacOSAll`/`CocoaAll`
   ([docs/tooling.md](tooling.md)).
 - `lwpt format --check`, `lwpt build` (Linux shell binary) green.
+- On device: `knips probe` and a real recording that plays back, which is
+  what closed [spike 0001](spikes/0001-runtime-objc-class.md) and struck
+  "asserted, not proven" from ADR-0002.
 
 ## Not verified — needs a Mac
 
-Listed in [spikes/0001-runtime-objc-class.md](spikes/0001-runtime-objc-class.md).
-Also noted, in carried code that Knips does not compile today:
-`Lantaarn.Capture.AudioEncoder` declares `cdecl; external name
-'AudioConverterNew'` without the leading underscore that every other
-Darwin binding (and FPC's own `univint/AudioConverter.pas`) uses. Whether
-that ever linked is unknown; when audio lands (milestone 4), use
-MacOSAll's `AudioConverter` bindings and drop the hand-written ones.
+The ledger is [spikes/0001-runtime-objc-class.md](spikes/0001-runtime-objc-class.md),
+and everything load-bearing in it is closed. What is left there is the
+camera window's look and feel, which is gated on a camera grant this
+machine has never been given.
+
+`Lantaarn.Capture.AudioEncoder` used to be listed here for declaring
+`external name 'AudioConverterNew'` without the leading underscore every
+other Darwin binding uses. It is moot: audio landed through
+AVAssetWriter's own AAC encoder, the unit was never carried into
+`source/capture/`, and there is no `AudioConverter` call anywhere in
+knips.
 
 ## Next
 
-- `knips probe` and a real recording on Apple silicon — clears the spike.
-- Menu bar + region overlay on the same runtime-class primitive.
-- GIF export in pure Pascal (testable on Linux).
-- Audio as a second writer input from SCK's audio output.
+The lantaarn port itself is finished — all three vendored units are in
+the shipping build and nothing is waiting on a decision from that side.
+What is still open is what a *second* platform does with them, and that
+is a different document:
+
+- The vendored units are macOS bindings and stay that way. A Windows or
+  Linux backend gets its own directory beside them rather than an
+  abstraction over them ([ADR-0005](adr/0005-windows-linux-ports.md),
+  [ports.md](ports.md)).
+- `CGRect` in `TRecordingSession.UpdateSourceRect` is the one macOS type
+  left in the session signature, and should become a neutral rectangle in
+  `Knips.Options` before a second backend exists.

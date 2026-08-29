@@ -219,12 +219,27 @@ row, the zoom and the pan stop for the rest of that recording — the file
 keeps being written either way.
 
 ```sh
-defaults write knips KnipsZoomOnClick -bool true   # or use the menu
+defaults write knips KnipsEffectZoom -bool true    # or use the Effects menu
 defaults write knips KnipsFollowMouse -bool true
 ```
 
+`KnipsEffectZoom` is the *saved effect default* — what the render applies
+on every stop and what the playback window's Effects control comes up
+showing — not a switch that reaches a recording already running. Both keys
+are read once, at launch, by `LoadPreferences`, so a write only takes
+effect the next time the app starts; and both are written back whenever
+the menu changes them, so a write made while Knips is running is lost at
+the next toggle. `KnipsZoomOnClick` is the key the old *Zoom on Click*
+menu item used and is **not** what the app reads any more: it is consulted
+once, only where `KnipsEffectZoom` has never been written, to carry an
+upgrade across, and never written again.
+
 **The playback window.** When a recording finishes, it opens in a normal
-window with AVKit's transport controls and three buttons. It is the one
+window with AVKit's transport controls, four buttons — *Close*, *Reveal*,
+*Export as GIF…* and *Re-export* — and an **Effects** pull-down naming
+what the deliverable will be rendered with (Zoom on Click, and one of the
+cursor modes). Change the pull-down, press *Re-export*, and the same take
+is rendered again with the new choice. It is the one
 window Knips has that behaves like a document window: while it is open the
 app appears **in the Dock and in ⌘-Tab**, with a menu bar of its own —
 *Knips ▸ About Knips, Quit Knips ⌘Q* and *Window ▸ Close ⌘W, Minimize
@@ -477,9 +492,20 @@ knips record --out=<file>       .mp4 or .mov (required; replaced if present)
               [--no-cursor]      hide the pointer
               [--big-cursor]     draw an enlarged pointer into the frames;
                                  display targets only, not with --no-cursor
+              [--smooth-cursor]  leave the pointer out of the movie and draw a
+                                 smoothed one into a GIF/APNG export; display
+                                 targets only, and exclusive with --big-cursor
+                                 and --no-cursor
               [--bitrate=N]      average bits/s (default derived from size × fps)
               [--audio=none|system|mic|both]
                                  one AAC track per source (default none)
+knips render --in=<file>        the raw take; .mp4 or .mov (required)
+              [--out=<file>]     the deliverable (default: the take's name
+                                 without "-raw"; replaced if present)
+              [--effects=…]      comma-separated: zoom, as-recorded,
+                                 smooth-cursor, big-cursor, no-cursor, none
+                                 (default as-recorded — whatever the take
+                                 asked for)
 knips export --in=<file>        .mp4 or .mov (required)
               --out=<file>       .gif, .apng, or .mp4/.mov for a passthrough
                                  trim (required; replaced if present)
@@ -488,6 +514,10 @@ knips export --in=<file>        .mp4 or .mov (required)
               [--trim=start,end] seconds, decimals allowed, either side optional
                                  (required for a movie --out)
               [--no-dither]      skip Floyd–Steinberg dithering; GIF only
+              [--cursor=as-recorded|none|smooth|big]
+                                 the pointer in the animation, drawn from the
+                                 event sidecar; .gif/.apng only
+              [--effects=…]      the same list `render` takes; .gif/.apng only
 knips displays
 knips windows
 knips mcp                       MCP server on stdin/stdout; no options

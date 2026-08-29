@@ -83,8 +83,14 @@ type
 //
 // Safe to call when nothing is wrong, which is the usual case — it is one
 // directory listing and, for each unfinished sidecar, one parse.
+// ASweptTemporaries answers how many scratch files a killed render left
+// behind and this pass removed — a number that used to be computed and
+// thrown away at the one production call. It is worth a line: a
+// directory that keeps producing them is a render that keeps dying, and
+// nothing else in knips would ever say so.
 function RecoverOrphanedTakes(const ADirectory: string;
-  out ATakes: TRecoveredTakes): Integer;
+  out ATakes: TRecoveredTakes;
+  out ASweptTemporaries: Integer): Integer;
 
 // One line per recovered take, for a console or a log. '' when nothing
 // was recovered.
@@ -96,6 +102,18 @@ function DescribeRecoveredTakes(const ATakes: TRecoveredTakes): string;
 // that died and nothing will ever finish it. Exposed so it can be asked
 // for and tested on its own; RecoverOrphanedTakes runs it first.
 function SweepRenderTemporaries(const ADirectory: string): Integer;
+
+// Whether a process with this pid exists — `kill(pid, 0)`, which sends
+// no signal and only asks. True for a pid of zero or below: a sidecar
+// with no pid in its header is treated as still being written, which is
+// the conservative direction.
+//
+// Exposed because it is the single decision the whole recovery contract
+// turns on, and its limits are documented for third-party tools
+// (docs/event-sidecar.md, *Recovery*; docs/architecture.md, "Never lose
+// a take"). A rule anybody else is invited to implement is a rule worth
+// having tested here rather than only exercised through a re-mux.
+function ProcessIsAlive(APid: Integer): Boolean;
 
 {$ENDIF}
 
@@ -359,7 +377,8 @@ begin
 end;
 
 function RecoverOrphanedTakes(const ADirectory: string;
-  out ATakes: TRecoveredTakes): Integer;
+  out ATakes: TRecoveredTakes;
+  out ASweptTemporaries: Integer): Integer;
 var
   Search: TSearchRec;
   Take: TRecoveredTake;
@@ -367,6 +386,7 @@ var
 begin
   SetLength(ATakes, 0);
   Result := 0;
+  ASweptTemporaries := 0;
   if ADirectory = '' then
     Exit;
   Directory := IncludeTrailingPathDelimiter(ADirectory);
@@ -378,7 +398,7 @@ begin
   // is still here is one that died (Knips.Export.Render). Swept rather
   // than reported: a render can always be run again from the raw take,
   // which is the file this directory keeps for exactly that reason.
-  SweepRenderTemporaries(Directory);
+  ASweptTemporaries := SweepRenderTemporaries(Directory);
   if FindFirst(Directory + '*' + SidecarExtension, faAnyFile, Search) <> 0 then
     Exit;
   try

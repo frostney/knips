@@ -23,7 +23,6 @@ program Knips.Export.ZoomTrack.Test;
 {$I Knips.inc}
 
 uses
-  Math,
   SysUtils,
 
   Knips.Export.ZoomTrack,
@@ -58,6 +57,7 @@ type
     procedure TestCropStaysInsideTheBase;
     procedure TestWalkMatchesTheReference;
     procedure TestWalkIsIndependentOfStepSize;
+    procedure TestWalkMatchesTheReferenceWithAnExplicitHold;
   end;
 
   TClickFilterTests = class(TTestSuite)
@@ -364,6 +364,61 @@ begin
     TestWalkMatchesTheReference);
   Test('the walk does not depend on how often it is asked',
     TestWalkIsIndependentOfStepSize);
+  Test('and the two agree on an explicit factor and hold too',
+    TestWalkMatchesTheReferenceWithAnExplicitHold);
+end;
+
+// Both call sites of ZoomSourceRectAt passed 0 for the factor and 0 for
+// the hold, so the oracle only ever checked the walker against the
+// DEFAULTS — and the zero-means-the-feature's-own-default substitution
+// happens inside ZoomWalkerStart, which both of them go through. An
+// explicit hold and an explicit factor take a different path through the
+// same code and were never compared at all.
+procedure TInvariantTests.TestWalkMatchesTheReferenceWithAnExplicitHold;
+const
+  Factor = 3.0;
+  Hold = 1.5;
+var
+  Clicks: TZoomClickArray;
+  Walker: TZoomWalker;
+  I: Integer;
+  Seconds: Double;
+  Walked, Fresh: TLiveRect;
+  SawZoom: Boolean;
+begin
+  SetLength(Clicks, 2);
+  Clicks[0].Seconds := 0.4;
+  Clicks[0].X := 300;
+  Clicks[0].Y := 200;
+  Clicks[1].Seconds := 1.1;
+  Clicks[1].X := 600;
+  Clicks[1].Y := 300;
+  Walker := ZoomWalkerStart(TestBase, Factor, Hold);
+  SawZoom := False;
+  // Past the last click plus the hold plus the ease out, so the whole
+  // shape — in, hold, out — is walked at a hold nothing else exercises.
+  for I := 0 to Round(30 * (1.1 + Hold + LiveZoomOutSeconds + 0.5)) do
+  begin
+    Seconds := I / 30;
+    Walker := ZoomWalkerAdvance(Walker, Clicks, Seconds);
+    Walked := ZoomWalkerSourceRect(Walker);
+    Fresh := ZoomSourceRectAt(TestBase, Factor, Hold, Clicks, Seconds);
+    ExpectNear(Walked.X, Fresh.X, RectEpsilon,
+      Format('walked x at %.4fs', [Seconds]));
+    ExpectNear(Walked.Width, Fresh.Width, RectEpsilon,
+      Format('walked width at %.4fs', [Seconds]));
+    if Walked.Width < BaseWidth - RectEpsilon then
+      SawZoom := True;
+  end;
+  // The walk really did zoom, or the agreement above would be an
+  // agreement about the base rectangle and nothing else.
+  Expect<Boolean>(SawZoom).ToBe(True);
+  // And the explicit hold is honoured rather than replaced by the
+  // default: at the last click plus most of the hold the crop is still
+  // in, where the shorter default (LiveZoomHoldSeconds) would have let
+  // it start easing out.
+  Expect<Boolean>(ZoomSourceRectAt(TestBase, Factor, Hold, Clicks,
+    1.1 + Hold - 0.05).Width < BaseWidth - RectEpsilon).ToBe(True);
 end;
 
 procedure TInvariantTests.TestCropStaysInsideTheBase;
