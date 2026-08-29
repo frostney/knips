@@ -46,11 +46,16 @@ pointer back and applies Zoom on Click from the take's event sidecar, and
 `--cursor=as-recorded|none|smooth|big` for a GIF or an APNG.
 
 `knips mcp` serves the same capabilities to an AI client over the Model
-Context Protocol — `list_displays`, `list_windows`, `record_start` /
-`record_stop` / `record_status`, `export_gif`, `export_apng`,
-`export_trim` — using
+Context Protocol — `list_displays`, `list_windows`, `take_info`,
+`record_start` / `record_stop` / `record_status`, `render`,
+`export_gif`, `export_apng`, `export_trim` — using
 [pascal-mcp-sdk](https://github.com/frostney/pascal-mcp-sdk). Recording
-is non-blocking: the server keeps answering while it captures.
+is non-blocking: the server keeps answering while it captures. Raw takes
+are there too: `record_start` takes `smooth_cursor` and `render` applies
+the effects afterwards, so an agent's recording can still change its
+mind. The pointer track is only as dense as the client's
+`record_status` polling, and the server says so
+([docs/quick-start.md](docs/quick-start.md)).
 
 `tools/make-app.sh` wraps the built binary in a menu-bar-only
 `build/Knips.app` ([docs/deployment.md](docs/deployment.md)).

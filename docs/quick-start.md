@@ -500,8 +500,9 @@ knips record --out=<file>       .mp4 or .mov (required; replaced if present)
               [--audio=none|system|mic|both]
                                  one AAC track per source (default none)
 knips render --in=<file>        the raw take; .mp4 or .mov (required)
-              [--out=<file>]     the deliverable (default: the take's name
-                                 without "-raw"; replaced if present)
+              [--out=<file>]     the deliverable; .mp4 or .mov (default:
+                                 the take's name without "-raw"; replaced
+                                 if present)
               [--effects=…]      comma-separated: zoom, as-recorded,
                                  smooth-cursor, big-cursor, no-cursor, none
                                  (default as-recorded — whatever the take
@@ -550,38 +551,159 @@ the built binary with one argument:
 | --- | --- | --- |
 | `list_displays` | — | index, size in points, backing scale, which is main |
 | `list_windows` | — | window id, size, application, title |
-| `record_start` | `out?`, `overwrite?`, `display?`, `window?`, `left`/`top`/`width`/`height`?, `fps?`, `scale?`, `audio?`, `cursor?`, `big_cursor?`, `bitrate?` | the path, pixel size, and frame rate it started at |
-| `record_stop` | — | the path, duration, frame counters, bytes |
-| `record_status` | — | whether it is recording, elapsed seconds, frames so far |
-| `export_gif` | `in`, `out?`, `fps?`, `width?`, `trim_start?`, `trim_end?`, `dither?` | the path, pixel size, frames, bytes |
-| `export_apng` | `in`, `out?`, `fps?`, `width?`, `trim_start?`, `trim_end?` | as above |
-| `export_trim` | `in`, `out?`, `trim_start?`, `trim_end?` | the range kept and the bytes written |
+| `take_info` | `path` | what a movie is and which effects it can still be given |
+| `record_start` | `out?`, `overwrite?`, `display?`, `window?`, `left`/`top`/`width`/`height`?, `fps?`, `scale?`, `audio?`, `cursor?`, `big_cursor?`, `smooth_cursor?`, `bitrate?` | the path, pixel size, frame rate, and the resolved `audio`/`big_cursor`/`smooth_cursor`/`raw` |
+| `record_stop` | — | the path, `raw`, `sidecar_path`, duration, frame counters, `pointer_samples`, `render_output_path`, bytes |
+| `record_status` | — | whether it is recording, elapsed seconds, frames and `pointer_samples` so far |
+| `render` | `in`, `out?`, `overwrite?`, `zoom?`, `cursor?` | the deliverable, what applied, and why anything did not |
+| `export_gif` | `in`, `out?`, `overwrite?`, `fps?`, `width?`, `trim_start?`, `trim_end?`, `dither?`, `zoom?`, `cursor?` | the path, pixel size, frames, bytes, what applied |
+| `export_apng` | `in`, `out?`, `overwrite?`, `fps?`, `width?`, `trim_start?`, `trim_end?`, `zoom?`, `cursor?` | as above |
+| `export_trim` | `in`, `out?`, `overwrite?`, `trim_start?`, `trim_end?` | the range kept and the bytes written |
 
-Every argument except `in` is optional. An omitted `out` becomes
-`~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4` for a recording — the same
-name the menu-bar app uses — and, for an export, the input path with the
+Every argument except `in` and `take_info`'s `path` is optional. An
+omitted `out` becomes `~/Movies/knips/knips-YYYYMMDD-HHMMSS.mp4` for a
+recording — the same name the menu-bar app uses, with a `-raw` suffix
+when `smooth_cursor` is on — and, for an export, the input path with the
 format's extension (a trim adds `-trim`, since it may not overwrite its
-own input). A region is four separate integers, all four or none. Every
-tool declares an `outputSchema`, so a client knows the shape of
-`structuredContent` before it calls.
+own input). `render` writes the take's own name without the `-raw`, or,
+for an input that is not a raw take, the input name with a `-rendered`
+suffix beside it; never the input itself. A region is four separate
+integers, all four or none. Every tool declares an `outputSchema`, so a
+client knows the shape of `structuredContent` before it calls.
 
 Paths in and out are absolute. A relative `in`/`out` is expanded against
 the server's working directory, and results always report the expanded
 path — a client has no way to resolve a relative path against a
 directory it never saw.
 
-**`record_start` will not silently replace a file.** `knips record`
-overwrites its `--out` without asking, which is right for a path a
-person typed; an agent guesses paths, so over MCP an existing `out` is
-refused by name unless `"overwrite": true` is passed. Exports keep the
-CLI's replace-in-place behaviour, since their default path is derived
-from `in` rather than guessed.
+**No tool here will silently replace a file.** `knips record` overwrites
+its `--out` without asking and `knips render` replaces its deliverable
+atomically, which is right for a path a person typed and a file they are
+watching; an agent guesses paths, so over MCP an existing `out` is
+refused by name unless `"overwrite": true` is passed. That includes
+`render`, whose CLI half deliberately does replace: a re-render with the
+wrong `in` would otherwise quietly destroy a deliverable already handed
+to somebody. The check runs *before* the render, so a refused call costs
+nothing, and an accepted one is still atomic — the movie is built as
+`<out>.knips-render-tmp` and renamed into place.
 
-**`export_trim` refuses `fps`, `width` and `dither`** instead of
-ignoring them. A passthrough trim copies coded samples, so those cannot
-be honoured, and the SDK ignores arguments a schema does not declare —
-an agent that asked for a scaled trim would otherwise get an unscaled
-movie and no hint that the request was dropped.
+**No tool silently ignores an argument it cannot honour.** The SDK
+deliberately drops properties a schema does not declare, so an agent
+that asked for a scaled trim would otherwise get an unscaled movie and
+no hint the request went nowhere. Both tools that could suffer it refuse
+instead, and each refusal names the tool that *can* do the thing:
+
+- `export_trim` refuses `fps`, `width`, `dither`, `zoom` and `cursor`. A
+  passthrough trim copies coded samples, so the first three cannot be
+  honoured and the last two would mean decoding and re-encoding the
+  whole video — which is what `render` is for.
+- `render` refuses `fps`, `width`, `dither` (it re-encodes the take at
+  the take's own size and rate — use `export_gif`/`export_apng` to scale
+  or slow a movie down) and `trim_start`/`trim_end` (it renders the whole
+  take — use `export_trim` for a range).
+
+**`render` writes only `.mp4` and `.mov`.** The pass encodes H.264 into a
+QuickTime-family container and can write nothing else, so an `out` it
+cannot honour is refused rather than written under a name that lies
+about its contents. `knips render` refuses the same paths through the
+same check.
+
+### Raw takes over MCP
+
+A recording made with `"smooth_cursor": true` is a **raw take**: no
+pointer in its pixels, and an [event sidecar](event-sidecar.md) beside it
+holding the pointer track and the clicks. `render` turns one into a
+deliverable — the pointer drawn back, a zoom driven by the clicks, the
+audio copied rather than re-encoded — and leaves the take on disk, so the
+same recording can be rendered again with different effects for as long
+as it is kept. A take recorded *without* `smooth_cursor` has the pointer
+in its pixels for good.
+
+Two files per rendered take, then, and two sidecars:
+`knips-…-raw.mp4` + `knips-…-raw.knips.jsonl` from `record_stop`, and
+`knips-….mp4` + `knips-….knips.jsonl` from `render`. Nothing is ever
+deleted; the raw take is what makes the effects changeable.
+
+**`record_stop` does not render.** The menu-bar app renders on every stop
+because a person clicked once and wants a file; an agent is a different
+caller. A render is seconds of work with no progress a stdio client can
+see, it needs a second output path, and *which effects* is a decision the
+stop has no arguments for. So the stop stays cheap and predictable and
+hands back everything `render` needs — the take, its sidecar, the samples
+that arrived, and `render_output_path`. Call `render` when you want the
+deliverable.
+
+`render_output_path` is a **name, not a promise**: it says where a
+`render` with no `out` would write, and it is filled in even for a take
+that has nothing left to apply — which `render` refuses outright rather
+than duplicating. `record_stop`'s `raw`, or `take_info`'s
+`can_draw_cursor` / `can_zoom_on_click`, is what says whether the render
+would happen at all.
+
+The effects are two flat arguments rather than one nested object:
+
+| Argument | Values |
+| --- | --- |
+| `zoom` | `true` / `false` (default `false`) — the click track drives a crop, with the live effect's own easing, hold and factor |
+| `cursor` | `"as-recorded"` (default), `"none"`, `"smooth"`, `"big"` |
+
+`as-recorded` means *whatever the recording asked for*, which for a raw
+take is a pointer — it is not the same as `"none"`. The four tunable
+numbers of the effect record (magnification, smoothing window, zoom
+factor, hold) are reserved: they default to the values that make a
+rendered effect match the live one, and there is nothing useful to say
+about a different number. Flat scalars rather than an `effects` object
+because the SDK's server-enforced schema subset is flat scalars, and a
+schema that leaves it has to take over its own argument validation for
+the *whole* tool — the same trade a region refuses by being four
+integers.
+
+An effect that could not be applied is never a failure: the file is
+written and correct without it. `render` and the two animation exports
+report `zoom`/`cursor` (what was asked for) beside `zoom_applied` /
+`cursor_drawn` (what reached the pixels), plus `framing_note`,
+`cursor_note` and `zoom_note` when there is a reason to give. Ask
+`take_info` first and you will know in advance:
+
+```json
+{"can_draw_cursor": true, "can_zoom_on_click": false,
+ "raw": true, "cursor_render": "smooth",
+ "clicks": 0, "usable_clicks": 0,
+ "zoom_reason": "nothing was clicked during this recording",
+ "render_output_path": "/…/knips-20260829-101500.mp4"}
+```
+
+`clicks` and `usable_clicks` are two different counts and both are
+reported. `can_zoom_on_click` asks only whether the track holds *any*
+button event; a render then drops the ones a zoom cannot use — a right
+button, a click in the menu-bar band, a click outside the rectangle the
+recording was showing at that instant. So a take can answer
+`can_zoom_on_click: true` and still come back from a render saying
+"nothing was clicked inside the recorded rectangle". `usable_clicks` is
+the number the render will actually use.
+
+`zoom_applied` and `cursor_drawn` say the effect **engaged**, not that
+every frame shows it; `zoomed_frames` and `cursor_frames` beside them are
+the pixel-level counts, and are what to read when the question is whether
+the effect really landed. These are the same report fields `knips render`
+prints from, and since this round both faces compose their summaries with
+one function in `Knips.Options`, so the CLI and the tool describe a
+render in identical words.
+
+**The pointer track of an MCP recording is only as dense as your
+polling.** The stdio transport is a blocking read-handle-write loop, so
+nothing in this server runs between tool calls: the pointer is sampled
+once at the start, once per `record_status`, and once at the stop. A take
+polled twice has a three-sample track, and a smooth cursor drawn from
+three samples is a straight line. `record_start` says so in its `note`
+whenever `smooth_cursor` is on — there is no handshake in which a client
+could promise to poll, so the warning is unconditional rather than
+never-fired. Poll about once a second during a raw take. `record_stop`
+reports the `pointer_samples` that actually arrived, and `take_info`
+reports `max_sample_gap_seconds` beside `interpolation_limit_seconds`:
+the first above the second means some stretch of the rendered take will
+show a pointer standing still, because the reader holds the last known
+position across a silence rather than drawing a line through it.
 
 **Recording does not block the server.** `record_start` returns as soon
 as the capture is running and the loop goes back to reading stdin;

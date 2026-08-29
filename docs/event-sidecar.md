@@ -202,7 +202,14 @@ Nothing about the sidecar runs on ScreenCaptureKit's capture queue.
   blocking read/handle/write loop, so between tool calls nothing runs on
   the main thread at all. Those takes get a sample at the start, one per
   `record_status` call, and one at the stop. The times are still exact;
-  there are simply fewer of them. Recovery treats such a take like any
+  there are simply fewer of them. That matters more than it used to:
+  `record_start` takes `smooth_cursor`, so an agent can record a raw take
+  and `render` it, and a pointer drawn from three samples is a straight
+  line. The server says so on `record_start`, reports the samples that
+  arrived on `record_stop`, and reports the largest gap between them —
+  beside the largest gap a reader will draw through, and a sentence
+  saying what it means when the first is bigger — from `take_info`.
+  Recovery treats such a take like any
   other and the movie comes back whole — but what it recovers is the
   movie, not a dense event track. It is also the take the interpolation
   rule above is written for: minutes can separate two of those samples,

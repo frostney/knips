@@ -570,8 +570,8 @@ begin
     if Session.Report.SmoothCursorNote <> '' then
     begin
       Flush(Output);
-      WriteLn(ErrOutput, ProgramName, ' export: no cursor drawn (',
-        Session.Report.SmoothCursorNote, ')');
+      WriteLn(ErrOutput, ProgramName, ' export: ',
+        EffectCursorNoteLine(Session.Report.SmoothCursorNote));
       Flush(ErrOutput);
     end;
     // The same shape for the zoom: asked for, could not be applied, and
@@ -579,8 +579,8 @@ begin
     if Session.Report.ZoomNote <> '' then
     begin
       Flush(Output);
-      WriteLn(ErrOutput, ProgramName, ' export: no zoom applied (',
-        Session.Report.ZoomNote, ')');
+      WriteLn(ErrOutput, ProgramName, ' export: ',
+        EffectZoomNoteLine(Session.Report.ZoomNote));
       Flush(ErrOutput);
     end;
     // And the one about the pixels rather than about an effect. Its own
@@ -629,6 +629,7 @@ function HandleRender(const APositionals: TStringList;
   const AOptions: TOptionArray): Integer;
 var
   Effects: TExportEffects;
+  Facts: TRenderAppliedFacts;
   Session: TRenderSession;
   InputPath, OutputPath, Error, Applied: string;
 begin
@@ -654,6 +655,17 @@ begin
     end;
     OutputPath := DeliverablePathFor(InputPath);
   end;
+  // The render writes H.264 into a QuickTime-family container and can
+  // write nothing else; `--out=demo.gif` used to produce exactly that,
+  // named demo.gif, and report success. Refused here rather than in
+  // TRenderSession so the exit code is a usage one — and through the
+  // same function the MCP tool asks, so the two faces cannot drift.
+  if not ValidateRenderOutputPath(OutputPath, Error) then
+  begin
+    WriteLn(ErrOutput, ProgramName, ' render: ', Error);
+    Flush(ErrOutput);
+    Exit(ExitUsage);
+  end;
   Effects := DefaultExportEffects;
   if not ParseExportEffects(StringValue(AOptions, 'effects', ''), Effects,
     Error) then
@@ -670,49 +682,30 @@ begin
       Flush(ErrOutput);
       Exit(ExitFailure);
     end;
-    Applied := '';
-    if Session.Report.ZoomApplied then
-      Applied := Format(', zoom on %d of %d frames from %d clicks',
-        [Session.Report.ZoomedFrames, Session.Report.FramesWritten,
-        Session.Report.UsableClicks]);
-    if Session.Report.CursorDrawn then
-      Applied := Applied + Format(', pointer on %d frames (%d off frame)',
-        [Session.Report.CursorFrames,
-        Session.Report.CursorOffFrameFrames]);
-    // Frames the capture never made. Said out loud rather than folded
-    // into the total, because it is the difference between a deliverable
-    // that animates and one that jumps, and because it is what the file
-    // grew for.
-    if Session.Report.SynthesizedFrames > 0 then
-      Applied := Applied + Format(', %d frames filled in at %d fps where '
-        + 'the capture had none', [Session.Report.SynthesizedFrames,
-        Session.Report.SynthesisFramesPerSecond]);
-    // AudioPassthrough is stated rather than assumed, because it is the
-    // one claim about this file a listener cannot check: a track that
-    // had been through AAC twice sounds like a track that had not, until
-    // it does not. This unit has no re-encoding path and would rather
-    // fail than take one, so the word is always "copied" — and if that
-    // ever stops being true, the summary says so on the take where it
-    // happened rather than in a comment.
-    if Session.Report.AudioTracks > 0 then
-      if Session.Report.AudioPassthrough then
-        Applied := Applied + Format(
-          ', %d audio track(s) copied (%d samples, not re-encoded)',
-          [Session.Report.AudioTracks, Session.Report.AudioSamples])
-      else
-        Applied := Applied + Format(
-          ', %d audio track(s) RE-ENCODED (%d samples)',
-          [Session.Report.AudioTracks, Session.Report.AudioSamples]);
-    if Session.Report.Copied then
-      WriteLn(Format('wrote %s: nothing to render, so the take was copied '
-        + 'unchanged (%d kB)', [Session.Report.OutputPath,
-        Session.Report.OutputBytes div 1024]))
-    else
-      WriteLn(Format('wrote %s: %dx%d, %d frames, %.1fs, %d kB%s',
-        [Session.Report.OutputPath, Session.Report.PixelWidth,
-        Session.Report.PixelHeight, Session.Report.FramesWritten,
-        Session.Report.SourceDurationSeconds,
-        Session.Report.OutputBytes div 1024, Applied]));
+    // Every clause of what this render did, composed once in
+    // Knips.Options so `knips render` and the MCP render tool describe
+    // the same work in the same words. The two used to hold a
+    // byte-identical copy of it each, which is exactly the duplication
+    // that drifts the first time one clause is reworded.
+    Facts := RenderAppliedFacts;
+    Facts.ZoomApplied := Session.Report.ZoomApplied;
+    Facts.ZoomedFrames := Session.Report.ZoomedFrames;
+    Facts.FramesWritten := Session.Report.FramesWritten;
+    Facts.UsableClicks := Session.Report.UsableClicks;
+    Facts.CursorDrawn := Session.Report.CursorDrawn;
+    Facts.CursorFrames := Session.Report.CursorFrames;
+    Facts.CursorOffFrameFrames := Session.Report.CursorOffFrameFrames;
+    Facts.SynthesizedFrames := Session.Report.SynthesizedFrames;
+    Facts.SynthesisFramesPerSecond :=
+      Session.Report.SynthesisFramesPerSecond;
+    Facts.AudioTracks := Session.Report.AudioTracks;
+    Facts.AudioPassthrough := Session.Report.AudioPassthrough;
+    Facts.AudioSamples := Session.Report.AudioSamples;
+    Applied := RenderAppliedSummary(Facts);
+    WriteLn(RenderSummaryLine(Session.Report.OutputPath,
+      Session.Report.PixelWidth, Session.Report.PixelHeight,
+      Session.Report.FramesWritten, Session.Report.SourceDurationSeconds,
+      Session.Report.OutputBytes, Session.Report.Copied, Applied));
     // The deliverable's own sidecar, named the way `record` names the
     // one it writes. A rendered take is two movies and two sidecars
     // (docs/event-sidecar.md), and this is the line that says the second
@@ -734,12 +727,15 @@ begin
     if Session.Report.FramingNote <> '' then
       WriteLn(ErrOutput, ProgramName, ' render: ',
         Session.Report.FramingNote);
+    // The two wrappers come from Knips.Options for the same reason the
+    // clause list above does: one field, one set of words, whichever
+    // face is reporting it.
     if Session.Report.CursorNote <> '' then
-      WriteLn(ErrOutput, ProgramName, ' render: no cursor drawn (',
-        Session.Report.CursorNote, ')');
+      WriteLn(ErrOutput, ProgramName, ' render: ',
+        EffectCursorNoteLine(Session.Report.CursorNote));
     if Session.Report.ZoomNote <> '' then
-      WriteLn(ErrOutput, ProgramName, ' render: no zoom applied (',
-        Session.Report.ZoomNote, ')');
+      WriteLn(ErrOutput, ProgramName, ' render: ',
+        EffectZoomNoteLine(Session.Report.ZoomNote));
     Flush(ErrOutput);
     Result := ExitOk;
   finally

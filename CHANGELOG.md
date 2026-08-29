@@ -9,6 +9,79 @@ release-tagging step; it does not produce the entries below.)
 
 ### Features
 
+- **An agent can record a take it can still change its mind about.** The
+  MCP server had been frozen at the era before raw takes: it could record
+  and it could export, but `record_start` had no way to ask for a
+  cursorless take and there was no `render` tool at all — so every
+  recording an agent made had the pointer baked into its pixels, for
+  good, and the promise that an MCP tool and a subcommand are one
+  implementation was true of everything except the one pass that decides
+  what a recording looks like.
+
+  `record_start` now takes `smooth_cursor`, `render` is a tool running
+  the same `TRenderSession` `knips render` runs, and `render`,
+  `export_gif` and `export_apng` take `zoom` and `cursor` — two flat
+  arguments rather than the CLI's comma-separated list, because the SDK
+  validates flat scalars per call and a nested object would cost the
+  whole tool its argument checking. A new read-only `take_info` answers
+  the question an agent should ask before any of it: what is this movie,
+  what is already in its pixels, which effects can it still be given, and
+  where would a render write. `record_stop` now names the take's sidecar,
+  the samples that reached it, and that path — but does **not** render:
+  the menu-bar app renders on every stop because a person clicked once
+  and wants a file, while an agent wants a cheap predictable stop and a
+  separate call it chose the effects for.
+
+  The honest part. Nothing runs in this server between tool calls, so a
+  raw take's pointer track is exactly as dense as the client's polling —
+  one sample at the start, one per `record_status`, one at the stop — and
+  a smooth cursor drawn from three samples is a straight line, not a
+  smooth cursor. There is no handshake in which a client could promise to
+  poll, so `record_start` says so every time `smooth_cursor` is on rather
+  than waiting for a promise it can never be given; `record_stop` reports
+  the samples that actually arrived, and `take_info` reports the largest
+  silence in the track beside the largest one a reader will draw through.
+  Measured on a take polled three times: 5 samples, a 1.01 s largest gap
+  against a 0.50 s interpolation limit — which is precisely the case
+  where the drawn pointer holds still rather than gliding through a
+  minute that never happened.
+
+  Also: `render` refuses an existing output unless `overwrite` is set,
+  where the command line replaces it. That is the one writer whose CLI
+  half deliberately overwrites — the app renders over the deliverable on
+  every stop — and it is right there and wrong for a path an agent
+  guessed, so the server's own no-silent-replacement rule wins. The check
+  runs before the decode, so a refused render costs nothing. `render`
+  also refuses `fps`/`width`/`dither` and `trim_start`/`trim_end` — it
+  re-encodes the take at the take's own size, rate and length, and the
+  SDK drops undeclared arguments silently, so a client asking for a
+  scaled render would have got a full-size movie and no hint. Each
+  refusal names the tool that can do the thing.
+
+### Fixed
+
+- **`knips render --out=demo.gif` no longer writes an MP4 called
+  demo.gif.** The render pass encodes H.264 into a QuickTime-family
+  container and can write nothing else; it used to accept any name at
+  all and report success, leaving a file whose extension lied about its
+  contents. Both `knips render` and the MCP render tool now refuse the
+  path, through one check, in the words the recorder already uses for
+  the same mistake.
+- **Export advice reached MCP clients still spelled in `--flags`.** A
+  large GIF comes back with "consider `--width=800` or `--fps=15`", which
+  is exactly the sentence that sends an agent looking for a command line
+  it does not have. Every refusal already went through the
+  flag-to-argument rewriter; this rode on a *successful* result and did
+  not. It does now, along with the Big Cursor idle note on `record_stop`.
+- **`knips render` and the MCP render tool no longer describe the same
+  work in two copies of the same paragraph.** The four clauses a finished
+  render reports — the zoom, the pointer, the frames filled in, the audio
+  — plus the "wrote …" line and the two note wrappers were a
+  byte-identical 25-line duplicate in each front end. They now come from
+  one place in `Knips.Options`, below the Darwin line, with a suite that
+  pins the exact sentence: whichever face reports a render, it is the
+  same sentence.
+
 - **Recordings of a still screen are no longer nearly empty.**
   ScreenCaptureKit delivers a frame only when the content changes, so a
   take whose screen went quiet used to stop producing frames — and,

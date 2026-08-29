@@ -286,6 +286,12 @@ type
     procedure SampleMetadata;
     // Where the event sidecar is being written, or '' when there is none.
     function SidecarPath: string;
+    // How many pointer samples have reached it so far. Report's own copy
+    // is filled at the close; this is the live count, for a caller that
+    // wants to know mid-take how dense the track it is building actually
+    // is — which over MCP is a question only the caller's own polling
+    // answers.
+    function SidecarSampleCount: Int64;
 
     // True between a successful StartCapture and FinishCapture.
     property Capturing: Boolean read FCapturing;
@@ -778,6 +784,14 @@ begin
     Result := ''
   else
     Result := FSidecar.Path;
+end;
+
+function TRecordingSession.SidecarSampleCount: Int64;
+begin
+  if FSidecar = nil then
+    Result := 0
+  else
+    Result := FSidecar.SampleCount;
 end;
 
 // The header is everything about the recording that the samples cannot
