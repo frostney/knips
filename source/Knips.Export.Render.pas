@@ -43,14 +43,20 @@ unit Knips.Export.Render;
 // frames are never moved, never dropped and never re-timed, and a render
 // with nothing to apply is still a byte copy.
 //
-// **It fills only BETWEEN captured frames.** A take whose screen went
-// static still loses its tail: the capture stopped delivering, so there
-// is no later frame to interleave towards and nothing here can invent
-// one. Measured on a real take: 17.54 s of recording, 88 frames, a movie
+// **It fills only BETWEEN captured frames.** There is no later frame to
+// interleave towards at the end of a movie, and nothing here can invent
+// one.
+//
+// That used to mean a take whose screen went static lost its tail —
+// measured, before the fix: 17.54 s of recording, 88 frames, a movie
 // 4.26 s long, with three of its four clicks past the end of the file.
-// That is a recorder-side defect, and its fix is a capture-side
-// heartbeat that re-presents the last frame while ScreenCaptureKit is
-// idle; this pass is the other half and not the whole of it.
+// The fix was never in this pass. It shipped on the recorder side as the
+// **idle heartbeat** (Knips.Recording.Heartbeat), which re-presents the
+// last frame about twice a second while ScreenCaptureKit is idle and
+// once more at the stop, so a movie now spans its take whatever the
+// screen did — measured, 13.972 s of movie against 13.972 s of elapsed
+// host time. This pass fills the gaps inside that movie; the two halves
+// are separate on purpose and neither replaces the other.
 //
 // **Audio is copied, not re-encoded.** Every audio track of the source
 // gets its own AVAssetReaderTrackOutput with *nil* output settings (the
@@ -151,10 +157,17 @@ type
     AudioPassthrough: Boolean;
     // Which effects actually reached the pixels, as opposed to which
     // were asked for. Effects that could not apply are never a reason to
-    // fail a render — the deliverable is correct without them — so this
-    // and Note are how a caller finds out.
+    // fail a render — the deliverable is correct without them — so
+    // these and the notes below are how a caller finds out.
     CursorDrawn: Boolean;
     CursorFrames: Int64;
+    // Frames where the pointer was outside the rectangle the movie
+    // shows, so nothing was drawn into them. Not a fault — the pointer
+    // was somewhere this take does not show — but the difference
+    // between "the pointer was drawn on 0 frames" and "the pointer was
+    // off screen for the whole take", which is a question the count
+    // alone cannot answer. Mirrors Big Cursor's CursorOffFrame.
+    CursorOffFrameFrames: Int64;
     // Frames that were never captured, made by re-presenting the last
     // source frame with the effect evaluated at a new instant
     // (Knips.Export.Cadence). Zero when every effect window in the take
@@ -172,9 +185,23 @@ type
     // the sample track had nothing to say about what they were showing —
     // a take whose movie runs past its own sidecar. Passed through whole
     // rather than cropped against a stale rectangle; never zero without
-    // Note saying so.
+    // FramingNote saying so.
     UnframedFrames: Int64;
     UsableClicks: Integer;
+    // The three notes, kept apart because they are three different
+    // facts and a caller offering ONE effect must be able to show that
+    // effect's own reason — the shape TExportReport already had.
+    //
+    // FramingNote is about the pixels rather than about an effect: some
+    // frames of this deliverable show something the take could not
+    // account for. It is the one that must never be crowded out, which
+    // is why it is its own field and comes first in the summary.
+    FramingNote: string;
+    CursorNote: string;
+    ZoomNote: string;
+    // The three above through Knips.Options.EffectNoteSummary, for a
+    // caller with one line — the menu's Last-error slot, the playback
+    // title. Derived at the end of Run; never assigned directly.
     Note: string;
     // True when the render was a byte copy because nothing applied.
     Copied: Boolean;
@@ -235,6 +262,11 @@ type
     FLastValue: Int64;
     FLastShape: TRenderedFrameShape;
     FHasLastShape: Boolean;
+    // Why the sidecar could not be read, when it could not. Kept so the
+    // refusal below can say "this sidecar is version 2 and this knips
+    // reads version 1" instead of "there is no event sidecar", which is
+    // what AvailableExportEffects(nil) answers and is a different fact.
+    FSidecarLoadError: string;
     function LoadSidecar: Boolean;
     procedure PrepareEffects;
     // The shape one frame would come out as at ASeconds, given that the
@@ -308,6 +340,16 @@ const
   // to do but wait. A millisecond is short enough that the wait never
   // shows up in the render time and long enough not to be a spin.
   IdleSliceSeconds = 0.001;
+  // Two minutes of idle slices. It bounds every wait in this unit, not
+  // only the finish: a render runs on the app's MAIN thread, so a
+  // framework that stops answering does not slow a render down, it hangs
+  // the menu bar with no way out but Force Quit. Failing loudly after two
+  // minutes costs a render that was going to fail anyway and gives the
+  // user their app back.
+  //
+  // Counted in slices where nothing moved, so a render that is simply
+  // slow — a long take, a busy encoder — never reaches it however long
+  // it takes.
   FinishTimeoutSlices = 120000;
   // How long CommitOutput will wait for the temporary to settle before
   // giving up on the rename, and how long one wait is. Half a second in
@@ -479,10 +521,17 @@ begin
   Result := FLog.LoadFromFile(SidecarPathFor(FInputPath), Error);
   if not Result then
   begin
+    FSidecarLoadError := Error;
     FreeAndNil(FLog);
-    FReport.Note := 'no event sidecar beside this take, so nothing could '
-      + 'be rendered into it';
   end;
+  // There used to be a note set here — "no event sidecar beside this
+  // take, so nothing could be rendered into it" — and nothing could ever
+  // read it. Run asks AvailableExportEffects(nil) next, which answers
+  // "there is no event sidecar for this recording", and a take that can
+  // take no effect at all is REFUSED with that reason rather than
+  // rendered. The render returns False and the report is never looked
+  // at. The refusal carries the message; a second copy of it here only
+  // looked like it did.
 end;
 
 // What actually applies, decided once. Every "no" here is answered rather
@@ -507,19 +556,15 @@ begin
       // The ZOOM's own reason, not the summary: a take with a baked
       // pointer and a panned framing has two, and the summary carries
       // the pointer's — which is not why the zoom was refused.
-      if FReport.Note = '' then
-        FReport.Note := Available.ZoomReason;
+      FReport.ZoomNote := Available.ZoomReason;
     end
     else
     begin
       FClicks := ZoomClicksFromLog(FLog);
       FReport.UsableClicks := Length(FClicks);
       if FReport.UsableClicks = 0 then
-      begin
-        if FReport.Note = '' then
-          FReport.Note := 'nothing was clicked inside the recorded '
-            + 'rectangle, so there was nothing to zoom to';
-      end
+        FReport.ZoomNote := 'nothing was clicked inside the recorded '
+          + 'rectangle, so there was nothing to zoom to'
       else
       begin
         FReport.ZoomApplied := True;
@@ -537,8 +582,8 @@ begin
       FReport.CursorDrawn := True
     else
     begin
-      if FCursor.Asked and (FReport.Note = '') then
-        FReport.Note := Note;
+      if FCursor.Asked then
+        FReport.CursorNote := Note;
       FreeAndNil(FCursor);
     end;
   end;
@@ -1011,6 +1056,29 @@ begin
 
         if Crop.Identity then
         begin
+          // The identity path copies the WHOLE source frame into the
+          // whole destination, so the two have to be the same size —
+          // and it used to take that on trust from the track's
+          // dimensions, which is fine for a knips take and not fine for
+          // the input surface this command actually has: `knips render`
+          // takes any MP4 anybody names. A frame smaller than the track
+          // claims made this read past the end of the decoded buffer,
+          // one row at a time.
+          //
+          // Refused rather than clipped. Clipping would leave part of
+          // every output frame holding whatever the pool's buffer had in
+          // it, which is a worse answer than a message: a movie whose
+          // frames are not the size its track says is not something this
+          // render can turn into a deliverable.
+          if (SourceWidth <> FReport.PixelWidth)
+            or (SourceHeight <> FReport.PixelHeight) then
+          begin
+            AError := Format('the frame at %.2fs is %dx%d but this '
+              + 'movie''s video track says %dx%d; a render cannot mix '
+              + 'frame sizes', [ASeconds, SourceWidth, SourceHeight,
+              FReport.PixelWidth, FReport.PixelHeight]);
+            Exit;
+          end;
           // Row by row, because a CVPixelBuffer's stride is padded and
           // the two need not agree.
           for Y := 0 to FReport.PixelHeight - 1 do
@@ -1158,13 +1226,29 @@ begin
 end;
 
 function TRenderSession.AwaitVideoInput: Boolean;
+var
+  Idle: Integer;
 begin
+  Idle := 0;
   while not FVideoInput.isReadyForMoreMediaData do
   begin
     if FWriter.status = AVAssetWriterStatusFailed then
       Exit(False);
-    if not PumpAudio then
+    if PumpAudio then
+      // Moving audio is progress, so the stall counter starts over: an
+      // encoder that is taking one track and not the other is busy, not
+      // stuck.
+      Idle := 0
+    else
+    begin
       CFRunLoopRunInMode(kCFRunLoopDefaultMode, IdleSliceSeconds, False);
+      Inc(Idle);
+      // See FinishTimeoutSlices. This used to be `while not ready`, with
+      // nothing to end it: an input that never came back ready hung the
+      // app's main thread for ever.
+      if Idle >= FinishTimeoutSlices then
+        Exit(False);
+    end;
   end;
   Result := True;
 end;
@@ -1260,13 +1344,14 @@ var
   Frame: TMovieReaderFrame;
   Pool: NSAutoreleasePool;
   VideoDone, Moved, AudioDone: Boolean;
-  I: Integer;
+  I, Idle: Integer;
   Started: Boolean;
 begin
   Result := False;
   AError := '';
   VideoDone := False;
   Started := False;
+  Idle := 0;
   Pool := NSAutoreleasePool(NSAutoreleasePool.alloc.init);
   try
     repeat
@@ -1333,8 +1418,22 @@ begin
       for I := 0 to High(FAudioFinished) do
         if not FAudioFinished[I] then
           AudioDone := False;
-      if not Moved then
+      if Moved then
+        Idle := 0
+      else
+      begin
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, IdleSliceSeconds, False);
+        Inc(Idle);
+        // The same bound AwaitVideoInput has, on the same reasoning:
+        // neither input coming back ready is indistinguishable from a
+        // hung app, and this loop owns the main thread.
+        if Idle >= FinishTimeoutSlices then
+        begin
+          AError := 'the render made no progress for two minutes; '
+            + 'the encoder stopped taking frames';
+          Exit;
+        end;
+      end;
     until VideoDone and AudioDone;
   finally
     Pool.release;
@@ -1488,6 +1587,27 @@ begin
   FReport := Default(TRenderReport);
   FReport.InputPath := FInputPath;
   FReport.OutputPath := FOutputPath;
+  // Every per-run field, not just the report. A TRenderSession is built,
+  // run once and freed everywhere today, which is exactly why this was
+  // missing — but the class does not say so anywhere, TExportSession
+  // resets its own (see "A fresh run measures afresh" in
+  // Knips.Export.Pipeline), and a second Run over these would carry the
+  // first take's click track, zoom walk and held frame into it. The
+  // pointers are cleared rather than freed: they belong to the previous
+  // run's own teardown, and a nil here would hide a leak rather than
+  // cause one — Cleanup is what frees them, and it runs before this can.
+  FBase := Default(TLiveRect);
+  FFramingPanned := False;
+  FWalker := Default(TZoomWalker);
+  SetLength(FClicks, 0);
+  FEstimatedFrames := 0;
+  FCadenceSeconds := 0;
+  FHeldSeconds := 0;
+  FHeldTimeScale := 0;
+  FLastValue := 0;
+  FLastShape := Default(TRenderedFrameShape);
+  FHasLastShape := False;
+  FSidecarLoadError := '';
   if SameText(ExpandFileName(FInputPath), ExpandFileName(FOutputPath)) then
   begin
     AError := 'the take and the deliverable are the same file';
@@ -1505,6 +1625,9 @@ begin
   FReport.PixelWidth := FReader.PixelWidth;
   FReport.PixelHeight := FReader.PixelHeight;
   FReport.SourceDurationSeconds := FReader.DurationSeconds;
+  // What the file holds. Enough for the paths that only copy it, and
+  // raised below to allow for synthesis once the take's own rate is
+  // known.
   FEstimatedFrames := Max(Int64(1),
     Round(FReader.DurationSeconds * Max(1.0, FReader.NominalFrameRate)));
 
@@ -1522,7 +1645,12 @@ begin
   if not (Available.CanDrawCursor or Available.CanZoomOnClick) then
   begin
     AError := 'nothing in this take can be applied after the fact';
-    if Available.Reason <> '' then
+    // The loader's reason wins where there is one: a sidecar refused for
+    // its VERSION is a different problem from one that is not there, and
+    // the refusal is the only place either is ever said out loud.
+    if FSidecarLoadError <> '' then
+      AError := AError + ' (' + FSidecarLoadError + ')'
+    else if Available.Reason <> '' then
       AError := AError + ' (' + Available.Reason + ')';
     AError := AError + '; it is already the deliverable';
     Exit;
@@ -1544,6 +1672,12 @@ begin
     if FReport.SourceDurationSeconds > 0 then
       FReport.RealtimeFactor := FReport.ElapsedSeconds
         / FReport.SourceDurationSeconds;
+    // The copy path has its own exit, so it composes its own summary.
+    // Nothing was framed here, so there is no framing note to lead with
+    // — but there are usually two reasons why nothing applied, and this
+    // is the path they matter most on.
+    FReport.Note := EffectNoteSummary('', FReport.CursorNote,
+      FReport.ZoomNote);
     WriteDeliverableSidecar;
     Exit(True);
   end;
@@ -1558,7 +1692,35 @@ begin
   else
     FReport.SynthesisFramesPerSecond := Max(1,
       Round(FReader.NominalFrameRate));
+  // Clamped where it is STORED, not only where it is used. CadenceInterval
+  // clamps its argument into 1..120 anyway, so the render already fills at
+  // a sane rate whatever the header says — but the report is what the CLI
+  // prints and what the app shows, and a sidecar claiming 100000 fps would
+  // otherwise have knips announce "filled in at 100000 fps" about a file
+  // filled in at 120.
+  FReport.SynthesisFramesPerSecond := Max(1,
+    Min(MaxCadenceFramesPerSecond, FReport.SynthesisFramesPerSecond));
   FCadenceSeconds := CadenceInterval(FReport.SynthesisFramesPerSecond);
+  // The progress denominator has to allow for the frames this pass is
+  // about to MAKE. The take's own configured rate is what it fills at,
+  // and the movie's nominalFrameRate on a sparse take is the average it
+  // came out at — 2.2 on the 8.4 s still-screen take measured here, whose
+  // render wrote 246 frames. Against the old bound of 19 the app's status
+  // item read "Rendering… 100%" for 93% of the work.
+  //
+  // Raised only when something can actually animate, and that is a fact
+  // rather than a guess: a gap is filled only where the next instant
+  // would be a different picture, and with no zoom applied the only
+  // thing that can make one different is the pointer moving. A track
+  // that never moves fills nothing, so the file's own frame count is
+  // still the bound and raising it would leave the bar stuck near the
+  // bottom for the whole render. See
+  // Knips.Export.CursorEffect.TrackIsStationary and the same rule in
+  // Knips.Export.Pipeline.SynthesisPossible.
+  if FReport.ZoomApplied or (FCursor = nil)
+    or not FCursor.TrackIsStationary then
+    FEstimatedFrames := Max(FEstimatedFrames, Max(Int64(1),
+      Round(FReader.DurationSeconds * FReport.SynthesisFramesPerSecond)));
 
   if not FReader.StartPass(0, 0, AError) then
     Exit;
@@ -1600,16 +1762,37 @@ begin
   SweepTemporaries;
 
   if FCursor <> nil then
+  begin
     FReport.CursorFrames := FCursor.DrawnFrames;
+    FReport.CursorOffFrameFrames := FCursor.OffFrameFrames;
+  end;
+  // "The pointer was drawn on 0 frames" with no explanation is the one
+  // report that reads as a bug and is usually not one: the pointer was
+  // outside the rectangle this take shows, for the whole of it. Said
+  // here rather than counted silently, and only when the count really
+  // is nothing — a pointer that came and went needs no sentence.
+  if FReport.CursorDrawn and (FReport.CursorFrames = 0)
+    and (FReport.CursorOffFrameFrames > 0) then
+    FReport.CursorNote := Format('the pointer was outside the rectangle '
+      + 'this recording shows for all %d of its frames, so none of them '
+      + 'has one drawn into it',
+      [FReport.CursorOffFrameFrames]);
   if FReport.SynthesizedFrames = 0 then
     FReport.SynthesisFramesPerSecond := 0;
   // Said out loud rather than counted silently: a stretch of a take with
-  // no zoom in it looks exactly like a stretch nobody clicked in.
-  if (FReport.UnframedFrames > 0) and (FReport.Note = '') then
-    FReport.Note := Format('%d frame(s) run past the end of this take''s '
-      + 'pointer track, so what they were showing is not recorded; '
-      + 'nothing was cropped for them and the pointer was placed from '
-      + 'the last position the track holds', [FReport.UnframedFrames]);
+  // no zoom in it looks exactly like a stretch nobody clicked in. Its
+  // own field, never sharing one with the zoom's or the cursor's reason
+  // — this is the only note of the three about the PIXELS being other
+  // than the take could account for, and a cosmetic note about an effect
+  // must not be able to hide it.
+  if FReport.UnframedFrames > 0 then
+    FReport.FramingNote := Format('%d frame(s) run past the end of this '
+      + 'take''s pointer track, so what they were showing is not '
+      + 'recorded; nothing was cropped for them and the pointer was '
+      + 'placed from the last position the track holds',
+      [FReport.UnframedFrames]);
+  FReport.Note := EffectNoteSummary(FReport.FramingNote,
+    FReport.CursorNote, FReport.ZoomNote);
   MeasureOutput;
   FReport.ElapsedSeconds := (Now - StartedAt) * SecsPerDay;
   if FReport.SourceDurationSeconds > 0 then

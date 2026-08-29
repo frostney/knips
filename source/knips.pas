@@ -28,13 +28,25 @@ program knips;
 
 {$I Knips.inc}
 
+// Three units in the Darwin block below are not obvious, and the note has
+// to live *above* the clause rather than beside them: lwpt 0.7.0's
+// formatter desynchronises on a `//` inside a uses-clause and rewrites the
+// whole file into garbage on the next `lwpt format` — and lefthook runs the
+// rewriting formatter on every commit. See docs/code-style.md.
+//
+//   cmem                 libc heap: thread-safe without cthreads, and the
+//                        first unit of the program by prototype invariant
+//   Knips.ThreadManager  pthread-backed RTL locks and events for the
+//                        no-cthreads build; creates no threads
+//   objc                 the `id` type for the probe; the program itself
+//                        is not in Objective-C mode
 uses
   {$IFDEF DARWIN}
-  cmem,        // libc heap: thread-safe without cthreads (prototype invariant)
-  Knips.ThreadManager, // pthread-backed RTL locks/events; no thread creation
+  cmem,
+  Knips.ThreadManager,
   BaseUnix,
   ctypes,
-  objc,        // the id type for the probe; the program is not in ObjC mode
+  objc,
   {$ENDIF}
   Classes,
   SysUtils,
@@ -170,7 +182,9 @@ end;
 function BuildExportOptions(const AOptions: TOptionArray;
   out AExport: TExportOptions; out AError: string): Boolean;
 var
-  Trim: string;
+  TrimText, CursorText, EffectsText: string;
+  FromCursorFlag: TExportCursorMode;
+  CursorNamed: Boolean;
 begin
   Result := False;
   AExport := DefaultExportOptions;
@@ -184,20 +198,37 @@ begin
   // MP4 render all take. --cursor names one member of it; --effects names
   // the set, and is what the playback window's control and `knips render`
   // both speak.
-  if not ParseExportCursorMode(StringValue(AOptions, 'cursor', ''),
-    AExport.Effects.Cursor) then
+  CursorText := StringValue(AOptions, 'cursor', '');
+  if not ParseExportCursorMode(CursorText, AExport.Effects.Cursor) then
   begin
     AError := '--cursor must be as-recorded, none, smooth, or big';
     Exit;
   end;
-  if not ParseExportEffects(StringValue(AOptions, 'effects', ''),
-    AExport.Effects, AError) then
+  FromCursorFlag := AExport.Effects.Cursor;
+  EffectsText := StringValue(AOptions, 'effects', '');
+  if not ParseExportEffectsNaming(EffectsText, AExport.Effects,
+    CursorNamed, AError) then
     Exit;
-
-  Trim := StringValue(AOptions, 'trim', '');
-  if Trim <> '' then
+  // Two spellings of one setting, and the list ran second — so
+  // `--cursor=big --effects=smooth-cursor` used to apply the list and
+  // throw the flag away without a word. Naming two cursor words INSIDE
+  // one --effects list is already refused rather than resolved
+  // last-one-wins (ParseExportEffects); this is the same rule across the
+  // two ways of saying it. Agreeing is fine: `--cursor=none
+  // --effects=no-cursor` says one thing twice.
+  if (Trim(CursorText) <> '') and CursorNamed
+    and (AExport.Effects.Cursor <> FromCursorFlag) then
   begin
-    if not ParseTrimRange(Trim, AExport.TrimStartSeconds,
+    AError := '--cursor and --effects both name the pointer and disagree '
+      + '(--cursor=' + Trim(CursorText) + ' against --effects='
+      + Trim(EffectsText) + '); pass one of them';
+    Exit;
+  end;
+
+  TrimText := StringValue(AOptions, 'trim', '');
+  if TrimText <> '' then
+  begin
+    if not ParseTrimRange(TrimText, AExport.TrimStartSeconds,
       AExport.TrimEndSeconds, AExport.HasTrimEnd) then
     begin
       AError := '--trim expects start,end in seconds; either side may be '
@@ -242,9 +273,20 @@ procedure RecoverTakesBeside(const AOutputPath: string);
 var
   Takes: TRecoveredTakes;
   Summary: string;
+  Recovered, Swept: Integer;
 begin
-  if RecoverOrphanedTakes(ExtractFileDir(ExpandFileName(AOutputPath)),
-    Takes) = 0 then
+  Recovered := RecoverOrphanedTakes(
+    ExtractFileDir(ExpandFileName(AOutputPath)), Takes, Swept);
+  // Said even when no take needed recovering: a scratch file still on
+  // disk is a render that died, and this is the only place that ever
+  // notices.
+  if Swept > 0 then
+  begin
+    WriteLn(ErrOutput, ProgramName, ' record: ', Swept,
+      ' leftover render scratch file(s) removed');
+    Flush(ErrOutput);
+  end;
+  if Recovered = 0 then
     Exit;
   Summary := DescribeRecoveredTakes(Takes);
   if Summary = '' then
@@ -268,7 +310,8 @@ var
 begin
   if not BuildRecordingOptions(AOptions, Recording, Error) then
   begin
-    WriteLn(ProgramName, ' record: ', Error);
+    WriteLn(ErrOutput, ProgramName, ' record: ', Error);
+    Flush(ErrOutput);
     Exit(ExitUsage);
   end;
   // Before anything else: a take whose process died is finished off now,
@@ -280,7 +323,8 @@ begin
   try
     if not Session.Run(Error) then
     begin
-      WriteLn(ProgramName, ' record: ', Error);
+      WriteLn(ErrOutput, ProgramName, ' record: ', Error);
+      Flush(ErrOutput);
       Exit(ExitFailure);
     end;
     // One segment per audio track, so --audio=both shows which source is
@@ -346,6 +390,22 @@ begin
       Session.Report.MicrophoneInspected, Session.Report.MicrophonePeak);
     if Silence <> '' then
       WriteLn(ErrOutput, ProgramName, ' record: ', Silence);
+    // The other thing a take can come back with that nothing failed
+    // over: an enlarged pointer standing still because the frames it was
+    // drawn into were repeats. Same treatment as the silence — advice on
+    // stderr, exit code untouched.
+    Silence := BigCursorIdleWarning(Session.Report.BigCursor,
+      Session.Report.CursorFrames, Session.Report.HeartbeatFrames,
+      Session.Report.AppendedFrames);
+    if Silence <> '' then
+      WriteLn(ErrOutput, ProgramName, ' record: ', Silence);
+    // And the stop the framework never confirmed. Same treatment again:
+    // the file is written, and this is the explanation for a take that
+    // comes back a frame or two short.
+    if Session.Report.StopUnconfirmed then
+      WriteLn(ErrOutput, ProgramName, ' record: ScreenCaptureKit did not '
+        + 'confirm the stop; the movie was finalised anyway and may be a '
+        + 'frame or two short');
     Flush(ErrOutput);
     // The event sidecar, and the two spans that say whether its clock is
     // the movie's. Both are measured from the same host clock: the first
@@ -387,7 +447,8 @@ var
 begin
   if not RunMenuBarApp(Error) then
   begin
-    WriteLn(ProgramName, ' app: ', Error);
+    WriteLn(ErrOutput, ProgramName, ' app: ', Error);
+    Flush(ErrOutput);
     Exit(ExitFailure);
   end;
   Result := ExitOk;
@@ -441,7 +502,8 @@ begin
   try
     if not Session.Run(Error) then
     begin
-      WriteLn(ProgramName, ' export: ', Error);
+      WriteLn(ErrOutput, ProgramName, ' export: ', Error);
+      Flush(ErrOutput);
       Exit(ExitFailure);
     end;
     WriteLn(Format('wrote %s: %.2fs–%.2fs of %.2fs, %d kB (streams copied)',
@@ -463,7 +525,8 @@ var
 begin
   if not BuildExportOptions(AOptions, Options, Error) then
   begin
-    WriteLn(ProgramName, ' export: ', Error);
+    WriteLn(ErrOutput, ProgramName, ' export: ', Error);
+    Flush(ErrOutput);
     Exit(ExitUsage);
   end;
   if Options.Format = efMovie then
@@ -472,7 +535,8 @@ begin
   try
     if not Session.Run(Error) then
     begin
-      WriteLn(ProgramName, ' export: ', Error);
+      WriteLn(ErrOutput, ProgramName, ' export: ', Error);
+      Flush(ErrOutput);
       Exit(ExitFailure);
     end;
     if Session.Report.Format = efGif then
@@ -488,8 +552,10 @@ begin
     // assumed: a pointer that was asked for and drawn into nothing looks
     // exactly like one that was never asked for.
     if Session.Report.SmoothCursor then
-      Palette := Palette + Format(', export cursor on %d frames',
-        [Session.Report.SmoothCursorFrames]);
+      Palette := Palette + Format(
+        ', export cursor on %d frames (%d off frame)',
+        [Session.Report.SmoothCursorFrames,
+        Session.Report.SmoothCursorOffFrame]);
     if Session.Report.ZoomOnClick then
       Palette := Palette + Format(', zoom on %d frames from %d clicks',
         [Session.Report.ZoomedFrames, Session.Report.ZoomClicks]);
@@ -515,6 +581,17 @@ begin
       Flush(Output);
       WriteLn(ErrOutput, ProgramName, ' export: no zoom applied (',
         Session.Report.ZoomNote, ')');
+      Flush(ErrOutput);
+    end;
+    // And the one about the pixels rather than about an effect. Its own
+    // line, always, whatever the two above said: it is the only note
+    // here that means some frames show something the take could not
+    // account for.
+    if Session.Report.FramingNote <> '' then
+    begin
+      Flush(Output);
+      WriteLn(ErrOutput, ProgramName, ' export: ',
+        Session.Report.FramingNote);
       Flush(ErrOutput);
     end;
     // How close the pre-export estimate came. Printed because an estimate
@@ -559,8 +636,9 @@ begin
   OutputPath := StringValue(AOptions, 'out', '');
   if InputPath = '' then
   begin
-    WriteLn(ProgramName, ' render: an input take is required '
+    WriteLn(ErrOutput, ProgramName, ' render: an input take is required '
       + '(--in=demo-raw.mp4)');
+    Flush(ErrOutput);
     Exit(ExitUsage);
   end;
   if OutputPath = '' then
@@ -569,8 +647,9 @@ begin
     // the same name without the suffix. Anything else has to be named.
     if not IsRawTakePath(InputPath) then
     begin
-      WriteLn(ProgramName, ' render: an output path is required '
+      WriteLn(ErrOutput, ProgramName, ' render: an output path is required '
         + '(--out=demo.mp4)');
+      Flush(ErrOutput);
       Exit(ExitUsage);
     end;
     OutputPath := DeliverablePathFor(InputPath);
@@ -579,14 +658,16 @@ begin
   if not ParseExportEffects(StringValue(AOptions, 'effects', ''), Effects,
     Error) then
   begin
-    WriteLn(ProgramName, ' render: ', Error);
+    WriteLn(ErrOutput, ProgramName, ' render: ', Error);
+    Flush(ErrOutput);
     Exit(ExitUsage);
   end;
   Session := TRenderSession.Create(InputPath, OutputPath, Effects);
   try
     if not Session.Run(Error) then
     begin
-      WriteLn(ProgramName, ' render: ', Error);
+      WriteLn(ErrOutput, ProgramName, ' render: ', Error);
+      Flush(ErrOutput);
       Exit(ExitFailure);
     end;
     Applied := '';
@@ -595,8 +676,9 @@ begin
         [Session.Report.ZoomedFrames, Session.Report.FramesWritten,
         Session.Report.UsableClicks]);
     if Session.Report.CursorDrawn then
-      Applied := Applied + Format(', pointer on %d frames',
-        [Session.Report.CursorFrames]);
+      Applied := Applied + Format(', pointer on %d frames (%d off frame)',
+        [Session.Report.CursorFrames,
+        Session.Report.CursorOffFrameFrames]);
     // Frames the capture never made. Said out loud rather than folded
     // into the total, because it is the difference between a deliverable
     // that animates and one that jumps, and because it is what the file
@@ -605,9 +687,22 @@ begin
       Applied := Applied + Format(', %d frames filled in at %d fps where '
         + 'the capture had none', [Session.Report.SynthesizedFrames,
         Session.Report.SynthesisFramesPerSecond]);
+    // AudioPassthrough is stated rather than assumed, because it is the
+    // one claim about this file a listener cannot check: a track that
+    // had been through AAC twice sounds like a track that had not, until
+    // it does not. This unit has no re-encoding path and would rather
+    // fail than take one, so the word is always "copied" — and if that
+    // ever stops being true, the summary says so on the take where it
+    // happened rather than in a comment.
     if Session.Report.AudioTracks > 0 then
-      Applied := Applied + Format(', %d audio track(s) copied (%d samples)',
-        [Session.Report.AudioTracks, Session.Report.AudioSamples]);
+      if Session.Report.AudioPassthrough then
+        Applied := Applied + Format(
+          ', %d audio track(s) copied (%d samples, not re-encoded)',
+          [Session.Report.AudioTracks, Session.Report.AudioSamples])
+      else
+        Applied := Applied + Format(
+          ', %d audio track(s) RE-ENCODED (%d samples)',
+          [Session.Report.AudioTracks, Session.Report.AudioSamples]);
     if Session.Report.Copied then
       WriteLn(Format('wrote %s: nothing to render, so the take was copied '
         + 'unchanged (%d kB)', [Session.Report.OutputPath,
@@ -618,18 +713,34 @@ begin
         Session.Report.PixelHeight, Session.Report.FramesWritten,
         Session.Report.SourceDurationSeconds,
         Session.Report.OutputBytes div 1024, Applied]));
+    // The deliverable's own sidecar, named the way `record` names the
+    // one it writes. A rendered take is two movies and two sidecars
+    // (docs/event-sidecar.md), and this is the line that says the second
+    // pair is there — without it the deliverable's copy was written and
+    // never mentioned.
+    if Session.Report.SidecarPath <> '' then
+      WriteLn('wrote ', Session.Report.SidecarPath,
+        ': the take''s events, re-headed for the deliverable');
     // The number that decides whether this can run on every stop.
     WriteLn(Format('  %.2fs of work for %.2fs of take (%.2fx realtime)',
       [Session.Report.ElapsedSeconds, Session.Report.SourceDurationSeconds,
       Session.Report.RealtimeFactor]));
-    // An effect that was asked for and could not be applied. Never a
-    // failure — the deliverable is correct without it — and never silent.
-    if Session.Report.Note <> '' then
-    begin
-      Flush(Output);
-      WriteLn(ErrOutput, ProgramName, ' render: ', Session.Report.Note);
-      Flush(ErrOutput);
-    end;
+    // An effect that was asked for and could not be applied, and the
+    // frames the take could not account for. Never a failure — the
+    // deliverable is correct without them — and never silent. All three
+    // printed, not the summary: a console has the room, and the summary
+    // exists for the places that do not (see EffectNoteSummary).
+    Flush(Output);
+    if Session.Report.FramingNote <> '' then
+      WriteLn(ErrOutput, ProgramName, ' render: ',
+        Session.Report.FramingNote);
+    if Session.Report.CursorNote <> '' then
+      WriteLn(ErrOutput, ProgramName, ' render: no cursor drawn (',
+        Session.Report.CursorNote, ')');
+    if Session.Report.ZoomNote <> '' then
+      WriteLn(ErrOutput, ProgramName, ' render: no zoom applied (',
+        Session.Report.ZoomNote, ')');
+    Flush(ErrOutput);
     Result := ExitOk;
   finally
     Session.Free;
@@ -649,7 +760,8 @@ begin
   except
     on E: EShareableContent do
     begin
-      WriteLn(ProgramName, ' displays: ', E.Message);
+      WriteLn(ErrOutput, ProgramName, ' displays: ', E.Message);
+      Flush(ErrOutput);
       Exit(ExitFailure);
     end;
   end;
@@ -684,7 +796,8 @@ begin
   except
     on E: EShareableContent do
     begin
-      WriteLn(ProgramName, ' windows: ', E.Message);
+      WriteLn(ErrOutput, ProgramName, ' windows: ', E.Message);
+      Flush(ErrOutput);
       Exit(ExitFailure);
     end;
   end;
@@ -1146,10 +1259,15 @@ begin
   if (Length(AOptions) > 0)
     and not BuildRecordingOptions(AOptions, Recording, Error) then
   begin
-    WriteLn(ProgramName, ' record: ', Error);
+    WriteLn(ErrOutput, ProgramName, ' record: ', Error);
+    Flush(ErrOutput);
     Exit(ExitUsage);
   end;
-  WriteLn(ProgramName, ': screen capture is macOS-only in this build');
+  // Stderr like every other refusal on this surface: the exit code
+  // is non-zero and stdout is where a caller expects the thing it
+  // asked for, not the reason it is not getting one.
+  WriteLn(ErrOutput, ProgramName, ': screen capture is macOS-only in this build');
+  Flush(ErrOutput);
   Result := ExitUnsupported;
 end;
 
@@ -1164,10 +1282,15 @@ begin
   if (Length(AOptions) > 0)
     and not BuildExportOptions(AOptions, Options, Error) then
   begin
-    WriteLn(ProgramName, ' export: ', Error);
+    WriteLn(ErrOutput, ProgramName, ' export: ', Error);
+    Flush(ErrOutput);
     Exit(ExitUsage);
   end;
-  WriteLn(ProgramName, ': reading movies is macOS-only in this build');
+  // Stderr like every other refusal on this surface: the exit code
+  // is non-zero and stdout is where a caller expects the thing it
+  // asked for, not the reason it is not getting one.
+  WriteLn(ErrOutput, ProgramName, ': reading movies is macOS-only in this build');
+  Flush(ErrOutput);
   Result := ExitUnsupported;
 end;
 
@@ -1269,20 +1392,42 @@ begin
 end;
 
 // The cli package's top-level help carries lwpt's own tagline, so the
-// program prints its own when no command (or help) is given.
-procedure PrintTopLevelHelp(const ARegistry: TSubcommandRegistry);
+// program prints its own when no command (or help) is given — and, since
+// the registry's own fallback carries that tagline too, when a command
+// nobody recognises is given. AOutput is stdout for a help somebody asked
+// for and stderr for one they earned by mistyping.
+procedure PrintTopLevelHelp(const ARegistry: TSubcommandRegistry;
+  var AOutput: Text);
 var
   I: Integer;
 begin
-  WriteLn(ProgramName, ' — native macOS screen recorder');
-  WriteLn;
-  WriteLn('usage: ', ProgramName, ' <command> [options]');
-  WriteLn;
-  WriteLn('commands:');
+  WriteLn(AOutput, ProgramName, ' — native macOS screen recorder');
+  WriteLn(AOutput);
+  WriteLn(AOutput, 'usage: ', ProgramName, ' <command> [options]');
+  WriteLn(AOutput);
+  WriteLn(AOutput, 'commands:');
   for I := 0 to ARegistry.Count - 1 do
-    WriteLn('  ', ARegistry.Item(I).Name:10, '  ', ARegistry.Item(I).Summary);
-  WriteLn;
-  WriteLn('run "', ProgramName, ' <command> --help" for command options');
+    WriteLn(AOutput, '  ', ARegistry.Item(I).Name:10, '  ',
+      ARegistry.Item(I).Summary);
+  WriteLn(AOutput);
+  WriteLn(AOutput, 'run "', ProgramName,
+    ' <command> --help" for command options');
+end;
+
+// Whether the first argument names something this program can run. The
+// registry answers an unknown command with the cli package's OWN help,
+// which introduces knips as "lightweight Pascal toolkit" and prints it to
+// standard output with a usage exit code — so the check is made here
+// instead, and the mistyped command gets knips's own help on stderr.
+function RegistryKnows(const ARegistry: TSubcommandRegistry;
+  const AName: string): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to ARegistry.Count - 1 do
+    if SameText(ARegistry.Item(I).Name, AName) then
+      Exit(True);
+  Result := False;
 end;
 
 function WantsTopLevelHelp: Boolean;
@@ -1394,8 +1539,17 @@ begin
       {$ENDIF}
     else if WantsTopLevelHelp then
     begin
-      PrintTopLevelHelp(Registry);
+      PrintTopLevelHelp(Registry, Output);
       ExitCode := ExitOk;
+    end
+    else if not RegistryKnows(Registry, ParamStr(1)) then
+    begin
+      WriteLn(ErrOutput, ProgramName, ': unknown command "', ParamStr(1),
+        '"');
+      WriteLn(ErrOutput);
+      PrintTopLevelHelp(Registry, ErrOutput);
+      Flush(ErrOutput);
+      ExitCode := ExitUsage;
     end
     else
       ExitCode := Registry.Run(ProgramName);

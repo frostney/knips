@@ -26,11 +26,11 @@ unit Knips.ThreadManager;
 
 interface
 
-{$IFDEF DARWIN}
-
-procedure InstallKnipsThreadManager;
-
-{$ENDIF}
+// **This unit has no public surface, and that is the point.** It installs
+// itself from its own initialization section, which is why `knips.pas`
+// lists it second in the uses clause — right after cmem — and why
+// nothing ever calls into it. See the note above that clause, and
+// docs/architecture.md.
 
 implementation
 
@@ -346,6 +346,9 @@ begin
   Result := TThreadID(Pthread_self);
 end;
 
+// Not exported: the initialization below is the only caller, and a
+// second install from anywhere else would replace a manager the RTL is
+// already using.
 procedure InstallKnipsThreadManager;
 var
   Manager: TThreadManager;

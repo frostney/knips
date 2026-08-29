@@ -27,12 +27,23 @@ lwpt install && lwpt build    # produces build/knips
 ./build/knips record --out=demo.mp4                   # main display, 30 fps, Ctrl-C to stop
 ./build/knips record --out=demo.mp4 --rect=100,80,1280,720 --fps=60
 ./build/knips record --out=app.mov --window=<id>      # id from `knips windows`
+./build/knips record --out=demo.mp4 --smooth-cursor   # no pointer in the movie
+./build/knips render --in=demo-raw.mp4                # raw take -> deliverable
+./build/knips render --in=demo-raw.mp4 --effects=zoom,big-cursor
 ./build/knips export --in=demo.mp4 --out=demo.gif     # animated GIF, 20 fps
+./build/knips export --in=demo.mp4 --out=demo.gif --cursor=smooth
 ./build/knips export --in=demo.mp4 --out=demo.gif --width=800 --trim=1.5,4
 ./build/knips export --in=demo.mp4 --out=demo.apng    # truecolour APNG, no palette
 ./build/knips export --in=demo.mp4 --out=cut.mp4 --trim=1.5,3.5   # passthrough trim
 ./build/knips mcp                                     # MCP server on stdin/stdout
 ```
+
+A take is recorded **raw** and the deliverable is rendered from it, so the
+effects are a decision you can change afterwards: `knips render` draws the
+pointer back and applies Zoom on Click from the take's event sidecar, and
+`--effects` picks which — `zoom`, `as-recorded`, `smooth-cursor`,
+`big-cursor`, `no-cursor`, `none`. `knips export` takes the same list, plus
+`--cursor=as-recorded|none|smooth|big` for a GIF or an APNG.
 
 `knips mcp` serves the same capabilities to an AI client over the Model
 Context Protocol — `list_displays`, `list_windows`, `record_start` /

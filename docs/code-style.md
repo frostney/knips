@@ -5,8 +5,10 @@
 - Delphi mode via `source/Knips.inc`; style enforced by `lwpt format`.
 - Namespaced units (`Knips.<Layer>.<Name>.pas`), flat under `source/`;
   tests co-located as `*.Test.pas`.
-- Darwin units add `{$modeswitch objectivec2}` / `cblocks` / `cvar`
-  under `{$IFDEF DARWIN}` and compile to empty shells elsewhere.
+- A unit that declares framework bindings adds `{$modeswitch objectivec2}`
+  / `cblocks` / `cvar` under `{$IFDEF DARWIN}` and compiles to an empty
+  shell elsewhere; a unit that does not declare any has no modeswitch at
+  all, whatever its name suggests.
 - `source/capture/**` is vendored, unrestyled, and exempt from the
   formatter; additions go in marked blocks.
 - Capture-queue code follows the no-exception / no-WriteLn / no-managed
@@ -31,13 +33,40 @@ fixed", for the incident). Comment above the clause instead.
 ## Compiler mode and modeswitches
 
 - Default: `{$mode delphi}{$H+}` from `source/Knips.inc`.
-- Darwin units (`Knips.Capture.*`, `Knips.Export.*`,
-  `Knips.Recording`, `Knips.ObjC.Runtime`) enable `objectivec2` (to
-  call `objcclass external` bindings), `cblocks` (to pass a global
-  `cdecl` procedure where a framework wants a completion block), and
-  `cvar` (for `NSString` constants declared `cvar; external`). These sit
-  inside `{$IFDEF DARWIN}` so the same unit compiles as an empty shell on
-  Linux and `lwpt test` stays cross-platform.
+- A unit enables a modeswitch **because it declares framework bindings**,
+  not because of the layer its name puts it in. `objectivec2` is for
+  calling `objcclass external` bindings, `cblocks` for passing a global
+  `cdecl` procedure where a framework wants a completion block, and `cvar`
+  for `NSString` constants declared `cvar; external`. All three sit inside
+  `{$IFDEF DARWIN}` so the same unit compiles as an empty shell on Linux
+  and `lwpt test` stays cross-platform.
+
+  That splits the tree in a way worth stating, because the layer names do
+  not: **every `Knips.App.*` unit below the state machine** talks to AppKit
+  and takes `objectivec2`; so do both `Knips.Capture.*` units under
+  `source/`, `Knips.Recording` and `Knips.Recording.CursorOverlay`,
+  `Knips.Recording.Recovery`, and the `Knips.Export.*` units that touch
+  AVFoundation — `MovieWriter`, `MovieReader`, `MovieTrim`, `Pipeline`,
+  `Render`, `CursorEffect`. Everything else in `Knips.Export.*` is
+  platform-neutral and has **no modeswitch at all**: `Bitmap`, `Gif`,
+  `Apng`, `Timing`, `Cadence`, `ZoomTrack`, `SizeEstimate`. So are
+  `Knips.Options`, `Knips.App.State`, `Knips.Mcp.Params`, the
+  `Knips.Recording.*Math` pair, `Knips.Recording.Heartbeat` and
+  `Knips.Recording.Sidecar` — which is what lets `lwpt test` run their
+  suites on Linux. `Knips.Mcp` has none either: it reaches the Darwin
+  session classes but declares no bindings of its own, and refuses capture
+  in-band off Darwin rather than disappearing.
+- **`Knips.ObjC.Runtime` is not in that first list, and that is the point.**
+  It builds Objective-C classes through the runtime C API in the RTL's
+  `objc` unit, so it needs no ObjC language mode of its own
+  ([ADR-0002](adr/0002-runtime-built-objc-classes.md)); a modeswitch there
+  would be the first step back towards the `objcclass` metadata that costs
+  the build `-ld_classic`.
+- The vendored units keep whatever they arrived with:
+  `Knips.Capture.ScreenCaptureKit` has `objectivec2` and `cblocks`,
+  `Knips.Capture.CoreMedia` has `objectivec1`, and the pthread mutex has
+  none. They are not restyled to match the rest, on purpose
+  ([ADR-0003](adr/0003-vendor-capture-units.md)).
 - The program is *not* in ObjC mode; it takes `id` from the RTL's `objc`
   unit for the probe.
 

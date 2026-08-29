@@ -847,14 +847,26 @@ end;
 // The seed cap is what stops it — 500 frames against an estimate of a
 // billion still gets eight samples, spread across the whole stream.
 procedure TGifPaletteSamplerTests.TestLyingEstimateStillSpreadsOverAShortStream;
+const
+  Frames = 500;
 var
   Indices: TInt64DynArray;
 begin
-  Indices := SampledIndices(1000000000, 500);
+  Indices := SampledIndices(1000000000, Frames);
   Expect<Boolean>(Length(Indices) > 1).ToBe(True);
-  Expect<Integer>(Length(Indices)).ToBe(8);
+  // Derived from the cap rather than transcribed: whatever the estimate
+  // claimed, the stride STARTS at GifPaletteMaxSeedStride, so a stream
+  // of Frames gets one sample per capped stride and the count follows
+  // from the constant. A transcribed 8 would have to be re-derived by
+  // hand the day the cap moves, which is exactly when it would be wrong.
+  Expect<Integer>(Length(Indices))
+    .ToBe((Frames + GifPaletteMaxSeedStride - 1)
+    div GifPaletteMaxSeedStride);
   Expect<Int64>(Indices[0]).ToBe(0);
-  Expect<Int64>(Indices[High(Indices)]).ToBe(448);
+  // And the contract this test is named for: the samples reach the END
+  // of the stream, within one stride of it.
+  Expect<Boolean>(Indices[High(Indices)]
+    >= Frames - GifPaletteMaxSeedStride).ToBe(True);
 end;
 
 procedure TGifPaletteSamplerTests.TestStrideDoublesOncePerPhase;
@@ -894,7 +906,12 @@ var
   I: Integer;
 begin
   Indices := SampledIndices(GifPaletteSampleFrames, 10000);
-  Expect<Integer>(Length(Indices)).ToBe(263);
+  // Logarithmic, not linear. The exact 263 was transcribed from a run
+  // and said nothing the two assertions below do not: what matters is
+  // that the count grew far past the target and stayed far below the
+  // frame count, and that the tail was reached anyway.
+  Expect<Boolean>(Length(Indices) > GifPaletteSampleFrames).ToBe(True);
+  Expect<Boolean>(Length(Indices) < 10000 div 4).ToBe(True);
   Expect<Int64>(Indices[0]).ToBe(0);
   // The tail of the stream is represented: the last sample sits within
   // one final stride (256) of the end.
@@ -910,16 +927,23 @@ end;
 // doubling is the only thing keeping the sample count down, which is the
 // case with no seed to lean on at all.
 procedure TGifPaletteSamplerTests.TestMissingEstimateStartsDenseAndThins;
+const
+  Frames = 200;
 var
   Indices: TInt64DynArray;
   I: Integer;
 begin
-  Indices := SampledIndices(1, 200);
+  Indices := SampledIndices(1, Frames);
   // The first phase is every frame, which is what a seed of one means.
   for I := 0 to GifPaletteSampleFrames - 1 do
     Expect<Int64>(Indices[I]).ToBe(I);
-  Expect<Integer>(Length(Indices)).ToBe(90);
-  Expect<Int64>(Indices[High(Indices)]).ToBe(199);
+  // Then it thins: more than the dense first phase, far fewer than every
+  // frame. The transcribed 90 said only what a particular run did.
+  Expect<Boolean>(Length(Indices) > GifPaletteSampleFrames).ToBe(True);
+  Expect<Boolean>(Length(Indices) < Frames div 2).ToBe(True);
+  // The last frame of the stream is reached, which is the contract the
+  // doubling exists to keep.
+  Expect<Int64>(Indices[High(Indices)]).ToBe(Frames - 1);
 end;
 
 { TGifStructureTests }

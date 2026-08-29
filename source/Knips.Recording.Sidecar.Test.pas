@@ -65,6 +65,29 @@ type
     procedure TestBlankLinesAreIgnored;
     procedure TestAMissingFileIsAnError;
     procedure TestANewerFormatVersionIsRefused;
+    procedure TestAForeignFormatIsRefused;
+    procedure TestASecondLoadKeepsNothingOfTheFirst;
+  end;
+
+  // A sidecar is a file in a directory knips scans without being asked —
+  // the recovery pass runs over ~/Movies/knips at every `knips record`
+  // and at every launch of the menu-bar app. So it reads files nobody
+  // vetted, and the only acceptable answer to a bad one is a skipped
+  // line.
+  THostileFileTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestADeeplyNestedLineIsSkippedNotFatal;
+    procedure TestBracketsInsideAStringDoNotCountAsNesting;
+    procedure TestAnEnormousLineIsSkipped;
+    procedure TestANonFiniteHeaderIsSkipped;
+    procedure TestANonFiniteSampleIsDropped;
+    procedure TestANonFiniteAnchorIsDropped;
+    procedure TestANonFiniteButtonIsDropped;
+    procedure TestANonFiniteTrailerIsDropped;
+    procedure TestANonFiniteIntegerFieldIsDropped;
+    procedure TestAnOutOfRangeIntegerFieldIsDropped;
+    procedure TestUnbalancedBracketsAreNotNesting;
   end;
 
   TTimelineTests = class(TTestSuite)
@@ -566,6 +589,460 @@ begin
     TestAMissingFileIsAnError);
   Test('a file from a newer knips is refused rather than half-read',
     TestANewerFormatVersionIsRefused);
+  Test('a file whose format is not knips-events is refused outright',
+    TestAForeignFormatIsRefused);
+  Test('loading a second file keeps nothing of the first, header included',
+    TestASecondLoadKeepsNothingOfTheFirst);
+end;
+
+procedure TResilienceTests.TestAForeignFormatIsRefused;
+var
+  Log: TSidecarLog;
+  Error: string;
+begin
+  // The doc's blunter refusal: this is not one of these files at all, so
+  // nothing in it can be trusted to mean what this reader would take it
+  // to mean. It used to be skipped silently and the load came back True
+  // with a default header, which is the shape of a half-read file.
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(Log.LoadFromText(StringReplace(FixtureHeader,
+      '"format":"knips-events"', '"format":"someone-elses-events"', [])
+      + LineEnding + FixtureAnchor, Error)).ToBe(False);
+    Expect<Boolean>(Log.ForeignFormat).ToBe(True);
+    Expect<Boolean>(Pos('someone-elses-events', Error) > 0).ToBe(True);
+  finally
+    Log.Free;
+  end;
+end;
+
+procedure TResilienceTests.TestASecondLoadKeepsNothingOfTheFirst;
+var
+  Log: TSidecarLog;
+  Error: string;
+begin
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(Log.LoadFromText(FixtureHeader + LineEnding
+      + FixtureAnchor + LineEnding
+      + '{"k":"cursor","t":100.5,"x":1,"y":2,"b":0}', Error)).ToBe(True);
+    Expect<string>(Log.Header.MovieName).ToBe('demo.mp4');
+    Expect<Boolean>(Log.HasAnchor).ToBe(True);
+    // A file with no header at all: everything the first one said must
+    // be gone, or this take would claim the previous take's movie, its
+    // base rectangle and its baked-effect flags.
+    Expect<Boolean>(Log.LoadFromText(
+      '{"k":"cursor","t":5.0,"x":1,"y":2,"b":0}', Error)).ToBe(True);
+    Expect<string>(Log.Header.MovieName).ToBe('');
+    Expect<Double>(Log.Header.BaseX).ToBe(0);
+    Expect<Double>(Log.Header.BaseWidth).ToBe(0);
+    Expect<Boolean>(Log.Header.BakedFollowMouse).ToBe(False);
+    Expect<Boolean>(Log.HasAnchor).ToBe(False);
+    Expect<Integer>(Log.SampleCount).ToBe(1);
+  finally
+    Log.Free;
+  end;
+end;
+
+{ ------------------------------------------------------ a hostile file }
+
+procedure THostileFileTests.SetupTests;
+begin
+  Test('a line nested past the depth limit is skipped, not a crash',
+    TestADeeplyNestedLineIsSkippedNotFatal);
+  Test('brackets inside a JSON string are not nesting',
+    TestBracketsInsideAStringDoNotCountAsNesting);
+  Test('a line past the length limit is skipped',
+    TestAnEnormousLineIsSkipped);
+  Test('a header carrying an infinity is skipped whole',
+    TestANonFiniteHeaderIsSkipped);
+  Test('a sample carrying an infinity is dropped',
+    TestANonFiniteSampleIsDropped);
+  Test('an anchor carrying an infinity is dropped',
+    TestANonFiniteAnchorIsDropped);
+  Test('a button carrying an infinity is dropped',
+    TestANonFiniteButtonIsDropped);
+  Test('a trailer carrying an infinity is dropped',
+    TestANonFiniteTrailerIsDropped);
+  Test('every INTEGER field carrying an infinity is dropped, not fatal',
+    TestANonFiniteIntegerFieldIsDropped);
+  Test('an integer field too large for its type is dropped',
+    TestAnOutOfRangeIntegerFieldIsDropped);
+  Test('more closing brackets than opening ones is not negative nesting',
+    TestUnbalancedBracketsAreNotNesting);
+end;
+
+function DeepLine(ADepth: Integer): string;
+var
+  I: Integer;
+begin
+  Result := '{"k":"cursor","t":100.5,"x":1,"y":2,"b":0,"deep":';
+  for I := 1 to ADepth do
+    Result := Result + '[';
+  for I := 1 to ADepth do
+    Result := Result + ']';
+  Result := Result + '}';
+end;
+
+procedure THostileFileTests.TestADeeplyNestedLineIsSkippedNotFatal;
+var
+  Log: TSidecarLog;
+  Error: string;
+begin
+  // fpjson's parser recurses, so this line used to be a stack overflow
+  // — a signal, not an exception, which the per-line try cannot catch.
+  // Measured before the fix: `knips record` in a directory holding one
+  // of these exited 139, silently, every time.
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(Log.LoadFromText(FixtureHeader + LineEnding
+      + FixtureAnchor + LineEnding + DeepLine(50000) + LineEnding
+      + '{"k":"cursor","t":101.0,"x":7,"y":8,"b":0}', Error)).ToBe(True);
+    Expect<Integer>(Log.SkippedLines).ToBe(1);
+    // Everything either side of it is still there: this is a skipped
+    // line, exactly like an unknown kind.
+    Expect<Integer>(Log.SampleCount).ToBe(1);
+    Expect<Double>(Log.Sample(0).X).ToBe(7);
+  finally
+    Log.Free;
+  end;
+  // And a line just inside the limit still parses.
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(Log.LoadFromText(FixtureHeader + LineEnding
+      + FixtureAnchor + LineEnding + DeepLine(MaxSidecarLineDepth - 1),
+      Error)).ToBe(True);
+    Expect<Integer>(Log.SkippedLines).ToBe(0);
+    Expect<Integer>(Log.SampleCount).ToBe(1);
+  finally
+    Log.Free;
+  end;
+end;
+
+procedure THostileFileTests.TestBracketsInsideAStringDoNotCountAsNesting;
+var
+  Log: TSidecarLog;
+  Error: string;
+  Movie: string;
+  I: Integer;
+begin
+  // A movie called `[[[[….mp4` is a legal file name, and the depth scan
+  // must not read its brackets as structure.
+  Movie := '';
+  for I := 1 to 200 do
+    Movie := Movie + '[';
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(Log.LoadFromText(StringReplace(FixtureHeader,
+      '"movie":"demo.mp4"', '"movie":"' + Movie + '\".mp4"', []), Error))
+      .ToBe(True);
+    Expect<Integer>(Log.SkippedLines).ToBe(0);
+    Expect<string>(Log.Header.MovieName).ToBe(Movie + '".mp4');
+  finally
+    Log.Free;
+  end;
+end;
+
+procedure THostileFileTests.TestAnEnormousLineIsSkipped;
+var
+  Log: TSidecarLog;
+  Error: string;
+  Padding: string;
+begin
+  Padding := StringOfChar('x', MaxSidecarLineBytes + 1);
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(Log.LoadFromText(FixtureHeader + LineEnding
+      + FixtureAnchor + LineEnding
+      + '{"k":"cursor","t":100.5,"x":1,"y":2,"b":0,"pad":"' + Padding
+      + '"}', Error)).ToBe(True);
+    Expect<Integer>(Log.SkippedLines).ToBe(1);
+    Expect<Integer>(Log.SampleCount).ToBe(0);
+  finally
+    Log.Free;
+  end;
+end;
+
+procedure THostileFileTests.TestANonFiniteHeaderIsSkipped;
+var
+  Log: TSidecarLog;
+  Error: string;
+  I: Integer;
+  Fields: array[0..5] of string;
+begin
+  // `1e999` is legal JSON and parses to +Inf. Two infinities subtracted
+  // are a NaN, and a NaN walked through the staleness test and the edge
+  // snap came out as a render silently 217 frames short.
+  Fields[0] := '"baseWidth":640';
+  Fields[1] := '"baseHeight":400';
+  Fields[2] := '"baseX":10';
+  Fields[3] := '"baseY":20';
+  Fields[4] := '"displayWidth":1440';
+  Fields[5] := '"sampleHz":30';
+  for I := Low(Fields) to High(Fields) do
+  begin
+    Log := TSidecarLog.Create;
+    try
+      Expect<Boolean>(Log.LoadFromText(StringReplace(FixtureHeader,
+        Fields[I], Copy(Fields[I], 1, Pos(':', Fields[I])) + '1e999', [])
+        + LineEnding + FixtureAnchor, Error)).ToBe(True);
+      Expect<Integer>(Log.SkippedLines).ToBe(1);
+      // Nothing of the poisoned header was applied: not even the fields
+      // that were fine.
+      Expect<string>(Log.Header.MovieName).ToBe('');
+      Expect<Double>(Log.Header.BaseWidth).ToBe(0);
+    finally
+      Log.Free;
+    end;
+  end;
+end;
+
+procedure THostileFileTests.TestANonFiniteSampleIsDropped;
+var
+  Log: TSidecarLog;
+  Error: string;
+  I: Integer;
+  Lines: array[0..6] of string;
+begin
+  Lines[0] := '{"k":"cursor","t":1e999,"x":1,"y":2,"b":0}';
+  Lines[1] := '{"k":"cursor","t":100.5,"x":1e999,"y":2,"b":0}';
+  Lines[2] := '{"k":"cursor","t":100.5,"x":1,"y":-1e999,"b":0}';
+  Lines[3] := '{"k":"cursor","t":100.5,"x":1,"y":2,"b":0,"sx":1e999}';
+  Lines[4] := '{"k":"cursor","t":100.5,"x":1,"y":2,"b":0,"sy":1e999}';
+  Lines[5] := '{"k":"cursor","t":100.5,"x":1,"y":2,"b":0,"sw":1e999}';
+  Lines[6] := '{"k":"cursor","t":100.5,"x":1,"y":2,"b":0,"sh":1e999}';
+  for I := Low(Lines) to High(Lines) do
+  begin
+    Log := TSidecarLog.Create;
+    try
+      Expect<Boolean>(Log.LoadFromText(FixtureHeader + LineEnding
+        + FixtureAnchor + LineEnding + Lines[I] + LineEnding
+        + '{"k":"cursor","t":101.0,"x":5,"y":6,"b":0}', Error)).ToBe(True);
+      Expect<Integer>(Log.SkippedLines).ToBe(1);
+      Expect<Integer>(Log.SampleCount).ToBe(1);
+      // And the good sample after it did not inherit an infinite
+      // rectangle from the one that was dropped.
+      Expect<Double>(Log.Sample(0).SourceWidth).ToBe(640);
+    finally
+      Log.Free;
+    end;
+  end;
+end;
+
+procedure THostileFileTests.TestANonFiniteAnchorIsDropped;
+var
+  Log: TSidecarLog;
+  Error: string;
+begin
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(Log.LoadFromText(FixtureHeader + LineEnding
+      + '{"k":"anchor","host":1e999}' + LineEnding
+      + '{"k":"cursor","t":100.5,"x":1,"y":2,"b":0}', Error)).ToBe(True);
+    Expect<Boolean>(Log.HasAnchor).ToBe(False);
+    Expect<Integer>(Log.SkippedLines).ToBe(1);
+  finally
+    Log.Free;
+  end;
+end;
+
+procedure THostileFileTests.TestANonFiniteButtonIsDropped;
+var
+  Log: TSidecarLog;
+  Error: string;
+begin
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(Log.LoadFromText(FixtureHeader + LineEnding
+      + FixtureAnchor + LineEnding
+      + '{"k":"button","t":1e999,"x":1,"y":2,"n":0,"d":true}' + LineEnding
+      + '{"k":"button","t":100.5,"x":1,"y":1e999,"n":0,"d":false}',
+      Error)).ToBe(True);
+    Expect<Integer>(Log.ButtonCount).ToBe(0);
+    Expect<Integer>(Log.SkippedLines).ToBe(2);
+  finally
+    Log.Free;
+  end;
+end;
+
+// The integer half of the same rule, and the one that used to be fatal
+// rather than merely wrong.
+//
+// `TJSONObject.Get(name, Integer)` coerces whatever is under the name,
+// and coercing a +Inf RAISES — outside the per-line `try`, which used to
+// wrap only the parse. So a line with `"fps":1e999` in it did not skip:
+// it killed the process, exit 217, taking the whole load with it. On
+// macOS the raise is masked (MacOSAll masks invalidOp at unit init, and
+// the value comes back as -1 instead — a `"version":-1` that walks
+// straight past the TooNew test, and a `"pid":-1` that reads as alive),
+// which is why it was invisible on device and live everywhere else: this
+// suite, Linux CI, Wine, and any third-party reader of a format whose
+// documentation now promises that a bad line is never fatal.
+procedure THostileFileTests.TestANonFiniteIntegerFieldIsDropped;
+var
+  Log: TSidecarLog;
+  Error: string;
+  I: Integer;
+  Fields: array[0..6] of string;
+begin
+  // Every integer field of the header, one at a time. The header is
+  // skipped whole, so nothing of the poisoned line is applied.
+  Fields[0] := '"version":1';
+  Fields[1] := '"pid":0';
+  Fields[2] := '"pixelWidth":1280';
+  Fields[3] := '"pixelHeight":800';
+  Fields[4] := '"scale":2';
+  Fields[5] := '"fps":30';
+  Fields[6] := '"displayId":1';
+  for I := Low(Fields) to High(Fields) do
+  begin
+    Log := TSidecarLog.Create;
+    try
+      Expect<Boolean>(Log.LoadFromText(StringReplace(FixtureHeader,
+        Fields[I], Copy(Fields[I], 1, Pos(':', Fields[I])) + '1e999', [])
+        + LineEnding + FixtureAnchor + LineEnding
+        + '{"k":"cursor","t":100.5,"x":1,"y":2,"b":0}', Error)).ToBe(True);
+      Expect<Integer>(Log.SkippedLines).ToBe(1);
+      Expect<string>(Log.Header.MovieName).ToBe('');
+      // And in particular the version did not come back as something
+      // that slipped past the refusal.
+      Expect<Boolean>(Log.TooNew).ToBe(False);
+      Expect<Integer>(Log.Header.Version).ToBe(SidecarFormatVersion);
+      // The rest of the file still loaded, which is the promise.
+      Expect<Integer>(Log.SampleCount).ToBe(1);
+    finally
+      Log.Free;
+    end;
+  end;
+  // The trailer's two, the button's index and the sample's mask.
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(Log.LoadFromText(FixtureHeader + LineEnding
+      + FixtureAnchor + LineEnding
+      + '{"k":"trailer","t":200.0,"frames":1e999,"duration":1.0,'
+      + '"samples":10,"recovered":false}', Error)).ToBe(True);
+    Expect<Boolean>(Log.HasTrailer).ToBe(False);
+    Expect<Integer>(Log.SkippedLines).ToBe(1);
+  finally
+    Log.Free;
+  end;
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(Log.LoadFromText(FixtureHeader + LineEnding
+      + FixtureAnchor + LineEnding
+      + '{"k":"trailer","t":200.0,"frames":10,"duration":1.0,'
+      + '"samples":-1e999,"recovered":false}', Error)).ToBe(True);
+    Expect<Boolean>(Log.HasTrailer).ToBe(False);
+    Expect<Integer>(Log.SkippedLines).ToBe(1);
+  finally
+    Log.Free;
+  end;
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(Log.LoadFromText(FixtureHeader + LineEnding
+      + FixtureAnchor + LineEnding
+      + '{"k":"button","t":100.5,"x":1,"y":2,"n":1e999,"d":true}'
+      + LineEnding + '{"k":"cursor","t":100.6,"x":1,"y":2,"b":1e999}',
+      Error)).ToBe(True);
+    Expect<Integer>(Log.ButtonCount).ToBe(0);
+    Expect<Integer>(Log.SampleCount).ToBe(0);
+    Expect<Integer>(Log.SkippedLines).ToBe(2);
+  finally
+    Log.Free;
+  end;
+end;
+
+// A number that is finite and still cannot be the field it is in. The
+// old read truncated silently — `"scale":5000000000` came back as some
+// other number entirely — which is the same class of quiet wrongness the
+// infinities were, without the crash.
+procedure THostileFileTests.TestAnOutOfRangeIntegerFieldIsDropped;
+var
+  Log: TSidecarLog;
+  Error: string;
+begin
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(Log.LoadFromText(StringReplace(FixtureHeader,
+      '"scale":2', '"scale":5000000000', []) + LineEnding + FixtureAnchor,
+      Error)).ToBe(True);
+    Expect<Integer>(Log.SkippedLines).ToBe(1);
+    Expect<string>(Log.Header.MovieName).ToBe('');
+  finally
+    Log.Free;
+  end;
+  // A negative display id cannot be a CGDirectDisplayID either.
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(Log.LoadFromText(StringReplace(FixtureHeader,
+      '"displayId":1', '"displayId":-1', []) + LineEnding + FixtureAnchor,
+      Error)).ToBe(True);
+    Expect<Integer>(Log.SkippedLines).ToBe(1);
+  finally
+    Log.Free;
+  end;
+  // And the ordinary values still load, which is the other half of a
+  // range check being worth anything.
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(Log.LoadFromText(FixtureHeader + LineEnding
+      + FixtureAnchor, Error)).ToBe(True);
+    Expect<Integer>(Log.SkippedLines).ToBe(0);
+    Expect<Integer>(Log.Header.Scale).ToBe(2);
+    Expect<Integer>(Log.Header.FramesPerSecond).ToBe(30);
+  finally
+    Log.Free;
+  end;
+end;
+
+procedure THostileFileTests.TestUnbalancedBracketsAreNotNesting;
+var
+  Log: TSidecarLog;
+  Error: string;
+  Closers: string;
+  I: Integer;
+begin
+  // A line with more closers than openers drives a naive depth counter
+  // negative, and a negative counter buys the rest of the line an
+  // allowance it did not earn. The floor is defence in depth rather
+  // than a case anybody has met — an unbalanced line is not valid JSON,
+  // so the parser refuses it whichever way the counter went — and what
+  // is pinned here is the outcome either way: skipped, nothing loaded,
+  // and the load itself still succeeds.
+  Closers := '';
+  for I := 1 to 100 do
+    Closers := Closers + ']';
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(Log.LoadFromText(FixtureHeader + LineEnding
+      + FixtureAnchor + LineEnding + Closers + DeepLine(50000),
+      Error)).ToBe(True);
+    Expect<Integer>(Log.SkippedLines).ToBe(1);
+    Expect<Integer>(Log.SampleCount).ToBe(0);
+  finally
+    Log.Free;
+  end;
+end;
+
+procedure THostileFileTests.TestANonFiniteTrailerIsDropped;
+var
+  Log: TSidecarLog;
+  Error: string;
+begin
+  // This one matters twice over: a trailer is what tells the recovery
+  // pass a take is finished, and an infinite duration in it would be
+  // read back as the movie's own length.
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(Log.LoadFromText(FixtureHeader + LineEnding
+      + FixtureAnchor + LineEnding
+      + '{"k":"trailer","t":200.0,"frames":10,"duration":1e999,'
+      + '"samples":10,"recovered":false}', Error)).ToBe(True);
+    Expect<Boolean>(Log.HasTrailer).ToBe(False);
+    Expect<Integer>(Log.SkippedLines).ToBe(1);
+  finally
+    Log.Free;
+  end;
 end;
 
 procedure TResilienceTests.TestATruncatedLastLineStillLoads;
@@ -1371,6 +1848,8 @@ begin
     'the source rectangle, written only when it moves'));
   TestRunnerProgram.AddSuite(TResilienceTests.Create(
     'a file that was cut off, or came from a newer knips'));
+  TestRunnerProgram.AddSuite(THostileFileTests.Create(
+    'a file nobody vetted, in a directory knips scans unasked'));
   TestRunnerProgram.AddSuite(TTimelineTests.Create(
     'placing events on the movie''s timeline'));
   TestRunnerProgram.AddSuite(TAvailabilityTests.Create(

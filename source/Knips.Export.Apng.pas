@@ -46,6 +46,11 @@ uses
 
 const
   // dispose_op / blend_op values from the APNG specification.
+  // The APNG specification's two small enums, transcribed whole. Knips
+  // writes DisposeOpNone and BlendOpSource on every frame and nothing
+  // else — the others are documentary, so a reader of a foreign APNG
+  // can put a byte back against a name. Same treatment as the framework
+  // status enums (Knips.Export.MovieWriter).
   ApngDisposeOpNone = 0;
   ApngDisposeOpBackground = 1;
   ApngDisposeOpPrevious = 2;

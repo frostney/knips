@@ -111,9 +111,18 @@ type
     FLock: TPThreadMutex;
     FMapping: TCursorFrameMapping;
     // Capture-queue counters, read by the main thread after the stop.
+    // Under FLock like the mapping beside them: the read happens after
+    // the stream has stopped and is safe in practice, but an Int64
+    // written on one thread and read on another with no barrier is not
+    // something to leave to practice — and the mutex is already taken
+    // once per frame a few lines further down, so the cost is one more
+    // uncontended lock on a path that takes one anyway.
     FComposited: Int64;
     FOffFrame: Int64;
     FRefused: Int64;
+    // Capture-queue safe: no allocation, no exception, no managed type.
+    procedure Count(var ACounter: Int64);
+    function CounterValue(const ACounter: Int64): Int64;
     function RenderSprite(APixelsPerPoint: Double;
       out AError: string): Boolean;
     procedure ReleasePixels;
@@ -140,7 +149,6 @@ type
     // outside the captured rectangle, or when the buffer is not the
     // 32BGRA the stream asked for.
     procedure DrawInto(APixelBuffer: CVPixelBufferRef);
-    property Ready: Boolean read FReady;
     property SpriteWidth: Integer read FSpriteWidth;
     property SpriteHeight: Integer read FSpriteHeight;
     property HotSpotX: Integer read FHotSpotX;
@@ -259,6 +267,23 @@ begin
   FPixelCount := 0;
 end;
 
+// **This function has a near-identical twin**, and the duplication is
+// deliberate rather than overlooked: Knips.Export.CursorEffect's TExportCursor.RenderSprite
+// builds the same sprite the same way — +[NSCursor arrowCursor], the
+// image's bitmap representation, a CGBitmapContextCreate at
+// premultiplied BGRA, one CGContextDrawImage at the scaled extent.
+//
+// What differs is the kernel, and it is not a parameter. This one draws at RECORD time, at the CAPTURE's scale, into
+// pixels the capture queue then blits into every frame; the other draws
+// at export time at the OUTPUT's scale.
+// Unifying them would mean a third unit owning a Quartz drawing routine
+// that neither of these layers could then reach without importing it,
+// for a saving of about thirty lines — and the two are free to diverge
+// (a different magnification rule, a different colour space at export)
+// in a way a shared routine would fight. See docs/architecture.md.
+//
+// **Change them together.** A fix to one is a fix to the other, and the
+// only thing keeping them in step is this note in both files.
 function TCursorOverlay.RenderSprite(APixelsPerPoint: Double;
   out AError: string): Boolean;
 var
@@ -432,7 +457,7 @@ begin
   Event := CGEventCreate(nil);
   if Event = nil then
   begin
-    Inc(FRefused);
+    Count(FRefused);
     Exit;
   end;
   Location := CGEventGetLocation(Event);
@@ -447,7 +472,7 @@ begin
     FHotSpotY);
   if not Plan.Visible then
   begin
-    Inc(FOffFrame);
+    Count(FOffFrame);
     Exit;
   end;
 
@@ -462,14 +487,14 @@ begin
     or (Integer(CVPixelBufferGetHeight(APixelBuffer))
     <> Mapping.PixelHeight) then
   begin
-    Inc(FRefused);
+    Count(FRefused);
     Exit;
   end;
 
   // Flags 0, not kCVPixelBufferLock_ReadOnly: this writes.
   if CVPixelBufferLockBaseAddress(APixelBuffer, 0) <> kCVReturn_Success then
   begin
-    Inc(FRefused);
+    Count(FRefused);
     Exit;
   end;
   Base := CVPixelBufferGetBaseAddress(APixelBuffer);
@@ -478,26 +503,40 @@ begin
   begin
     BlitPremultipliedBgra(Base, BytesPerRow, FPixels, FSpriteBytesPerRow,
       Plan);
-    Inc(FComposited);
+    Count(FComposited);
   end
   else
-    Inc(FRefused);
+    Count(FRefused);
   CVPixelBufferUnlockBaseAddress(APixelBuffer, 0);
+end;
+
+procedure TCursorOverlay.Count(var ACounter: Int64);
+begin
+  PThreadMutexLock(FLock);
+  Inc(ACounter);
+  PThreadMutexUnlock(FLock);
+end;
+
+function TCursorOverlay.CounterValue(const ACounter: Int64): Int64;
+begin
+  PThreadMutexLock(FLock);
+  Result := ACounter;
+  PThreadMutexUnlock(FLock);
 end;
 
 function TCursorOverlay.CompositedFrames: Int64;
 begin
-  Result := FComposited;
+  Result := CounterValue(FComposited);
 end;
 
 function TCursorOverlay.OffFrameFrames: Int64;
 begin
-  Result := FOffFrame;
+  Result := CounterValue(FOffFrame);
 end;
 
 function TCursorOverlay.RefusedFrames: Int64;
 begin
-  Result := FRefused;
+  Result := CounterValue(FRefused);
 end;
 
 function ProbeCursorSprite(out AWidth, AHeight, AHotSpotX,

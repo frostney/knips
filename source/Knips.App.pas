@@ -297,7 +297,6 @@ type
     FFollowMouseItem: NSMenuItem;
     FStopItem: NSMenuItem;
     FCancelItem: NSMenuItem;
-    FRevealItem: NSMenuItem;
     // The Camera submenu and its three checkboxes.
     FCameraItem: NSMenuItem;
     FCameraMenu: NSMenu;
@@ -305,7 +304,6 @@ type
     FCameraShapeItem: NSMenuItem;
     FCameraBlurItem: NSMenuItem;
     FErrorItem: NSMenuItem;
-    FQuitItem: NSMenuItem;
     // The menu bar the process shows while it is a Regular app. Built on
     // the first promotion and kept — see PromoteForPlayback.
     FMainMenu: NSMenu;
@@ -337,6 +335,11 @@ type
     FHotKey: TStopHotKey;
     FStartedAt: TDateTime;
     FLastError: string;
+    // The writer's death is noticed on a 30 Hz tick and the stop it asks
+    // for takes a turn or two to land, so without this the same line
+    // would be written to the log thirty times a second. Cleared when a
+    // take's tick starts.
+    FWriterFailureReported: Boolean;
     // Own process id, so the Record Window submenu does not offer the
     // playback window as something to record. The application name will
     // not do: ScreenCaptureKit reports a display name, which is 'Knips'
@@ -406,6 +409,9 @@ type
     procedure RefreshWindowEntries;
     function ElapsedSeconds: Int64;
     procedure RecordError(const AMessage: string);
+    // RecordError where several answers about one take compete for the
+    // menu's single slot: the first keeps it, the rest go to the log.
+    procedure NoteError(const AMessage: string);
     procedure LoadPreferences;
     procedure StoreSystemAudio;
     procedure StoreMicrophone;
@@ -453,7 +459,12 @@ type
     function CompositeWindowForPending: Boolean;
     // One tick of the composited pan: the recorded window's frame now,
     // as a source rectangle of the recording's own fixed size.
-    procedure UpdateCompositedSourceRect;
+    procedure UpdateCompositedSourceRect; overload;
+    // The same, for a caller that has already asked the window server
+    // where the window is. CameraRideTick is that caller, and it needs
+    // the answer for the camera anyway.
+    procedure UpdateCompositedSourceRect(
+      const AWindowRect: TCameraRect); overload;
     // Moves a visible camera window into the corner of the rectangle
     // about to be recorded, so the picture-in-picture goes into the file
     // the way Kap does it. A region recording docks into the region; a
@@ -595,6 +606,10 @@ begin
     // answering to org.knips.app — log at once. A seek-then-write pair
     // is not: one process's truncation between another's seek and write
     // punches a NUL hole the size of the old file.
+    // `&666` is FPC's OCTAL literal syntax, not a typo for 0666 or a
+    // decimal 666: it is rw-rw-rw-, which umask then narrows to the
+    // usual rw-r--r--. Spelled out because the ampersand form is rare
+    // enough to read as a mistake.
     Handle := FpOpen(PAnsiChar(Path),
       O_WRONLY or O_APPEND or O_CREAT, &666);
     if Handle < 0 then
@@ -1540,6 +1555,14 @@ begin
     FAudioMenu.release;
     FAudioMenu := nil;
   end;
+  if FCameraMenu <> nil then
+  begin
+    // The same, for the camera submenu, and it was simply missed when
+    // that menu was added: an alloc'd NSMenu with no matching release.
+    // Same ordering rule, same reason.
+    FCameraMenu.release;
+    FCameraMenu := nil;
+  end;
   if FMenu <> nil then
   begin
     FMenu.release;
@@ -1750,12 +1773,15 @@ begin
   BuildAudioMenu;
   FAudioItem.setSubmenu(FAudioMenu);
   FMenu.addItem(NSMenuItem.separatorItem);
-  FRevealItem := AddMenuItem(RevealRecordingsTitle, RevealRecordingsSelector);
+  // The returned items are dropped: nothing ever enables, disables,
+  // renames or hides these two. AddMenuItem is called for its side
+  // effect — the item is added to the menu and retained by it.
+  AddMenuItem(RevealRecordingsTitle, RevealRecordingsSelector);
   FErrorItem := AddMenuItem(ErrorMenuTitle(''), '');
   FErrorItem.setEnabled(False);
   FErrorItem.setHidden(True);
   FMenu.addItem(NSMenuItem.separatorItem);
-  FQuitItem := AddMenuItem(QuitTitle, QuitSelector);
+  AddMenuItem(QuitTitle, QuitSelector);
 end;
 
 function TAppController.WindowEntriesFresh: Boolean;
@@ -2264,14 +2290,25 @@ end;
 
 procedure TAppController.UpdateCompositedSourceRect;
 var
+  WindowRect: TCameraRect;
+begin
+  if (FCompositedWindowID = 0) or (FSession = nil) then
+    Exit;
+  if not WindowScreenRect(FCompositedWindowID, WindowRect) then
+    Exit;
+  UpdateCompositedSourceRect(WindowRect);
+end;
+
+procedure TAppController.UpdateCompositedSourceRect(
+  const AWindowRect: TCameraRect);
+var
   WindowRect, Region: TCameraRect;
   ScreenFrame: NSRect;
   DisplayID: UInt32;
 begin
   if (FCompositedWindowID = 0) or (FSession = nil) then
     Exit;
-  if not WindowScreenRect(FCompositedWindowID, WindowRect) then
-    Exit;
+  WindowRect := AWindowRect;
   // The display is re-resolved every tick rather than taken from the
   // start, because the window can be dragged onto another one — and the
   // frame it comes back with is in AppKit's *global* space, so flipping
@@ -2496,18 +2533,28 @@ end;
 procedure TAppController.CameraRideTick;
 var
   Rect: TCameraRect;
+  HasRect: Boolean;
 begin
   // An export owns the main thread and drains events to draw its
   // progress, which is how a timer can fire in the middle of one — the
   // same guard the live tick carries, for the same reason.
   if Busy then
     Exit;
+  // ONE window-server round trip a tick. The composited pan and the
+  // camera ride follow the same window whenever both are live, and each
+  // used to ask for its frame separately — two synchronous round trips
+  // five times a second for one answer, on the thread the whole app
+  // draws from.
+  HasRect := (FRideWindowID <> 0) and WindowScreenRect(FRideWindowID, Rect);
   // The composited recording's pan comes first and is unconditional: it
   // is what keeps the *capture* on the window, where the camera ride is
   // only what keeps the picture-in-picture in the corner. A camera
   // switched off mid-take must not stop the capture following the
   // window.
-  UpdateCompositedSourceRect;
+  if HasRect and (FCompositedWindowID = FRideWindowID) then
+    UpdateCompositedSourceRect(Rect)
+  else
+    UpdateCompositedSourceRect;
   if FRideWindowID = 0 then
   begin
     StopCameraRide;
@@ -2522,7 +2569,7 @@ begin
       StopCameraRide;
     Exit;
   end;
-  if not WindowScreenRect(FRideWindowID, Rect) then
+  if not HasRect then
   begin
     // The recorded window has gone. The recording carries on — SCK is
     // free to keep a stream on a window that closed — but there is
@@ -2772,6 +2819,39 @@ begin
   LogMessage(AMessage);
 end;
 
+// The same, for a stretch of code that can produce SEVERAL things worth
+// saying about one take — the stop, above all, which checks the
+// finalisation, then system audio, then the microphone, then the render.
+// The menu has one Last-error slot, so the last speaker used to win it
+// and everything before was gone: a take whose file failed to finalise
+// and whose microphone was also muted showed the microphone.
+//
+// First wins here instead, and the rest still reach the log, where
+// nothing is lost. The pattern is StartLive's, where the same problem
+// was answered the same way — see "Follow Mouse is off for this
+// recording". It puts a burden on the ORDER of the checks, and that
+// order is deliberate: the finish's most consequential answer, whether
+// the movie was written at all, is asked first.
+procedure TAppController.NoteError(const AMessage: string);
+begin
+  if FLastError = '' then
+    RecordError(AMessage)
+  else
+    LogMessage(AMessage);
+end;
+
+// The hard stop: something raised, and the state machine is put back to
+// idle with the frame, the camera and the animator taken down with it.
+//
+// **It assumes it is not called while Busy.** Transition(acCaptureFailed)
+// is refused during an export or a render, so a Fail raised from inside
+// one would log its message and leave the state machine exactly where it
+// was — with the teardown below still having run. That is not a state
+// anything here recovers from, and it is kept out by construction rather
+// than by a guard: every caller of Fail is on a start or a stop path, and
+// both of those are themselves refused while Busy (CommandStop's own
+// comment says why). Anything new that can raise inside an export must
+// report through RecordError, not through here.
 procedure TAppController.Fail(const AMessage: string);
 begin
   RecordError(AMessage);
@@ -3141,9 +3221,21 @@ begin
         // An effect that was asked for and could not be applied is not a
         // failure — the deliverable is right without it — but it is the
         // only explanation the user will get for a Zoom on Click that
-        // did nothing.
+        // did nothing. Note is the summary of the render's three
+        // (Knips.Options.EffectNoteSummary); the menu has one slot, and
+        // the log below it has all three.
         if Result and (Session.Report.Note <> '') then
-          RecordError(Session.Report.Note);
+        begin
+          NoteError(Session.Report.Note);
+          if (Session.Report.CursorNote <> '')
+            and (Session.Report.CursorNote <> Session.Report.Note) then
+            LogMessage('render: no cursor drawn ('
+              + Session.Report.CursorNote + ')');
+          if (Session.Report.ZoomNote <> '')
+            and (Session.Report.ZoomNote <> Session.Report.Note) then
+            LogMessage('render: no zoom applied ('
+              + Session.Report.ZoomNote + ')');
+        end;
       finally
         Session.Free;
       end;
@@ -3375,6 +3467,7 @@ end;
 procedure TAppController.StartRecordingTick;
 begin
   StopRecordingTick;
+  FWriterFailureReported := False;
   FTickTimer := NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats(
     LiveTickSeconds, FTarget, SelectorNamed(LiveTickSelector), nil, True);
   if FTickTimer <> nil then
@@ -3416,7 +3509,30 @@ begin
   // while an export holds the thread). Writing a line to a file is safe
   // there in a way that sending updateConfiguration: is not.
   if (FSession <> nil) and FSession.Capturing then
+  begin
     FSession.SampleMetadata;
+    // One rejected buffer fails AVAssetWriter for good. The CLI's run
+    // loop breaks on this and the MCP server stops the session on it;
+    // the app used to do neither, so a writer that died mid-take — a
+    // full disk is the ordinary way — left the status item showing ⏺
+    // for as long as the user let it, and the whole take was lost at the
+    // stop. Ask for the stop the way the menu item does, so the same
+    // finalisation runs and whatever reached the file is kept.
+    if FSession.LiveStatistics.WriterFailed then
+    begin
+      if not FWriterFailureReported then
+      begin
+        FWriterFailureReported := True;
+        RecordError('the recording failed while writing and is being '
+          + 'stopped; the disk may be full. Whatever reached the file is '
+          + 'being finalised');
+      end;
+      // Refused while an export owns the main thread, exactly as a click
+      // on Stop Recording is; the next tick asks again.
+      CommandStop;
+      Exit;
+    end;
+  end;
   if Busy or (FLive = nil) then
     Exit;
   // The animator switches itself off when the session stops capturing;
@@ -3466,13 +3582,38 @@ begin
   // that question and carries the trade; a window take that wants
   // neither keeps ScreenCaptureKit's desktop-independent capture, which
   // is the cleaner picture.
-  if (FPendingWindowID <> 0)
-    and WindowTakeNeedsCompositing(FEffects,
-    (FCamera <> nil) and FCamera.Visible) then
-    if not CompositeWindowForPending then
-      LogMessage('the recorded window''s frame or display could not be '
-        + 'resolved, so the effects (and the camera, if it is up) will '
-        + 'not reach the file; recording the window on its own instead');
+  //
+  // Said out loud, both ways. This one decision settles whether the take
+  // is editable afterwards or is its own deliverable for ever, it is
+  // taken from state the user cannot see all of at once (the effect
+  // defaults plus whether the camera happens to be up), and it used to
+  // leave no trace at all when it went the ordinary way — so a window
+  // take that came back un-rendered looked like a bug in the render.
+  if FPendingWindowID <> 0 then
+  begin
+    if WindowTakeNeedsCompositing(FEffects,
+      (FCamera <> nil) and FCamera.Visible) then
+    begin
+      if CompositeWindowForPending then
+        LogMessage('recording this window through a rectangle of its '
+          + 'display so the effects (and the camera, if it is up) reach '
+          + 'the file; the take is raw and can be re-rendered')
+      else
+        // A RecordError and not a log line: the user asked for effects
+        // and is about to get a take that can never be given any. The
+        // recording is still worth making, so this is not a Fail.
+        RecordError('the recorded window''s frame or display could not '
+          + 'be resolved, so the effects (and the camera, if it is up) '
+          + 'will not reach the file; recording the window on its own '
+          + 'instead, which cannot be re-rendered afterwards');
+    end
+    else
+      LogMessage('recording this window on its own: nothing was asked '
+        + 'for that would have to be composited in, so the take keeps '
+        + 'ScreenCaptureKit''s desktop-independent capture — the '
+        + 'cleaner picture, and the one kind of take nothing can be '
+        + 'drawn into afterwards');
+  end;
   DisplayIndex := -1;
   // A region is meaningless without the display it was drawn on: the
   // NSScreen had no NSScreenNumber, so falling back to the main display
@@ -3822,7 +3963,11 @@ begin
     Deliverable := RawPath;
     RawPath := '';
   end;
-  Path := RawPath;
+  // Path is assigned where it is USED, after the render has decided
+  // which file the playback window opens on (`Path := Deliverable`
+  // below). It used to be seeded with the raw take's path here as well,
+  // and nothing between the two reads it — a dead store that read as if
+  // the playback window fell back to the take.
   PixelWidth := FSession.Report.PixelWidth;
   PixelHeight := FSession.Report.PixelHeight;
   // Pixels per point, and so the divisor the one-click GIF export sizes
@@ -3831,7 +3976,7 @@ begin
   MicrophoneAsked := AudioModeCapturesMicrophone(FSession.Report.AudioMode);
   Finished := FSession.FinishCapture(Error);
   if not Finished then
-    RecordError(Error);
+    NoteError(Error);
   // One line per take about the idle heartbeat. The menu-bar app is the
   // front end most takes come through and it shows the user no counters
   // at all, so the log is the only place a refusal — the one number that
@@ -3871,7 +4016,7 @@ begin
       FSession.Report.AudioPeak);
     if Silence <> '' then
     begin
-      RecordError(Silence);
+      NoteError(Silence);
       PlaybackNote := 'no system audio';
     end;
     // Only the silence case here; the "nothing arrived" case for the
@@ -3884,13 +4029,31 @@ begin
         FSession.Report.MicrophonePeak);
       if Silence <> '' then
       begin
-        RecordError(Silence);
+        NoteError(Silence);
         if PlaybackNote = '' then
           PlaybackNote := 'no mic audio'
         else
           PlaybackNote := 'no audio';
       end;
     end;
+    // The seam between Big Cursor and the idle heartbeat: a take of a
+    // still screen is mostly repeated frames, and a repeat carries the
+    // enlarged pointer where it was when that frame was captured. The
+    // file is fine and nothing failed, so this is a note like the
+    // silence above — but a still pointer looks like a bug and deserves
+    // its own sentence. See Knips.Options.BigCursorIdleWarning.
+    Silence := BigCursorIdleWarning(FSession.Report.BigCursor,
+      FSession.Report.CursorFrames, FSession.Report.HeartbeatFrames,
+      FSession.Report.AppendedFrames);
+    if Silence <> '' then
+      NoteError(Silence);
+    // A stop ScreenCaptureKit never confirmed. To the log rather than
+    // the menu: the take is on disk and playable, and the value of this
+    // is that a take which comes back short has an explanation sitting
+    // beside it.
+    if FSession.Report.StopUnconfirmed then
+      LogMessage('ScreenCaptureKit did not confirm the stop; the movie '
+        + 'was finalised anyway and may be a frame or two short');
   end;
   if Finished and MicrophoneAsked
     and (FSession.Report.AppendedMicrophoneSamples = 0) then
@@ -3905,11 +4068,11 @@ begin
     if (FSession.Report.DroppedMicrophoneEarly = 0)
       and (FSession.Report.DroppedMicrophoneStalled = 0)
       and (FSession.Report.FailedMicrophoneAppends = 0) then
-      RecordError('the microphone delivered no audio for this recording — '
+      NoteError('the microphone delivered no audio for this recording — '
         + 'check System Settings › Privacy & Security › Microphone and the '
         + 'input device')
     else
-      RecordError(Format('no microphone audio reached this recording: '
+      NoteError(Format('no microphone audio reached this recording: '
         + '%d samples arrived before the first video frame, %d while the '
         + 'writer was not ready, %d failed to append',
         [FSession.Report.DroppedMicrophoneEarly,
@@ -3951,7 +4114,7 @@ begin
     Rendered := RenderDeliverable(RawPath, Deliverable, Error);
     if not Rendered then
     begin
-      RecordError('the deliverable could not be rendered (' + Error
+      NoteError('the deliverable could not be rendered (' + Error
         + '); the raw take is at ' + RawPath);
       Deliverable := RawPath;
     end;
@@ -4012,10 +4175,19 @@ procedure TAppController.RecoverUnfinishedTakes;
 var
   Takes: TRecoveredTakes;
   Summary: string;
-  I: Integer;
+  I, Recovered, Swept: Integer;
 begin
   try
-    if RecoverOrphanedTakes(RecordingsDirectory(GetUserDir), Takes) = 0 then
+    Recovered := RecoverOrphanedTakes(RecordingsDirectory(GetUserDir),
+      Takes, Swept);
+    // To the log whatever happened. A scratch file left behind is a
+    // render that died, and the app is where renders run — this is the
+    // only place that would ever notice a directory quietly filling up
+    // with them.
+    if Swept > 0 then
+      LogMessage(Format('%d leftover render scratch file(s) removed',
+        [Swept]));
+    if Recovered = 0 then
       Exit;
   except
     // Never a reason to refuse to launch: the app's job is recording, and

@@ -20,7 +20,6 @@ interface
 {$IFDEF DARWIN}
 
 uses
-  ctypes,
   SysUtils,
 
   objc;
@@ -53,7 +52,6 @@ type
     function Register: pobjc_class;
     property Name: string read FName;
     property Handle: pobjc_class read FClass;
-    property Registered: Boolean read FRegistered;
   end;
 
 function LookUpClass(const AName: string): pobjc_class;

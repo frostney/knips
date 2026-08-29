@@ -40,10 +40,6 @@ const
   {$ELSE}
   MoviesFolderName = 'Videos';
   {$ENDIF}
-  RecordingsFolderName = 'knips';
-  RecordingFilePrefix = 'knips-';
-  RecordingTimestampFormat = 'yyyymmdd-hhnnss';
-  RecordingFileExtension = '.mp4';
   // Longer messages are elided in the menu; the full text goes to NSLog.
   MaxErrorTitleLength = 60;
   ErrorTitlePrefix = 'Last error: ';
@@ -80,12 +76,6 @@ const
   // put anything at all into.
   MaxStoredRegionExtent = 32768;
   ExportingTitlePrefix = 'Exporting… ';
-  // The status item while the deliverable is being rendered off the raw
-  // take, and the playback window's title while a re-export is running.
-  // A glyph rather than a word for the status item: the menu bar is
-  // narrow and the item is a few characters wide the rest of the time.
-  RenderingGlyph = '◐';
-  RenderingTitlePrefix = 'Rendering… ';
 
   // The camera picture-in-picture window. Points, not pixels: the window
   // is placed in screen coordinates and the layer scales itself.
@@ -756,6 +746,20 @@ function SanitizeStoredRegion(const AStored: TCaptureRegion;
 implementation
 
 const
+  // The fragments the two functions below assemble, and nothing else in
+  // the tree reads. MoviesFolderName stays public because it is the one
+  // that differs by host and the tests assert through it; these are
+  // spelling, and the tests assert on the assembled result.
+  RecordingsFolderName = 'knips';
+  RecordingFilePrefix = 'knips-';
+  RecordingTimestampFormat = 'yyyymmdd-hhnnss';
+  RecordingFileExtension = '.mp4';
+  // The status item while the deliverable is being rendered off the raw
+  // take, and the playback window's title while a re-export is running.
+  // A glyph rather than a word for the status item: the menu bar is
+  // narrow and the item is a few characters wide the rest of the time.
+  RenderingGlyph = '◐';
+  RenderingTitlePrefix = 'Rendering… ';
   Ellipsis = '…';
 
 // Cuts a string to at most AMaxBytes bytes without splitting a UTF-8

@@ -88,7 +88,10 @@ const
   // 'aac ' (0x61616320). AVFormatIDKey wants it as a plain integer.
   AudioFormatMPEG4AAC = 1633772320;
 
-  // AVAssetWriterStatus
+  // AVAssetWriterStatus, verified against AVAssetWriter.h. Transcribed
+  // whole though only Writing and Completed are compared against; the
+  // rest are documentary. See Knips.Capture.ScreenCaptureKit's
+  // SCFrameStatus block for the reasoning.
   AVAssetWriterStatusUnknown = 0;
   AVAssetWriterStatusWriting = 1;
   AVAssetWriterStatusCompleted = 2;
@@ -356,6 +359,23 @@ const
   RunLoopSliceSeconds = 0.001;
 
 var
+  // One process-global flag for a completion handler that is a global
+  // `cdecl` procedure, because that is what a `cblock` parameter can be
+  // given (docs/code-style.md). It is set to False immediately before
+  // finishWritingWithCompletionHandler: and polled by the caller.
+  //
+  // **It is never drained.** A finish that times out leaves a handler
+  // still out there, and if it fires afterwards it sets this flag with
+  // nobody waiting — so the NEXT writer's finish could see a True it did
+  // not earn and stop waiting one slice in. That is the residual risk,
+  // stated rather than engineered around: the status check below is what
+  // catches it, because a writer whose finish has not actually completed
+  // is not in AVAssetWriterStatusCompleted, and the finish then fails
+  // with the status rather than claiming a movie that is not there.
+  //
+  // The other reason it is left alone: reaching the timeout at all means
+  // AVAssetWriter did not answer in thirty seconds, and by then the take
+  // is being reported as failed either way.
   GFinishReady: Boolean = False;
 
 procedure FinishCompletionHandler; cdecl;
@@ -514,6 +534,24 @@ var
 begin
   Result := False;
   AError := '';
+  // The existing file goes BEFORE the writer is even created, which
+  // means a failure anywhere below leaves the old file deleted and no
+  // new one in its place. That is deliberate and it is not a choice:
+  // +[AVAssetWriter assetWriterWithURL:fileType:error:] refuses a URL
+  // that already exists (AVErrorFileAlreadyExists), so there is no
+  // ordering in which the writer is known to be good before the path is
+  // clear. Moving the delete down to just before startWriting would
+  // narrow the window and not close it.
+  //
+  // The exposure is bounded by what is at the path. `record` and the
+  // menu-bar app write a name nothing else owns — a timestamp, or a path
+  // the caller named, and `record` replacing what it is pointed at
+  // without asking is the documented contract (AGENTS.md). The one place
+  // where a valuable file really is at the output path is a re-render of
+  // an existing deliverable, and that path does not come through here at
+  // all: Knips.Export.Render builds into `<out>.knips-render-tmp` and
+  // renames it into place, precisely so a failed render cannot destroy
+  // the file it was replacing.
   if FileExists(FOutputPath) and not DeleteFile(FOutputPath) then
   begin
     AError := 'cannot replace ' + FOutputPath;
@@ -613,11 +651,22 @@ var
   Timing: CMSampleTimingInfo;
 begin
   Result := False;
+  // The cheap answer, off the lock, for the overwhelmingly common case
+  // of a writer that was never opened at all. It is re-asked under the
+  // lock below and that is the answer that counts: Finish and Cancel
+  // clear this flag from the MAIN thread while capture queues are still
+  // delivering, so a read here can be stale by the time the append
+  // happens.
   if not FOpen then
     Exit;
   Time := CMSampleBufferGetPresentationTimeStamp(ASampleBuffer);
 
   PThreadMutexLock(FLock);
+  if not FOpen then
+  begin
+    PThreadMutexUnlock(FLock);
+    Exit;
+  end;
   // A writer that left Writing state (one rejected buffer fails it for
   // good) rejects every later append on every input; record the fact so
   // the main thread can abort instead of recording into a dead file.
@@ -741,6 +790,12 @@ begin
     Exit;
 
   PThreadMutexLock(FLock);
+  // Re-asked under the lock; see AppendVideoSample.
+  if not FOpen then
+  begin
+    PThreadMutexUnlock(FLock);
+    Exit;
+  end;
   // Nothing to repeat: no frame has reached the movie yet, so there is no
   // timeline to put one on either. Not counted — it is not a refusal, it
   // is the state every recording starts in.
@@ -933,6 +988,12 @@ begin
   end;
 
   PThreadMutexLock(FLock);
+  // Re-asked under the lock; see AppendVideoSample.
+  if not FOpen then
+  begin
+    PThreadMutexUnlock(FLock);
+    Exit;
+  end;
   if FWriter.status <> AVAssetWriterStatusWriting then
   begin
     FWriterFailed := True;
@@ -1000,14 +1061,19 @@ var
 begin
   Result := False;
   AError := '';
+  // Tested AND cleared under the lock, in one critical section with the
+  // markAsFinished calls below: the capture queues read this flag to
+  // decide whether to append, and clearing it outside the lock left a
+  // window in which a queue had already passed its own check and was
+  // waiting on the mutex this method was about to take.
+  PThreadMutexLock(FLock);
   if not FOpen then
   begin
+    PThreadMutexUnlock(FLock);
     AError := 'writer is not open';
     Exit;
   end;
   FOpen := False;
-
-  PThreadMutexLock(FLock);
   FInput.markAsFinished;
   if FAudioInput <> nil then
     FAudioInput.markAsFinished;
@@ -1052,9 +1118,15 @@ end;
 
 procedure TMovieWriter.Cancel;
 begin
+  // Under the lock for the same reason Finish clears it there.
+  PThreadMutexLock(FLock);
   if not FOpen then
+  begin
+    PThreadMutexUnlock(FLock);
     Exit;
+  end;
   FOpen := False;
+  PThreadMutexUnlock(FLock);
   if FWriter <> nil then
     FWriter.cancelWriting;
 end;

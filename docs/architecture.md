@@ -72,9 +72,14 @@
   pace with the wall clock. Without it a 30-second recording of a still
   screen was one frame spanning 0.000 s. See
   [The idle heartbeat](#the-idle-heartbeat).
-- Two threads: the main thread (run loop, signals, progress) and SCK's
-  capture queue (sample delivery → append). No `cthreads`; shared counters
-  sit under a pthread mutex; the capture path never raises or prints.
+- The main thread (run loop, signals, progress) plus up to four serial GCD
+  queues, none of them the RTL's: ScreenCaptureKit's video queue
+  (`knips.capture.video`, sample delivery → append), and — only when the
+  corresponding source is on — its audio queue (`knips.capture.audio`),
+  its microphone queue (`knips.capture.mic`) and the camera window's
+  background-blur queue (`knips.camera.blur`, which touches the preview
+  layer and never the movie). No `cthreads`; shared counters sit under a
+  pthread mutex; the capture path never raises or prints.
 - `knips render --in=take-raw.mp4 [--effects=…]` is the scriptable face of
   the render pass. `knips record` is deliberately unchanged — it still
   bakes the system pointer in by default, and `--big-cursor` and
@@ -117,17 +122,15 @@
 
 | Layer | Units | Notes |
 | --- | --- | --- |
-| CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `export`, `displays`, `windows`, `mcp`, `probe`; SIGINT/SIGTERM → `StopRequested` |
-| MCP | `Knips.Mcp`, `Knips.Mcp.Params` | The tool surface over pascal-mcp-sdk's stdio transport; the neutral half is the tool table, argument mapping, and default paths (tested) |
-| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Camera.Blur`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window and its background blur, and the neutral state machine (tested) |
-| Recording | `Knips.Recording` | Target → filter + geometry → writer → stream; progress; report |
 | CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `render`, `export`, `displays`, `windows`, `mcp`, `probe`; SIGINT/SIGTERM → `StopRequested` |
+| MCP | `Knips.Mcp`, `Knips.Mcp.Params` | The tool surface over pascal-mcp-sdk's stdio transport; the neutral half is the tool table, argument mapping, and default paths (tested) |
 | App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Camera.Blur`, `Knips.App.Live`, `Knips.App.Hotkey`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window and its background-blur pipeline, the live-effect animator, the global stop hotkey, and the neutral state machine (tested) |
 | Recording | `Knips.Recording`, `Knips.Recording.LiveMath`, `Knips.Recording.CursorMath`, `Knips.Recording.CursorOverlay`, `Knips.Recording.Heartbeat`, `Knips.Recording.Sidecar`, `Knips.Recording.Recovery` | Target → filter + geometry → writer → stream; progress; report. The live-effect, big-cursor and idle-heartbeat arithmetic are neutral and tested; the overlay is the Darwin half that makes the sprite and blits it. The event sidecar is the neutral, tested file format (docs/event-sidecar.md) and recovery is the Darwin pass that finishes off a take whose process died |
 | Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
 | Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.MovieTrim`, `Knips.Export.Pipeline`, `Knips.Export.Render`, `Knips.Export.CursorEffect` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; AVAssetExportSession passthrough trim; the shared GIF/APNG pipeline; the raw-take → deliverable render (video re-encoded, audio copied); the pointer drawn back in at render/export time from the sidecar |
-| Export (neutral) | `Knips.Export.Gif`, `Knips.Export.Apng`, `Knips.Export.Bitmap`, `Knips.Export.Timing`, `Knips.Export.SizeEstimate`, `Knips.Export.ZoomTrack` | Median cut, dithering, LZW, GIF89a writer; APNG chunks, PNG filters, paszlib; BGRA buffer + resampling; frame-delay planning; the pre-export size estimate and the in-flight projection; the post-recording Zoom on Click replayed from the click track (all tested) |
+| Export (neutral) | `Knips.Export.Gif`, `Knips.Export.Apng`, `Knips.Export.Bitmap`, `Knips.Export.Timing`, `Knips.Export.SizeEstimate`, `Knips.Export.ZoomTrack`, `Knips.Export.Cadence` | Median cut, dithering, LZW, GIF89a writer; APNG chunks, PNG filters, paszlib; BGRA buffer + resampling; frame-delay planning; the pre-export size estimate and the in-flight projection; the post-recording Zoom on Click replayed from the click track; and the frame-synthesis arithmetic — where a render may put a frame the capture never made, whether that frame would be a different picture from the one before it, and how much one gap may ever cost. `Knips.Export.Cadence` depends on nothing at all and both `Knips.Export.Render` and `Knips.Export.Pipeline` consume it, so an MP4 and a GIF fill the same gaps the same way (all tested) |
 | ObjC | `Knips.ObjC.Runtime`, `Knips.ObjC.TypeEncoding` | Class assembly via libobjc; method type encodings (tested) |
+| RTL | `Knips.ThreadManager` | Pthread-backed locks and events, installed directly after `cmem` in the program's uses clause so the no-cthreads build survives `Classes`/`SysUtils` init and finalization; creates no threads ([Threading model](#threading-model)) |
 | Options | `Knips.Options` | Neutral option model, validation, derived values (tested) |
 | Vendored | `source/capture/*` | CoreMedia/CoreVideo/VideoToolbox/GCD, ScreenCaptureKit externals, pthread mutex |
 
@@ -136,6 +139,18 @@ the recording layer knows about the CLI. The one edge that crosses
 sideways is `Knips.App.Playback` → `Knips.Export.Pipeline`: the
 playback window's *Export as GIF…* button runs the same session the
 `export` subcommand does, rather than a second implementation of it.
+
+One edge reaches *down* out of the capture layer, and it is worth a
+sentence because it looks backwards: `Knips.Capture.Stream` uses
+`Knips.Recording.LiveMath` for `LiveSourceRectEpsilon` and
+`LiveRectsClose` — the tolerance and the comparison that decide whether
+a live source-rect update is worth an `updateConfiguration:` round trip.
+LiveMath is neutral and depends on nothing but `Knips.Options`, so this
+costs the capture layer no dependency it did not already have. It is
+there because the number existed twice: a documented, unit-tested
+constant that no production code read, and a private copy four lines
+long doing the actual work. One of them had to be the source of truth,
+and the tested one was the obvious choice.
 
 ## The MCP server
 
@@ -524,8 +539,10 @@ frames they pick or how long each is shown.
         ▼
   BgraResample to --width (integer box reduce, then bicubic)
         │
-        ├─ .gif  pass 1 ─▶ TGifQuantizer: exact-colour histogram over ≤32
-        │                   sampled frames ─▶ median cut ─▶ one global palette
+        ├─ .gif  pass 1 ─▶ TGifQuantizer: exact-colour histogram over the
+        │                   frames TGifPaletteSampler takes — a self-thinning
+        │                   stride, so the sample count grows with the log of
+        │                   the stream ─▶ median cut ─▶ one global palette
         │        pass 2 ─▶ TGifEncoder: Floyd–Steinberg ─▶ changed rectangle
         │                   ─▶ LZW twice, opaque and transparent, keep the
         │                       shorter ─▶ GIF89a + NETSCAPE2.0 loop
@@ -957,6 +974,15 @@ rejects.
   no exceptions or `try..finally` (no `cthreads`, so the exception frame
   chain is process-global), no `WriteLn`, no managed-type writes outside
   `FLock`.
+- **The camera's blur queue** (`knips.camera.blur`) is the fourth, and the
+  only one this program creates that is not ScreenCaptureKit's. It has the
+  same standing — a serial GCD queue the RTL never adopts — and the same
+  discipline, with one deliberate difference: the *heavy* work runs there,
+  because Vision and CoreImage have nowhere else to run in a process with
+  no `cthreads` and no other queues of its own. Their allocations are
+  Objective-C's, not the RTL's, which is what makes that safe. It writes
+  the camera window's layer and never the movie; see
+  [Background blur](#background-blur).
 - **Why no cthreads:** the prototype documented cthreads' signal handler
   intercepting a benign SIGSEGV raised inside CoreMedia's XPC
   deserialisation of SCK sample buffers. lantaarn escaped it by not using
@@ -1070,12 +1096,15 @@ path/width/percentage arithmetic; it is platform-neutral and has a
 co-located suite, so the only untested part of the app is the Cocoa
 plumbing.
 
-Six more classes are built through `Knips.ObjC.Runtime`, none of them
-an `objcclass`:
+Beyond the stream output object, the runtime-built classes are the
+following — none of them an `objcclass`, and `EnsureAppClasses` registers
+every one of them up front so `knips probe` fails on a bad
+`class_addMethod` rather than the user finding out from a window that
+will not work:
 
 | Runtime class | Superclass | Methods |
 | --- | --- | --- |
-| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `recordWindow:`, `recordLastRegion:`, `toggleSystemAudio:`, `toggleMicrophone:`, `toggleZoomOnClick:`, `toggleFollowMouse:`, `liveTick:`, `cameraRideTick:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `toggleCamera:`, `toggleCameraShape:`, `toggleCameraBlur:`, `restoreCamera:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:`, `exportGif:`, `revealRecording:`, `closePlayback:`, `menuNeedsUpdate:` |
+| `KnipsAppTarget` | `NSObject` | `recordRegion:`, `recordDisplay:`, `recordWindow:`, `recordLastRegion:`, `toggleSystemAudio:`, `toggleMicrophone:`, `toggleFollowMouse:`, `toggleEffectZoom:`, `toggleEffectSmoothCursor:`, `toggleEffectBigCursor:`, `reexportRecording:`, `recoverTakes:`, `liveTick:`, `cameraRideTick:`, `menuNeedsUpdate:`, `exportGif:`, `revealRecording:`, `closePlayback:`, `stopRecording:`, `cancelSelection:`, `revealRecordings:`, `quitKnips:`, `timerFired:`, `startPending:`, `stopPending:`, `toggleCamera:`, `toggleCameraShape:`, `toggleCameraBlur:`, `restoreCamera:`. The three effect actions (`toggleEffectZoom:`, `toggleEffectSmoothCursor:`, `toggleEffectBigCursor:`) and the four playback-window ones (`reexportRecording:`, `exportGif:`, `revealRecording:`, `closePlayback:`) are *declared* in `Knips.App.Playback` and registered here, because there is one target and the playback window's buttons and pull-down point at it like everything else; `recoverTakes:` is not a menu action at all but the deferred one-shot that finishes off a take whose process died, fired one turn of the run loop after the status item is up (see [Never lose a take](#never-lose-a-take)). `toggleZoomOnClick:` is gone — Zoom on Click became a render-time effect, so it is `toggleEffectZoom:` now |
 | `KnipsOverlayView` | `NSView` | `drawRect:`, `mouseDown:`, `mouseDragged:`, `mouseUp:`, `keyDown:`, `acceptsFirstResponder` |
 | `KnipsOverlayWindow` | `NSWindow` | `canBecomeKeyWindow` (a borderless window answers NO, and then Esc never reaches the view) |
 | `KnipsCameraView` | `NSView` | `acceptsFirstMouse:` (Knips is an Accessory app, so without it the first click on the camera window is eaten as the activating click and dragging takes two); `mouseDown:`, `mouseDragged:`, `mouseUp:` — the drag, done here rather than by `movableByWindowBackground` so the corner snap has a drag end; `snapTick:` — one step of the snap ease, so the ease needs no nested run loop and no second runtime class |
@@ -1140,13 +1169,28 @@ recording runs without one, and rule 1 means there was nothing to exclude
 anyway. Display and window recordings get no frame.
 
 **The playback window** (`Knips.App.Playback`). A finished recording
-opens in an ordinary titled window with an `AVPlayerView` and three
-buttons whose target is the same `KnipsAppTarget`. *Export as GIF…* runs
+opens in an ordinary titled window with an `AVPlayerView` and a bar under
+it: four buttons laid out right to left — *Close*, *Reveal in Finder*,
+*Export as GIF…*, *Re-export* — and at the far left end the **Effects**
+pull-down, all of them targeted at the same `KnipsAppTarget`. The
+pull-down is an `NSPopUpButton` in pull-down mode, so item 0 is the
+button's own title and is never chosen; under it sit *Zoom on Click*,
+*Smooth Cursor* and *Big Cursor*, each flipping one member of the
+window's `TExportEffects`, plus a hidden inert item that says why an
+effect is unavailable when it is. `autoenablesItems` is off on the menu
+*and* on the control, because whether an effect applies to *this take* —
+does it still have a raw take beside it, does the sidecar carry the track
+— is not a question AppKit's responder chain can answer, and a control
+that decided for itself would undo every `setEnabled:` the refresh makes.
+The bar is why the content width went from 720 to 860 points: at 720 the
+four buttons and the pull-down overlapped at the default size, and a bar
+that only fits once the window has been dragged wider looks broken on
+first sight. *Export as GIF…* runs
 `TExportSession` inline on the main thread — nothing here may pump a
 nested run loop, so the window is unresponsive while it works and the
 title carries the progress instead (`Exporting… 42%`, from the pipeline's
-new per-frame `OnProgress`). The buttons are disabled first, which is
-what makes re-entry impossible. Closing is refused for the same reason,
+new per-frame `OnProgress`). The four buttons and the pull-down are
+disabled first, which is what makes re-entry impossible. Closing is refused for the same reason,
 in two places that between them cover every route: `CommandClose` — the
 Close button, Quit, a recording about to start, `Show` replacing the
 window — checks the flag itself, and `windowShouldClose:` answers NO to
@@ -2330,7 +2374,7 @@ mid-zoom.
 - **`Knips.App.Live`** is the animator: a plain Pascal object with no
   Objective-C class and no timer of its own. `Knips.App` owns a 30 Hz
   `NSTimer` on the same `KnipsAppTarget` every other action goes through
-  (`liveTick:`), so the feature adds no seventh runtime class. The timer
+  (`liveTick:`), so the feature adds no runtime class of its own. The timer
   is added to `NSRunLoopCommonModes` as well, or dragging the camera
   window would freeze a zoom half way.
 - **`TScreenStream.UpdateSourceRect`** rebuilds the configuration through
@@ -2627,14 +2671,19 @@ pixels and changes nothing but the timing. The take goes on keeping pace
 with the wall clock at two frames a second of stillness.
 
 `FinishCapture` emits one more after the stream has stopped, stamped at
-the stop instant itself and gated at one frame interval rather than the
-heartbeat interval. That is what makes the movie's own duration equal to
-the elapsed host time rather than merely close to it: measured, a 13.972 s
+the stop instant and gated at one frame interval rather than the
+heartbeat interval. That is what brings the movie's own duration to the
+elapsed host time rather than merely close to it: measured, a 13.972 s
 take reported a 13.972 s movie, where the same shape of take before the
-change came out 0.5 s short. "Equal" is exact to within that one-frame
-gate — up to 33 ms at 30 fps, and up to a full second at `--fps=1`,
-always short and never long, so no event can land past the end of the
-file.
+change came out 0.5 s short. The gate is the bound, and it is one-sided:
+the movie can be up to one frame interval short of the stop — 33 ms at
+30 fps, a full second at `--fps=1` — and never longer than it, so an
+event at the very end of a take can sit past the last frame by that much
+and never by more. The stop instant is itself exact only to two reads of
+the host clock microseconds apart — one taken to end the take, one taken
+to stamp the beat — rather than exact by construction; at these gate
+sizes that difference does not show, but it is a measurement and not an
+identity.
 
 **Where the decision lives.** `Knips.Recording.Heartbeat` is neutral and
 tested — is one due, what stamp should it carry, and what floor goes under
@@ -2766,6 +2815,21 @@ movie fragments the recovery pass re-muxes. A take killed with `SIGKILL`
 after four seconds of motion and eight of stillness recovered as **2.0 s**
 before the change and **10.5 s** after — the loss is now the unfinished
 last fragment and nothing else. See [Never lose a take](#never-lose-a-take).
+
+**What a repeat carries with it.** A heartbeat frame is the last
+delivered frame's own pixels, and that includes anything the capture
+queue composited into them. [Big Cursor](#big-cursor) is the one thing
+that does: it draws its sprite into a frame as that frame arrives, so a
+repeat carries an enlarged pointer standing exactly where it stood when
+that frame was captured. Record a still screen with `--big-cursor` and
+the drawn pointer is frozen for the whole idle stretch while the sidecar
+beside the movie records it moving. Measured: a 7.6 s take, 16 frames, 15
+of them heartbeats, and the sprite composited into none of those 15. The
+file is correct and nothing failed, so `BigCursorIdleWarning` says so as
+a note — and points at the raw-take route, where the pointer is drawn at
+render time from a track that never goes idle. The full account, and why
+re-blitting the sprite onto heartbeat frames was not done, is under
+[Big Cursor](#big-cursor).
 
 **Audio.** System audio keeps flowing while the video is still, so before
 the change a still take produced a file whose audio track ran 11.3 s
@@ -2924,6 +2988,63 @@ re-choosable, after the take exists.
 The record-time path below is still exactly what `knips record
 --big-cursor` does, and the capture-queue rules it is written to still
 apply there. What changed is who asks for it.
+
+**Two sprite builders, on purpose.** `TCursorOverlay.RenderSprite`
+(`Knips.Recording.CursorOverlay`) and `TExportCursor.RenderSprite`
+(`Knips.Export.CursorEffect`) are near-identical Quartz routines:
+`+[NSCursor arrowCursor]`, the image's TIFF/bitmap representation, a
+`CGBitmapContextCreate` at premultiplied BGRA over a `GetMem` block, one
+`CGContextDrawImage` at the scaled extent. What differs is not a
+parameter but the **kernel**: the record-time one draws at the
+*capture's* scale — `PixelWidth / BaseRect.width`, the recording's own
+pixels per point — into a sprite the capture queue then blits into every
+frame as it arrives; the export-time one draws at the *output's* scale —
+`OutputWidth / Header.BaseWidth`, times the effect's magnification — into
+a sprite the render and the GIF pipeline composite into already-scaled
+frames, so a 2× recording exported at half width gets a one-times pointer
+rather than a two-times one. Unifying them would mean a third unit owning
+a Quartz drawing routine that neither layer could reach without importing
+it, for a saving of about thirty lines, and it would fight the divergence
+the two are entitled to — a different magnification rule, a different
+colour space at export. So the duplication stands, and both functions
+carry a comment saying so. **They must be changed together**: a fix to
+one is a fix to the other, and those two comments are the only thing
+keeping them in step.
+
+**The seam with the idle heartbeat.** Big Cursor composites its sprite
+into a frame **on the capture queue, as that frame arrives** — so it
+touches only frames ScreenCaptureKit actually delivered. The
+[idle heartbeat](#the-idle-heartbeat) repeats the *last delivered frame*
+about twice a second while nothing on screen changes, and a repeat is the
+same pixels: enlarged pointer included, at the position it had when that
+frame was captured. On a take of a still screen the drawn pointer is
+therefore frozen for the whole idle stretch, even though the sidecar's
+track beside the movie shows it moving the entire time. Measured: a 7.6 s
+take came back with 16 frames, 15 of them heartbeats, and the sprite
+composited into none of those 15.
+
+Nothing failed and the file is correct, so knips reports this as a
+**note** rather than an error — `Knips.Options.BigCursorIdleWarning`,
+which fires when the heartbeat's share of a take's frames reaches
+`BigCursorIdleShare` (a half, chosen rather than tuned: below it the note
+would fire on ordinary takes that merely paused, and it is a note about a
+whole recording and not about a moment in one). The CLI's `record`
+summary prints it on stderr beside the audio-silence notes and leaves the
+exit code alone; the menu-bar app puts it in `~/Library/Logs/Knips.log`
+and the menu's *Last error* slot. The note names both counts and points
+at the way out: the sidecar has the real track, so recording with
+`--smooth-cursor` and running `knips render` over the take draws a
+pointer that keeps moving.
+
+Re-blitting the sprite onto heartbeat frames was considered and **not**
+done. The heartbeat appends from the main thread under the writer's
+`FLock`; the compositor runs on the capture queue. Doing it there means
+either a second blit path on the main thread or moving that work onto the
+capture queue — new cross-thread state on a path whose whole discipline
+is having as little of it as possible — for a case the raw-take route
+already solves properly, by drawing the pointer at render time from a
+track that never went idle. Recorded as future work rather than as a
+defect.
 
 A sprite that cannot be made is never a reason to fail a recording. The
 geometry's `ShowsCursor` is put back before the stream configuration is

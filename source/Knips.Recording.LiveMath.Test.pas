@@ -16,7 +16,6 @@ program Knips.Recording.LiveMath.Test;
 {$I Knips.inc}
 
 uses
-  Math,
   SysUtils,
 
   Knips.Options,

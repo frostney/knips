@@ -58,8 +58,8 @@ uses
   ,
   Knips.Capture.ShareableContent,
   Knips.Export.MovieTrim,
-  Knips.Export.Pipeline,
   Knips.Export.MovieWriter,
+  Knips.Export.Pipeline,
   Knips.Recording
   {$ENDIF};
 
@@ -568,6 +568,13 @@ var
 begin
   {$IFDEF DARWIN}
   if not BuildMcpExportOptions(AArguments, efMovie, Options, Error) then
+    Exit(KnipsToolError(Error));
+  // Exactly as RunExport does, and for the same reason its comment
+  // gives: this tool's own schema promises to refuse an existing output
+  // unless `overwrite` says otherwise, and a trim that destroyed the
+  // file anyway was the one tool in this server breaking that promise.
+  if not McpMayWriteRecording(AArguments, Options.OutputPath,
+    FileExists(Options.OutputPath), Error) then
     Exit(KnipsToolError(Error));
   Session := TMovieTrimSession.Create(Options);
   try

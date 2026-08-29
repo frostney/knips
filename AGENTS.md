@@ -133,6 +133,12 @@ and a GIF fill the same gaps the same way.
 only on `Knips.App.State` and MacOSAll. `Knips.Recording.CursorOverlay`
 sits beside `Knips.Recording` and consumes `Knips.Recording.CursorMath`
 the way `Knips.App.Live` consumes `Knips.Recording.LiveMath`.
+`Knips.Capture.Stream` reaches down to `Knips.Recording.LiveMath` too,
+for one thing only: the source-rect epsilon and the rectangle comparison
+that decides whether a live update is worth an `updateConfiguration:`
+round trip. That number used to exist twice — a documented, tested
+constant nothing production read, and a private copy doing the work —
+and one of them had to be the source of truth.
 `Knips.Recording.Heartbeat` sits beside them and depends on nothing at
 all; `Knips.Recording` reads the clock and asks it whether the movie has
 fallen behind, and `Knips.Export.MovieWriter` carries the answer out

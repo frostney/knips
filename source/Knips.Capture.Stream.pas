@@ -112,6 +112,9 @@ type
     // FLastSentRect records a rectangle the stream never adopted.
     FFailuresAtLastSend: Int64;
     FConsecutiveFailures: Integer;
+    // stopCaptureWithCompletionHandler: never called back inside the
+    // timeout. See Stop.
+    FStopUnconfirmed: Boolean;
     // Called on the capture queue by StreamOutputSampleBuffer.
     procedure DeliverSample(ASampleBuffer: CMSampleBufferRef;
       AOutputType: NSInteger);
@@ -145,6 +148,12 @@ type
     function UpdateSourceRect(const ARect: CGRect): Boolean;
     property Active: Boolean read FActive;
     property LastError: string read FLastError;
+    // True when the stop was asked for and ScreenCaptureKit never
+    // confirmed it. Not a failure — the teardown runs regardless — but
+    // the one state in which frames may still have been arriving while
+    // the writer was being finalised, so the recording says so rather
+    // than reporting a clean stop.
+    property StopUnconfirmed: Boolean read FStopUnconfirmed;
     property OnSample: TSampleHandler read FOnSample write FOnSample;
     // False when this stream has no rectangle to move, when the running
     // framework has no updateConfiguration:, and from the moment
@@ -231,7 +240,8 @@ implementation
 {$IFDEF DARWIN}
 
 uses
-  Knips.ObjC.TypeEncoding;
+  Knips.ObjC.TypeEncoding,
+  Knips.Recording.LiveMath;
 
 type
   // An external binding, not a class of ours (ADR-0002 allows exactly
@@ -287,10 +297,6 @@ const
   // purpose: this is a property change on a running stream, not a capture
   // start, so it either lands in milliseconds or it is not going to.
   PendingUpdateSlices = 300;
-  // Points. A source rectangle within this of the one already sent is not
-  // worth an updateConfiguration: round trip — the animator lands a
-  // fraction of a point from its target for many ticks after it settles.
-  SourceRectEpsilonPoints = 0.5;
   // How many refusals in a row before the live effects give up for the
   // rest of the recording. The caller retries about twenty times a
   // second, so a framework that has decided to say no would otherwise be
@@ -789,15 +795,21 @@ begin
   // has settled: the animator keeps ticking for the whole recording.
   // Skipped entirely after a refusal — the rectangle it would compare
   // against is one the stream never adopted.
+  //
+  // The tolerance and the comparison both come from
+  // Knips.Recording.LiveMath — LiveSourceRectEpsilon and LiveRectsClose
+  // — rather than from a private copy of the number here. There were two
+  // 0.5s in the tree saying the same thing, one of them documented and
+  // unit-tested with nothing production reading it and the other doing
+  // the actual work four lines at a time. One of them had to be the
+  // source of truth, and the tested one is the obvious choice.
   if not Refused and FHasSentRect
-    and (Abs(ARect.origin.x - FLastSentRect.origin.x)
-    <= SourceRectEpsilonPoints)
-    and (Abs(ARect.origin.y - FLastSentRect.origin.y)
-    <= SourceRectEpsilonPoints)
-    and (Abs(ARect.size.width - FLastSentRect.size.width)
-    <= SourceRectEpsilonPoints)
-    and (Abs(ARect.size.height - FLastSentRect.size.height)
-    <= SourceRectEpsilonPoints) then
+    and LiveRectsClose(
+    LiveRect(ARect.origin.x, ARect.origin.y,
+    ARect.size.width, ARect.size.height),
+    LiveRect(FLastSentRect.origin.x, FLastSentRect.origin.y,
+    FLastSentRect.size.width, FLastSentRect.size.height),
+    LiveSourceRectEpsilon) then
     Exit(True);
   // Coalescing, such as it is: drop this one and leave FLastSentRect
   // alone, so the next tick — a thirtieth of a second away — sends a
@@ -969,6 +981,20 @@ begin
     CFRunLoopRunInMode(kCFRunLoopDefaultMode, RunLoopSliceSeconds, False);
     Inc(WaitCount);
   end;
+  // The stop is not confirmable, so this is not a failure and the
+  // teardown below runs either way: whatever the stream is doing, the
+  // owner has to be detached and the object released or a late callback
+  // finds a freed session. But it is not nothing, either — an
+  // unconfirmed stop is the one state in which frames may still be
+  // arriving while the writer is being finalised, which is exactly the
+  // shape of a take that finishes short. Recorded rather than swallowed,
+  // so FinishCapture can say so.
+  if not GStopReady then
+    FStopUnconfirmed := True;
+  if (not GStopReady) and (FLastError = '') then
+    FLastError := 'the capture did not confirm its stop within '
+      + IntToStr(StopTimeoutSlices) + ' run-loop slices; the movie was '
+      + 'finalised anyway and may be a frame or two short';
   // Detach before the stream goes away so a late callback finds no owner.
   if FOutput <> nil then
     SetPointerIvar(FOutput, OwnerIvarName, nil);

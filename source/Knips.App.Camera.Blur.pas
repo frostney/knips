@@ -300,8 +300,18 @@ type
     function MeasureOffline(AWidth, AHeight, AFrames: Integer;
       out AError: string): Boolean;
     property Running: Boolean read FRunning;
-    // Which mask Vision is asked for, and how often. Both are read on
-    // the video queue, so both are set before Start and left alone.
+    // Which mask Vision is asked for, and how often, and how hard the
+    // background is blurred. All three are read on the video queue, so
+    // all three are set before Start and left alone.
+    //
+    // **Nothing in knips writes the last two.** They are the tuning
+    // point, kept assignable rather than frozen into the constants
+    // below, and the only writers today are a debugger and a
+    // hand-edited probe — the same standing as TCameraPreview.Blur's
+    // own note about who reads it. Raising SegmentationStride above 1
+    // has a documented consequence in HandleSegmentation (the reused
+    // mask would track the newest frame), which is exactly why the knob
+    // is here to be found rather than buried.
     property Quality: TCameraBlurQuality read FQuality write FQuality;
     property SegmentationStride: Integer read FStride write FStride;
     property Radius: Double read FRadius write FRadius;

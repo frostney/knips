@@ -4,13 +4,13 @@
 
 - **The neutral core already runs on Linux.** `tools/linux-ci.sh` builds
   a Debian bookworm container with FPC 3.2.2 and the real lwpt 0.7.0
-  Linux binary, and runs all ten `*.Test.pas` suites plus `lwpt build`
+  Linux binary, and runs all sixteen `*.Test.pas` suites plus `lwpt build`
   plus `lwpt format --check` — green on `linux/arm64` and `linux/amd64`.
   The Linux binary is a working `knips` that serves MCP and refuses
   capture with exit 3.
 - **The whole program cross-compiles for 64-bit Windows.**
   `tools/win64-cross.sh` bootstraps an FPC 3.2.2 `x86_64-win64` cross
-  compiler inside a container and links `knips.exe` plus all ten
+  compiler inside a container and links `knips.exe` plus all sixteen
   suites as PE32+ binaries. Compile-and-link is the gate; nothing about
   Windows *behaviour* is proven.
 - **A port is a parallel backend, not an abstraction**
@@ -46,7 +46,13 @@ XDG's default for `XDG_VIDEOS_DIR` is `~/Videos`.
 | `Knips.Options` | option model, validation, region parsing, bit-rate advice |
 | `Knips.App.State` | app state machine, titles, paths, selection maths, window-menu filter, audio-source composition, camera placement |
 | `Knips.Recording.LiveMath` | rect clamping, dead zone, easing, which effects a target can have |
+| `Knips.Recording.CursorMath` | screen point → frame pixel, sprite clipping, the premultiplied blit |
+| `Knips.Recording.Heartbeat` | whether the movie has fallen behind the host clock, and the repeated frame's stamp |
+| `Knips.Recording.Sidecar` | the JSON Lines event format: writer, reader, interpolation rule |
 | `Knips.Mcp.Params` | MCP tool table, JSON argument mapping, default paths |
+| `Knips.Export.ZoomTrack` | post-recording Zoom on Click replayed from the click track |
+| `Knips.Export.Cadence` | where a render may synthesise a frame, and what one gap may cost |
+| `Knips.Export.SizeEstimate` | the pre-export size range and the in-flight projection |
 | `Knips.Export.Bitmap` | BGRA buffer, box/bilinear resampling |
 | `Knips.Export.Gif` | histogram, median cut, dithering, LZW |
 | `Knips.Export.Apng` | acTL/fcTL/fdAT, PNG filters, paszlib |
@@ -411,11 +417,11 @@ Two facts worth knowing before touching `tools/ci/Dockerfile.win64`:
 | Claim | Provable here? | How |
 | --- | --- | --- |
 | Neutral core compiles on Linux | **yes** | `tools/linux-ci.sh`, both architectures |
-| Neutral suites pass on Linux | **yes** | 10/10 green in-container |
+| Neutral suites pass on Linux | **yes** | all sixteen green in-container |
 | `knips` builds and runs on Linux | **yes** | `lwpt build`, `--version`, `record` → exit 3 |
 | Formatter agrees on Linux | **yes** | `lwpt format --check` in-container |
 | Everything compiles and links for win64 | **yes** | `tools/win64-cross.sh`, PE32+ verified |
-| Neutral suites behave Windows-shaped | **partly** | `tools/wine-smoke.sh` — 10/10 green under Wine; Wine is not Windows, but see below |
+| Neutral suites behave Windows-shaped | **partly** | `tools/wine-smoke.sh` — all sixteen green under Wine; Wine is not Windows, but see below |
 | XSHM capture grabs a frame | **yes — done** | `source/capture-linux/`, Xvfb, in the gate |
 | GIF written from a real Linux capture | **yes — done** | the spike encodes its frame with `Knips.Export.Gif` |
 | Anything about Wayland, portals, PipeWire | **no** | needs a real session |
@@ -448,22 +454,23 @@ BuildMcpRecordingOptions › the output path comes back absolute
 Read the first two the right way round: the *actual* value is the correct
 one. `RecordingsDirectory` already builds its path with
 `IncludeTrailingPathDelimiter` and `PathDelim`
-(`Knips.App.State.pas:602`), so it produced `\` on Windows exactly as it
+(`Knips.App.State.pas`), so it produced `\` on Windows exactly as it
 should; `ExpandFileName` correctly resolved `/tmp/default.mp4` to Wine's
 `Z:\tmp\default.mp4`. What failed is the *expected* side — six stale
 POSIX literals baked into the fixtures.
 
 The third is a bad predicate rather than a stale literal:
-`Recording.OutputPath[1] = PathDelim` (`:624`, and the same at `:898`)
-asks whether the first character is a separator. On Windows an absolute
-path starts with a drive letter, so that check fails by construction —
+`Recording.OutputPath[1] = PathDelim`, twice in
+`Knips.Mcp.Params.Test.pas`, asks whether the first character is a
+separator. On Windows an absolute path starts with a drive letter, so that
+check fails by construction —
 and no production code performs it. `Knips.Mcp.Params` calls
 `ExpandFileName` and trusts the RTL, which is right.
 
 So the tally was **six stale test literals plus two wrong test
 predicates**, and one genuine production item that only surfaced because
 the suite was run: `MoviesFolderName = 'Movies'`
-(`Knips.App.State.pas:29`). A Windows recording belongs in `Videos`, and
+(`Knips.App.State.pas`). A Windows recording belongs in `Videos`, and
 so does a Linux one — that is a product decision, not a separator bug,
 and it was the only line of shipped code the Wine run indicted. (One
 kindred line escaped only because no test asserts tool-description
@@ -494,9 +501,9 @@ unit-list commentary in the header comment above `uses`.
 That is a smaller finding than it first looked, and worth stating plainly:
 the neutral core's path handling was already portable. What the Wine smoke
 actually earns is the *test suite's* portability — a compiler that happily
-linked ten Windows executables had nothing to say about any of it, which
-is the argument for keeping the smoke around even though Wine is not
-Windows.
+linked a Windows executable for every suite had nothing to say about any of
+it, which is the argument for keeping the smoke around even though Wine is
+not Windows.
 
 ### Needs a device
 
@@ -549,7 +556,7 @@ checked off.
    stem) added where a literal had only implied the claim; and the two
    `OutputPath[1] = PathDelim` predicates became a local `IsRootedPath`
    helper that accepts both families' roots and carries its own test.
-   `MoviesFolderName` (`Knips.App.State.pas:29`) is now `Movies` under
+   `MoviesFolderName` (`Knips.App.State.pas`) is now `Movies` under
    `{$IFDEF DARWIN}` and `Videos` elsewhere — the unit's one conditional,
    a constant selected by target rather than a second code path. The path
    helpers themselves already used `PathDelim` and needed no change.

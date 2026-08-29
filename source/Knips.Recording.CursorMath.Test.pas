@@ -70,6 +70,7 @@ type
     procedure TestHotSpotScalesWithTheSprite;
     procedure TestHotSpotIsClampedIntoTheSprite;
     procedure TestWindowCaptureGetsNoBigCursor;
+    procedure TestWindowCaptureGetsNoSmoothCursor;
   end;
 
 { ---------------------------------------------------------------- helpers }
@@ -540,6 +541,8 @@ begin
     TestHotSpotIsClampedIntoTheSprite);
   Test('a window recording gets no Big Cursor',
     TestWindowCaptureGetsNoBigCursor);
+  Test('nor a smooth one, for the same reason',
+    TestWindowCaptureGetsNoSmoothCursor);
 end;
 
 procedure TSpriteMetricTests.TestExtentIsPointsTimesScaleTimesMagnification;
@@ -588,6 +591,18 @@ begin
   Expect<Boolean>(ResolveBigCursor(ctkDisplay, False)).ToBe(False);
   Expect<Boolean>(ResolveBigCursor(ctkWindow, True)).ToBe(False);
   Expect<Boolean>(ResolveBigCursor(ctkWindow, False)).ToBe(False);
+end;
+
+// The same four, for the other half of the pair. They are deliberately
+// separate functions — one may grow a case the other does not — and
+// separate functions want separate tests, or the second is only as
+// covered as somebody assumed.
+procedure TSpriteMetricTests.TestWindowCaptureGetsNoSmoothCursor;
+begin
+  Expect<Boolean>(ResolveSmoothCursor(ctkDisplay, True)).ToBe(True);
+  Expect<Boolean>(ResolveSmoothCursor(ctkDisplay, False)).ToBe(False);
+  Expect<Boolean>(ResolveSmoothCursor(ctkWindow, True)).ToBe(False);
+  Expect<Boolean>(ResolveSmoothCursor(ctkWindow, False)).ToBe(False);
 end;
 
 begin

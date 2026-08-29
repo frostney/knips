@@ -35,7 +35,11 @@ uses
 {$linkframework CoreVideo}
 
 const
-  // AVAssetReaderStatus
+  // AVAssetReaderStatus, verified against AVAssetReader.h. Transcribed
+  // whole though only two of the five are compared against: the unused
+  // names are documentary, and they are what let somebody reading a
+  // failure put the number back against a word. See
+  // Knips.Capture.ScreenCaptureKit's SCFrameStatus block.
   AVAssetReaderStatusUnknown = 0;
   AVAssetReaderStatusReading = 1;
   AVAssetReaderStatusCompleted = 2;

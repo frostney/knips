@@ -64,6 +64,14 @@ const
   // never crosses it carried nothing anybody will hear.
   AudioSilenceThreshold = 0.001;
 
+  // Above this share of a take's frames being idle heartbeats, the
+  // repeats *are* the take, and anything the capture queue composited
+  // into a frame is standing still for most of the movie. Half is chosen
+  // rather than tuned: below it the note would fire on ordinary takes
+  // that merely paused, and it is a note about a whole recording, not
+  // about a moment in one.
+  BigCursorIdleShare = 0.5;
+
   // GIF delays are whole centiseconds, so anything above 50 fps cannot
   // be represented and 20 is what Kap-sized clips actually want. APNG
   // could go faster, but sharing the bound keeps one --fps rule.
@@ -302,6 +310,51 @@ function AudioLevelNote(AEnabled: Boolean; ASamples, AInspected: Int64;
 function AudioSilenceWarning(const ASourceName: string; AEnabled: Boolean;
   ASamples, AInspected: Int64; APeak: Double): string;
 
+// What to say after the stop when Big Cursor met the idle heartbeat.
+// '' when there is nothing to say, which is the usual case.
+//
+// The two features cross at a seam neither of them owns. Big Cursor
+// composites its sprite into a frame **on the capture queue, as that
+// frame arrives**; the idle heartbeat repeats the last delivered frame
+// about twice a second while nothing changes, and a repeat is the same
+// pixels — pointer included, at the position it had when that frame was
+// captured. So on a take of a still screen the enlarged pointer is
+// frozen for the whole idle stretch even though the sidecar's track
+// shows it moving. Measured: a 7.6 s take came back with 16 frames, 15
+// of them heartbeats, and the sprite composited into none of them.
+//
+// Nothing is wrong with the file and nothing failed, which is why this
+// is a note and not an error — but somebody who asked for an enlarged
+// pointer and got a still one deserves to be told which of the two
+// features produced it, and that the raw-take route does not have the
+// problem. See docs/architecture.md, "Big Cursor" and "The idle
+// heartbeat".
+function BigCursorIdleWarning(AEnabled: Boolean;
+  ACursorFrames, AHeartbeatFrames, AAppendedFrames: Int64): string;
+
+// One line for a caller that has one line, out of the three separate
+// answers a render or an export can come back with.
+//
+// The three are kept apart in the reports because they are about
+// different things and a caller offering one effect wants that effect's
+// own reason. This is the summary for the places that cannot show three
+// — the menu's Last-error slot, the playback window's title — and the
+// ORDER is the whole content of the function:
+//
+//   1. the framing note, because it is the only one of the three about
+//      the PIXELS being other than they should be. The other two say an
+//      effect did not happen; this one says some frames show something
+//      the take could not account for.
+//   2. the cursor, because a missing pointer is what somebody looking at
+//      the file will notice first.
+//   3. the zoom.
+//
+// It used to be first-writer-wins over a single field, which made the
+// order an accident of which check ran first: a take whose zoom was
+// refused for a cosmetic reason could hide the framing note entirely.
+function EffectNoteSummary(const AFramingNote, ACursorNote,
+  AZoomNote: string): string;
+
 // Container from the output path's extension; False for unknown ones.
 function ContainerForPath(const APath: string;
   out AContainer: TOutputContainer): Boolean;
@@ -334,19 +387,12 @@ function AlignDimension(AValue: Integer): Integer; inline;
 function SuggestedBitRate(APixelWidth, APixelHeight,
   AFramesPerSecond: Integer): Integer;
 
-function ContainerFileType(AContainer: TOutputContainer): string;
-
 function DefaultExportEffects: TExportEffects;
 
 function DefaultExportOptions: TExportOptions;
 
 // Whether this effects record asks for a pointer to be drawn at all.
 function EffectsDrawCursor(const AEffects: TExportEffects): Boolean;
-
-// Whether it asks for anything at all beyond what the recording already
-// decided. A render with nothing to apply is a copy, and this is the
-// question that says so.
-function EffectsAreDefault(const AEffects: TExportEffects): Boolean;
 
 function ExportCursorModeName(AMode: TExportCursorMode): string;
 
@@ -375,6 +421,20 @@ function DescribeExportEffects(const AEffects: TExportEffects): string;
 // setting; naming two of them is a mistake rather than a last-one-wins.
 function ParseExportEffects(const AText: string;
   var AEffects: TExportEffects; out AError: string): Boolean;
+
+// The same, and it also says whether the list NAMED the cursor member —
+// which is not the same question as whether the member ended up
+// different, because a list may name the value it already had.
+//
+// It exists for the one surface that has two ways to set the same
+// setting: `knips export` takes `--cursor` and `--effects`, and
+// `--cursor=big --effects=smooth-cursor` used to apply the list and
+// throw the flag away without a word. See ParseExportEffects's own
+// refusal for naming two cursor words inside one list — this is that
+// rule across the two spellings.
+function ParseExportEffectsNaming(const AText: string;
+  var AEffects: TExportEffects; out ACursorNamed: Boolean;
+  out AError: string): Boolean;
 
 // Export format from the output path's extension; False for unknown ones.
 function ExportFormatForPath(const APath: string;
@@ -492,6 +552,35 @@ begin
     + 'silence — check that the source is not muted';
 end;
 
+function BigCursorIdleWarning(AEnabled: Boolean;
+  ACursorFrames, AHeartbeatFrames, AAppendedFrames: Int64): string;
+begin
+  Result := '';
+  if not AEnabled then
+    Exit;
+  if (AAppendedFrames <= 0) or (AHeartbeatFrames <= 0) then
+    Exit;
+  if AHeartbeatFrames < AAppendedFrames * BigCursorIdleShare then
+    Exit;
+  Result := Format('the enlarged pointer is in %d of this recording''s '
+    + '%d frames: %d of them are idle heartbeats, which repeat the last '
+    + 'captured frame — enlarged pointer and all — so it stands still '
+    + 'wherever the screen did. The event sidecar beside the movie has '
+    + 'the real track; recording with --smooth-cursor and running '
+    + '`knips render` over the take draws a pointer that keeps moving',
+    [ACursorFrames, AAppendedFrames, AHeartbeatFrames]);
+end;
+
+function EffectNoteSummary(const AFramingNote, ACursorNote,
+  AZoomNote: string): string;
+begin
+  if AFramingNote <> '' then
+    Exit(AFramingNote);
+  if ACursorNote <> '' then
+    Exit(ACursorNote);
+  Result := AZoomNote;
+end;
+
 function ParseCaptureRegion(const AText: string;
   out ARegion: TCaptureRegion): Boolean;
 var
@@ -583,15 +672,6 @@ begin
   else if Budget > MaxBitRate then
     Budget := MaxBitRate;
   Result := Round(Budget);
-end;
-
-function ContainerFileType(AContainer: TOutputContainer): string;
-begin
-  case AContainer of
-    ocQuickTime: Result := 'QuickTime movie';
-  else
-    Result := 'MPEG-4';
-  end;
 end;
 
 function ValidateRecordingOptions(var AOptions: TRecordingOptions;
@@ -744,6 +824,10 @@ begin
   Result := AEffects.Cursor in [ecmAsRecorded, ecmSmooth, ecmBig];
 end;
 
+// Whether it asks for anything at all beyond what the recording already
+// decided. A render with nothing to apply is a copy, and this is the
+// question that says so. Implementation-only: the one caller is the
+// validation below.
 function EffectsAreDefault(const AEffects: TExportEffects): Boolean;
 begin
   Result := (AEffects.Cursor = ecmAsRecorded) and not AEffects.ZoomOnClick;
@@ -799,6 +883,15 @@ end;
 function ParseExportEffects(const AText: string;
   var AEffects: TExportEffects; out AError: string): Boolean;
 var
+  CursorNamed: Boolean;
+begin
+  Result := ParseExportEffectsNaming(AText, AEffects, CursorNamed, AError);
+end;
+
+function ParseExportEffectsNaming(const AText: string;
+  var AEffects: TExportEffects; out ACursorNamed: Boolean;
+  out AError: string): Boolean;
+var
   Parts: TStringArray;
   Tokens: TStringArray;
   Token: string;
@@ -808,6 +901,7 @@ begin
   Result := False;
   AError := '';
   CursorNamed := False;
+  ACursorNamed := False;
   // The non-empty words, gathered first. Counting Parts instead was
   // wrong in a way nothing noticed: `--effects=none,` splits into two
   // parts, the second of which is nothing at all, and the "none cannot
@@ -838,6 +932,10 @@ begin
       end;
       AEffects.ZoomOnClick := False;
       AEffects.Cursor := ecmNone;
+      // `none` names the cursor as surely as `no-cursor` does — it
+      // means no pointer AND no zoom — so a --cursor beside it is a
+      // contradiction the caller wants to hear about.
+      ACursorNamed := True;
       Exit(True);
     end
     else if Token = 'zoom' then
@@ -852,6 +950,7 @@ begin
         Exit;
       end;
       CursorNamed := True;
+      ACursorNamed := True;
       if Token = 'smooth-cursor' then
         AEffects.Cursor := ecmSmooth
       else if Token = 'big-cursor' then
