@@ -48,10 +48,11 @@
   `--out=demo.apng` writes truecolour APNG instead, and `--out=cut.mp4
   --trim=1.5,3.5` trims without re-encoding.
 - Grant Screen Recording on first run; a rebuilt binary re-prompts.
-- `lwpt test` runs the neutral suites on any OS, including Linux CI.
+- `lwpt test` runs the neutral suites on any OS, Linux included.
   `tools/linux-ci.sh` runs them (and a Linux `lwpt build`) in Docker from
-  a Mac; `tools/win64-cross.sh` compiles and links the same tree for
-  64-bit Windows. See [ports.md](ports.md).
+  a Mac — by hand, like every gate here; there is no CI service.
+  `tools/win64-cross.sh` compiles and links the same tree for 64-bit
+  Windows. See [ports.md](ports.md).
 
 ## Prerequisites
 

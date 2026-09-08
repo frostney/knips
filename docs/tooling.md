@@ -13,7 +13,10 @@
 - Off-device type-checking of Darwin units uses an FPC cross compiler
   (`ppcrossa64`) with clang as the Mach-O assembler; it catches
   declaration and type errors, not runtime behaviour.
-- Pre-commit via Lefthook runs `lwpt format`; the full gate runs in PRs.
+- Lefthook is the only automation: pre-commit runs `lwpt format`,
+  pre-push runs the real gate. There is no CI service — the release gate
+  on top of it is `tools/release-gate.sh`, run by hand
+  ([Git hooks and the release gate](#git-hooks-and-the-release-gate)).
 
 ## Commands
 
@@ -22,7 +25,7 @@
 | `lwpt install` | resolve `lwpt.toml`, fetch deps, write `lwpt.lock` + `lwpt.cfg` |
 | `lwpt build` | `build/knips` (dev; `--mode release` for `-O4 -Xs`) |
 | `lwpt test` | discover/compile/run `source/*.Test.pas` |
-| `lwpt format [--check]` | canonical formatting; `--check` is the CI form |
+| `lwpt format [--check]` | canonical formatting; `--check` is the gate form |
 | `lwpt health [--hotspots]` | complexity report |
 | `./build/knips probe` | on-device toolchain gate |
 
@@ -40,8 +43,12 @@ project has. AGENTS.md says the same, in the same words.
 | lwpt (the binary) | 0.6.0 developed against | `lwpt --version` |
 | cli, testing (the packages) | `^0.7.0` release tag | `lwpt.lock` |
 | Lefthook | ≥ 1.5 | `lefthook version` |
-| git-cliff | current | `git-cliff --version` |
 | macOS | 13+ | `sw_vers` |
+
+There is no changelog generator in that table on purpose. `CHANGELOG.md`
+is hand-maintained curated prose (DEFINITION_OF_DONE.md); the
+`cliff.toml` that once sat here was carried in from lantaarn, named that
+project, and has been deleted.
 
 ## The `-ld_classic` escape hatch
 

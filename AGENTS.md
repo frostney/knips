@@ -121,7 +121,8 @@ lefthook install                         # once per clone: pre-commit + pre-push
 | `source/capture/` | Vendored bindings: CoreMedia/CoreVideo/VideoToolbox/GCD, ScreenCaptureKit, pthread mutex |
 | `source/capture-linux/` | X11/MIT-SHM capture **spike** and its runner — not shipped, not an lwpt build entry; run against Xvfb by `tools/linux-ci.sh` ([docs/ports.md](docs/ports.md)) |
 | `tools/linux-ci.sh`, `tools/win64-cross.sh`, `tools/wine-smoke.sh` | Cross-platform gates in Docker: the neutral suites on Linux, an `x86_64-win64` compile-and-link, a Wine smoke ([docs/ports.md](docs/ports.md)) |
-| `docs/` | Architecture, quick-start, tooling, code style, deployment, ports, porting notes, spikes, ADRs |
+| `docs/` | Architecture, measurements, quick-start, tooling, code style, deployment, ports, porting notes, spikes, ADRs |
+| `docs/measurements.md` | Measurements and their history: the proof runs, calibration sets and superseded figures behind `docs/architecture.md`'s constants — linked from the section each came from |
 
 Layering: `knips.pas` → {`Knips.App`, `Knips.Mcp`, `Knips.Recording`,
 `Knips.Export.Pipeline`, `Knips.Export.MovieTrim`, `Knips.Export.Render`}
@@ -203,7 +204,7 @@ no `{$IFDEF DARWIN}` at all and are tested on every host.
 ## Testing
 
 - `lwpt test` discovers `source/*.Test.pas`. Everything platform-neutral
-  has a co-located suite and runs on Linux CI as well as macOS.
+  has a co-located suite and runs on Linux as well as macOS.
 - Darwin units cannot be unit-tested off-device. Their gate is
   `knips probe` (runtime class registration, SCK enumeration,
   AVAssetWriter open) followed by a real `record` that plays back in

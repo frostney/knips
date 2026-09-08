@@ -20,7 +20,8 @@
 - **Windows:** DXGI Desktop Duplication + Media Foundation SinkWriter
   first; Windows.Graphics.Capture later, for window capture.
 - **Linux:** XSHM first — a spike already grabs a verified frame off Xvfb
-  in CI and writes it as a GIF through the neutral encoder —
+  in the Linux container and writes it as a GIF through the neutral
+  encoder —
   xdg-desktop-portal + PipeWire as the real target; recording writes our
   own APNG/GIF before it writes H.264 through anything `dlopen`ed.
 - **No cthreads is a Darwin rule only.** Linux uses `cthreads`; Windows
@@ -249,7 +250,7 @@ it. `source/capture-linux/Knips.Capture.X11.pas` is a spike —
 segment (FPC's `xshm` unit declares them `external libX11`, though
 `libxext-dev` is still needed at link time for the `{$LinkLib Xext}` the
 same unit carries) — and `tools/ci/linux-gate.sh` runs it against Xvfb on
-every Linux CI run:
+every `tools/linux-ci.sh` run:
 
 ```text
 display: 1024x768
@@ -545,7 +546,7 @@ checked off.
 
 ## Milestones
 
-1. **Foundation — this lane.** Linux CI container and gate; win64
+1. **Foundation — this lane.** Linux container and gate; win64
    cross-compile gate; the Wine smoke; the X11/MIT-SHM capture spike; this
    document and [ADR-0005](adr/0005-windows-linux-ports.md). No backend
    code beyond the spike, and the spike is not a backend.
@@ -567,10 +568,10 @@ checked off.
    `lwpt test` / `lwpt format --check` green on macOS.
 3. **Linux headless recorder.** `source/capture-linux/` XSHM bindings,
    `Knips.Recording.Linux`, `knips record --out=demo.apng` and
-   `demo.gif` working against Xvfb in CI, `knips probe` growing a Linux
-   arm. Neutral rectangle type replaces `CGRect` in the session
-   signature. This is the first milestone that produces a file on a
-   second platform, and all of it is verifiable from a Mac.
+   `demo.gif` working against Xvfb in the container, `knips probe`
+   growing a Linux arm. Neutral rectangle type replaces `CGRect` in the
+   session signature. This is the first milestone that produces a file
+   on a second platform, and all of it is verifiable from a Mac.
 4. **Linux desktop.** Portal + PipeWire backend behind the same session;
    `restore_token`; StatusNotifierItem tray; GlobalShortcuts stop
    hotkey; overlay. Needs a device from here on.
@@ -590,6 +591,7 @@ checked off.
 - [ADR-0003: vendored capture units](adr/0003-vendor-capture-units.md)
 - [ADR-0001: AVAssetWriter owns encoding](adr/0001-avassetwriter-owns-encoding.md)
 - [Architecture](architecture.md) — threading model, session shape
+- [Measurements](measurements.md) — the numbers behind its constants
 - [Tooling](tooling.md) — lwpt, pins, the off-device type-check
 - [VISION.md](../VISION.md) — "not cross-platform in this release"
 
