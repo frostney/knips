@@ -1782,9 +1782,15 @@ begin
   // still the bound and raising it would leave the bar stuck near the
   // bottom for the whole render. See
   // Knips.Export.CursorEffect.TrackIsStationary and the same rule in
-  // Knips.Export.Pipeline.SynthesisPossible.
-  if FReport.ZoomApplied or (FCursor = nil)
-    or not FCursor.TrackIsStationary then
+  // Knips.Export.Pipeline.SynthesisPossible — this IS that rule, and it
+  // used to differ from it by treating "no cursor at all" as "the
+  // pointer moves". The difference could not be seen: a render with
+  // neither a zoom nor a drawn cursor is refused above, so a nil cursor
+  // here always came with an applied zoom, and the first arm already
+  // raised. Written the same way round anyway, so the two cannot drift
+  // the day that refusal changes.
+  if FReport.ZoomApplied
+    or ((FCursor <> nil) and not FCursor.TrackIsStationary) then
     FEstimatedFrames := Max(FEstimatedFrames, Max(Int64(1),
       Round(FReader.DurationSeconds * FReport.SynthesisFramesPerSecond)));
 
