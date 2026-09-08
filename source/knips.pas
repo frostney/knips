@@ -630,11 +630,15 @@ begin
   if OutputPath = '' then
   begin
     // The obvious answer when the input is a raw take: the deliverable is
-    // the same name without the suffix. Anything else has to be named.
+    // the same name without the suffix. Anything else has to be named,
+    // and the refusal says which half of that rule the input missed
+    // rather than 'an output path is required' — --out is optional, but
+    // only for a raw take.
     if not IsRawTakePath(InputPath) then
     begin
-      WriteLn(ErrOutput, ProgramName, ' render: an output path is required '
-        + '(--out=demo.mp4)');
+      WriteLn(ErrOutput, ProgramName, ' render: cannot derive an output name '
+        + 'from "' + ExtractFileName(InputPath) + '" (only *-raw names have '
+        + 'one); pass --out=demo.mp4');
       Flush(ErrOutput);
       Exit(ExitUsage);
     end;
