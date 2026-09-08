@@ -104,6 +104,32 @@ begin
   Result := IncludeTrailingPathDelimiter(GScratchDirectory) + AName;
 end;
 
+// Every test deletes the fixture it wrote, but a failed one leaves its
+// file behind and an empty directory would survive either way: sweep
+// what is left and take the directory with it, the way
+// Knips.Recording.Recovery.Test's suites close theirs. One level deep,
+// because no fixture here nests a directory.
+procedure RemoveScratchDirectory;
+var
+  Directory: string;
+  Search: TSearchRec;
+begin
+  if GScratchDirectory = '' then
+    Exit;
+  Directory := IncludeTrailingPathDelimiter(GScratchDirectory);
+  if FindFirst(Directory + '*', faAnyFile, Search) = 0 then
+    try
+      repeat
+        if (Search.Attr and faDirectory) = 0 then
+          DeleteFile(Directory + Search.Name);
+      until FindNext(Search) <> 0;
+    finally
+      FindClose(Search);
+    end;
+  RemoveDir(Directory);
+  GScratchDirectory := '';
+end;
+
 function LoadFile(const APath: string): TBytes;
 var
   Stream: TFileStream;
@@ -1330,11 +1356,15 @@ begin
   GScratchDirectory := IncludeTrailingPathDelimiter(GetTempDir)
     + 'knips-gif-test-' + IntToStr(GetProcessID);
   ForceDirectories(GScratchDirectory);
-  TestRunnerProgram.AddSuite(TGifQuantizerTests.Create('TGifQuantizer'));
-  TestRunnerProgram.AddSuite(
-    TGifPaletteSamplerTests.Create('TGifPaletteSampler'));
-  TestRunnerProgram.AddSuite(TGifStructureTests.Create('GIF89a structure'));
-  TestRunnerProgram.AddSuite(TGifPixelTests.Create('GIF pixels'));
-  TestRunnerProgram.Run;
+  try
+    TestRunnerProgram.AddSuite(TGifQuantizerTests.Create('TGifQuantizer'));
+    TestRunnerProgram.AddSuite(
+      TGifPaletteSamplerTests.Create('TGifPaletteSampler'));
+    TestRunnerProgram.AddSuite(TGifStructureTests.Create('GIF89a structure'));
+    TestRunnerProgram.AddSuite(TGifPixelTests.Create('GIF pixels'));
+    TestRunnerProgram.Run;
+  finally
+    RemoveScratchDirectory;
+  end;
   ExitCode := TestResultToExitCode;
 end.
