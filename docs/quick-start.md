@@ -309,7 +309,7 @@ Settings › Privacy & Security › Screen Recording and click again.
 **Camera ▸ Show Camera** puts a small rounded window with your camera in
 it at the bottom right of the main screen; the item carries a checkmark
 while it is up. The recorder picks it up because it is on screen, with no
-compositing step in between ([why](architecture.md#menu-bar-app)). It
+compositing step in between ([why](architecture.md#the-camera-window)). It
 floats above ordinary windows, follows you across Spaces, and stays up
 across recordings until you switch it off or quit.
 

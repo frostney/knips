@@ -1525,7 +1525,9 @@ drawing, event dispatch and run loop all sit above these bodies. What is
 caught becomes a message on the same NSLog + log file + "Last error"
 path, and the method returns normally.
 
-**The camera window.** *Camera* puts a 240×180 borderless window at
+### The camera window
+
+*Camera* puts a 240×180 borderless window at
 `kCGFloatingWindowLevel` on screen, its content view hosting an
 `AVCaptureVideoPreviewLayer` (`resize-aspect-fill`, 8 pt corner radius,
 `masksToBounds`) fed by an `AVCaptureSession` on

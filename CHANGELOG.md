@@ -156,6 +156,32 @@ Changelog](https://keepachangelog.com/en/1.1.0/)'s: **Added**,
 
 ### Changed
 
+- **The project is MIT-licensed.** A `LICENSE` file carries the terms and
+  the README links to it; the line calling Knips a private candidate is
+  gone.
+- **One arrow-sprite renderer.** The recording's Big Cursor and the
+  render's drawn pointer each held a copy of the same Quartz routine —
+  75 of 96 lines identical, every error string included. Both now call
+  `Knips.Recording.CursorSprite`, which sits below the two of them; the
+  sprite metrics and the exported pixels are unchanged (the same raw
+  take exports byte-identical APNGs before and after), and neither
+  caller declares a framework binding any more.
+- **The GIF and APNG export's slot walk is one tested record.** The
+  decimation, the per-gap fill bound and the "is this a different
+  picture" test moved out of the pipeline into `Knips.Export.Cadence`,
+  where both passes drive them and a co-located suite covers them on
+  every host. One side effect worth knowing: on a take that can
+  synthesise frames, the GIF's palette pass now seeds its sample
+  schedule from the grid-slot count rather than the source-frame count,
+  which is what the estimate always meant; measured, the palette is
+  within a tenth of a decibel of the old one.
+- The GIF and APNG test suites remove the pid-named scratch directory
+  they create under `$TMPDIR`; each run used to leave two empty ones
+  behind.
+- `docs/quick-start.md` no longer repeats `docs/architecture.md`
+  verbatim: eleven passages of reasoning became one clause and a link to
+  the section that owns it, and the how-to sentences stayed.
+
 - GIF palettes are built from an **exact-colour** histogram (a bounded
   hash table of packed 24-bit colours, with the old 6-bit histogram kept
   as the fallback past 2^20 distinct colours), median cut now splits the
@@ -177,6 +203,31 @@ Changelog](https://keepachangelog.com/en/1.1.0/)'s: **Added**,
   default build linker-flag-free.
 
 ### Fixed
+
+- **The GIF palette pass emitted a frame the file never held.** On the
+  GIF path the target size was learned inside the first walk, so the
+  first source frame's shape was never recorded and the first empty
+  slot was filled unconditionally — one phantom "synthesised" frame on
+  a take that cannot synthesise at all, counted by the palette sampler
+  and the progress denominator but never written. The size is settled
+  before either pass now, a walk on a take that cannot synthesise never
+  enters the fill branch, and the palette pass's own count equals the
+  encode pass's and the file's at every rate tried.
+- **A ScreenCaptureKit query that timed out could answer the next one.**
+  `TShareableContent.Query` gave up after its budget but the framework
+  still ran the completion later, into whichever query asked next — a
+  list a second or more old, plus one leaked retain per timeout. The
+  query now marks a completion as outstanding, the next query drains it
+  for a bounded number of run-loop slices (about 1.8 s measured) or
+  refuses, and any content or error a late completion retained is
+  released before a new one is dispatched — the same shape the capture
+  start already used.
+- `knips render --in=take.mp4` on a movie not named `*-raw.*` said "an
+  output path is required", which named the wrong cause; it now says
+  the output name cannot be derived from that input and shows the
+  `--out` to pass.
+- A comment in `Knips.App.State` named a unit that does not exist
+  (`Knips.Export.GifPipeline`); it is `Knips.Export.Pipeline`.
 
 - **A sidecar line the reader dropped could silently reframe the rest of
   a take.** `sx/sy/sw/sh` are delta-encoded — the writer emits them only
