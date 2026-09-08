@@ -97,6 +97,11 @@ type
   TExportCursor = class
   private
     FLog: TSidecarLog;
+    // Whether FLog is ours to free. A caller that has already loaded the
+    // take's sidecar lends it rather than making this class parse the
+    // same file a second time — which a render did, every time, at the
+    // full cost of the parse.
+    FOwnsLog: Boolean;
     FSmoothed: TSidecarSampleArray;
     FSmoothedCount: Integer;
     FPixels: PByte;
@@ -110,6 +115,7 @@ type
     FDrawnFrames: Int64;
     FOffFrameFrames: Int64;
     procedure ReleasePixels;
+    procedure ForgetLog;
     function RenderSprite(APixelsPerPoint: Double;
       out AError: string): Boolean;
     function PlanAt(AWidth, AHeight: Integer; ASeconds: Double;
@@ -132,9 +138,20 @@ type
     // a pointer, or a mode that asks for none. The caller treats every one
     // of those as "export without a drawn pointer", not as a failure: the
     // animation is correct either way.
+    // ABorrowedLog is the caller's own already-loaded sidecar for this
+    // movie, or nil to load one. Borrowed logs are not freed here.
+    //
+    // Both callers in this program lend: the render loads the sidecar to
+    // decide whether the take can have anything at all, and the export
+    // pipeline loads it once in LoadSidecar and does not call this when
+    // that came back with nothing. The self-loading branch is the
+    // fallback for a caller that has no log of its own — it is not a way
+    // to retry a load that already failed, which is what it had become
+    // on the export side: the same file parsed a second time, failing
+    // the same way, for a message the caller then discarded.
     function Prepare(const AMoviePath: string;
       const AEffects: TExportEffects; AOutputWidth, AOutputHeight: Integer;
-      out AError: string): Boolean;
+      ABorrowedLog: TSidecarLog; out AError: string): Boolean;
     // Draws the pointer into one scaled frame, at ASeconds on the movie's
     // own timeline (which is what TMovieReaderFrame.Seconds is). Does
     // nothing when the pointer was outside the captured rectangle at that
@@ -269,8 +286,16 @@ end;
 destructor TExportCursor.Destroy;
 begin
   ReleasePixels;
-  FreeAndNil(FLog);
+  ForgetLog;
   inherited Destroy;
+end;
+
+procedure TExportCursor.ForgetLog;
+begin
+  if FOwnsLog then
+    FLog.Free;
+  FLog := nil;
+  FOwnsLog := False;
 end;
 
 procedure TExportCursor.ReleasePixels;
@@ -284,14 +309,18 @@ begin
 end;
 
 // **This function has a near-identical twin**, and the duplication is
-// deliberate rather than overlooked: Knips.Recording.CursorOverlay's TCursorOverlay.RenderSprite
+// deliberate rather than overlooked:
+// Knips.Recording.CursorOverlay's TCursorOverlay.RenderSprite
 // builds the same sprite the same way — +[NSCursor arrowCursor], the
 // image's bitmap representation, a CGBitmapContextCreate at
 // premultiplied BGRA, one CGContextDrawImage at the scaled extent.
 //
-// What differs is the kernel, and it is not a parameter. This one draws at EXPORT time, at the OUTPUT's scale, into a
-// sprite the render and the GIF pipeline composite into scaled frames;
-// the other draws at record time at the capture's scale.
+// What differs is the scale and when. This one draws at EXPORT time, at
+// the OUTPUT's scale, into a sprite the render and the GIF pipeline
+// composite into scaled frames; the other draws at record time at the
+// capture's scale. (There is no "kernel" here in any sense — that word
+// belongs to Knips.Export.Bitmap's resampling and said nothing true
+// about either of these.)
 // Unifying them would mean a third unit owning a Quartz drawing routine
 // that neither of these layers could then reach without importing it,
 // for a saving of about thirty lines — and the two are free to diverge
@@ -397,7 +426,7 @@ end;
 
 function TExportCursor.Prepare(const AMoviePath: string;
   const AEffects: TExportEffects; AOutputWidth, AOutputHeight: Integer;
-  out AError: string): Boolean;
+  ABorrowedLog: TSidecarLog; out AError: string): Boolean;
 var
   Path: string;
   PixelsPerPoint, Magnification, Window: Double;
@@ -419,13 +448,19 @@ begin
   // anything gets a chance to record that somebody asked.
   // ecmAsRecorded stays quiet: it is what every export has always done.
   FAsked := AEffects.Cursor <> ecmAsRecorded;
-  Path := SidecarPathFor(AMoviePath);
-  FreeAndNil(FLog);
-  FLog := TSidecarLog.Create;
-  if not FLog.LoadFromFile(Path, AError) then
+  ForgetLog;
+  if ABorrowedLog <> nil then
+    FLog := ABorrowedLog
+  else
   begin
-    FreeAndNil(FLog);
-    Exit;
+    Path := SidecarPathFor(AMoviePath);
+    FLog := TSidecarLog.Create;
+    FOwnsLog := True;
+    if not FLog.LoadFromFile(Path, AError) then
+    begin
+      ForgetLog;
+      Exit;
+    end;
   end;
   // ecmAsRecorded is the default and the quiet one: it draws only for a
   // take that was recorded expecting it. The two explicit modes draw for
@@ -435,7 +470,7 @@ begin
     and (FLog.Header.CursorRender <> scrSmooth) then
   begin
     AError := 'this recording was not made with a smooth cursor';
-    FreeAndNil(FLog);
+    ForgetLog;
     Exit;
   end;
   // Past here the sidecar itself asked, so an as-recorded export is no
@@ -457,14 +492,14 @@ begin
     AError := Available.CursorReason;
     if AError = '' then
       AError := 'this recording cannot have a pointer drawn into it';
-    FreeAndNil(FLog);
+    ForgetLog;
     Exit;
   end;
   if (AOutputWidth <= 0) or (AOutputHeight <= 0)
     or (FLog.Header.BaseWidth <= 0) then
   begin
     AError := 'nothing to draw a pointer into';
-    FreeAndNil(FLog);
+    ForgetLog;
     Exit;
   end;
 
@@ -501,7 +536,7 @@ begin
   PixelsPerPoint := AOutputWidth / FLog.Header.BaseWidth;
   if not RenderSprite(PixelsPerPoint * Magnification, AError) then
   begin
-    FreeAndNil(FLog);
+    ForgetLog;
     Exit;
   end;
   Result := True;

@@ -50,6 +50,7 @@ uses
   Knips.Capture.ScreenCaptureKit,
   Knips.Capture.ShareableContent,
   Knips.Capture.Stream,
+  Knips.Export.Atomic,
   Knips.Export.MovieWriter,
   Knips.Options,
   Knips.Recording.CursorMath,
@@ -299,10 +300,6 @@ type
     property Report: TRecordingReport read FReport;
   end;
 
-// Set from a signal handler; polled by the run loop.
-var
-  StopRequested: Boolean = False;
-
 {$ENDIF}
 
 implementation
@@ -477,7 +474,9 @@ begin
         Window := AContent.RetainWindow(FOptions.WindowID);
         if Window = nil then
         begin
-          AError := Format('no on-screen window with id %d (see `knips windows`)',
+          // %u: a CGWindowID is unsigned, and 4294967295 echoed back as
+          // "-1" names an id the caller never gave.
+          AError := Format('no on-screen window with id %u (see `knips windows`)',
             [FOptions.WindowID]);
           Exit;
         end;
@@ -650,6 +649,11 @@ begin
     AError := 'this session has already been used; create a new one';
     Exit;
   end;
+  // One policy for every writer knips has: a symlink at the output is
+  // refused by name rather than written through (Knips.Export.Atomic).
+  AError := OutputPathRefusal(FOptions.OutputPath);
+  if AError <> '' then
+    Exit;
   FReport := Default(TRecordingReport);
   FReport.OutputPath := FOptions.OutputPath;
   FReport.FramesPerSecond := FOptions.FramesPerSecond;

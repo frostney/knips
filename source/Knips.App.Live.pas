@@ -161,7 +161,6 @@ implementation
 {$IFDEF DARWIN}
 
 const
-  SecondsPerDay = 86400;
   // A tick that arrives later than this is a run loop that was blocked
   // (a menu tracked, a window resized). Advancing the easings by the
   // whole gap would jump the picture; capping turns it into a slower
@@ -394,7 +393,7 @@ begin
   end;
 
   Moment := Now;
-  Delta := (Moment - FLastTick) * SecondsPerDay;
+  Delta := (Moment - FLastTick) * SecsPerDay;
   FLastTick := Moment;
   // A clock that stepped backwards reads as no time passing; one that
   // stepped forward, as a single late tick. Every duration in the

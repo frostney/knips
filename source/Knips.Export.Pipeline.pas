@@ -40,6 +40,7 @@ uses
   CocoaAll,
   Knips.Capture.CoreMedia,
   Knips.Export.Apng,
+  Knips.Export.Atomic,
   Knips.Export.Bitmap,
   Knips.Export.Cadence,
   Knips.Export.CursorEffect,
@@ -133,11 +134,23 @@ type
     // must not be able to hide it. Same field, same reason, in
     // TRenderReport.
     FramingNote: string;
+    // The three notes above as one sentence, composed the way the
+    // render's is (Knips.Options.EffectNoteSummary). It is what a caller
+    // with a single line to spend shows — the playback window's title
+    // and its Last-error slot — and the export used to have no such
+    // field at all, so the *Export as GIF…* button surfaced nothing
+    // while Re-export beside it surfaced everything.
+    Note: string;
     // Frames the capture never made, put back on the decimation grid
     // where an effect was animating and ScreenCaptureKit had delivered
     // nothing (Knips.Export.Cadence). Zero on a take whose frames
     // already arrived at the target rate.
     SynthesizedFrames: Int64;
+    // The rate they were filled in at — the export's own target rate,
+    // which is the grid the synthesis walks. Zero when nothing was
+    // synthesised, so the number is never a claim about a take that had
+    // no gaps. Mirrors the render report's field of the same name.
+    SynthesisFramesPerSecond: Integer;
     // What the size was expected to be before a byte was written, and how
     // many output frames that was over. Kept in the report so the caller
     // can say afterwards how close it came — which is the only way the
@@ -146,6 +159,10 @@ type
     EstimatedLowBytes: Int64;
     EstimatedHighBytes: Int64;
     EstimatedFrames: Int64;
+    // Lines of the take's event sidecar the loader could not use. See
+    // the render report's field of the same name: never a failure, and
+    // never silent either (Knips.Options.SidecarSkippedLinesNote).
+    SidecarSkippedLines: Integer;
   end;
 
   // What a pass of scaled frames is written into. The GIF and APNG
@@ -202,21 +219,35 @@ type
   private
     FOptions: TExportOptions;
     FReport: TExportReport;
+    // What the sink is actually opened on. The output's own name is not
+    // written until the whole animation is on disk: a GIF makes two
+    // passes and the second used to truncate a perfectly good previous
+    // file before it had encoded a single frame, and a Ctrl-C anywhere
+    // in either pass destroyed it outright. See Knips.Export.Atomic.
+    FTempPath: string;
     FReader: TMovieReader;
     FScaled: TBgraImage;
     FPending: TBgraImage;
     FScratch: TResampleScratch;
+    // The box reduction this export uses for every frame, decided from
+    // the first uncropped frame it sees. Zero until then.
+    FBoxFactorX: Integer;
+    FBoxFactorY: Integer;
     // Nil unless the movie's sidecar says its pointer is waiting to be
     // drawn. Prepared once, when the output size is settled, and consulted
     // in ScaleFrame — which is on BOTH passes on purpose: a GIF's palette
     // is chosen from scaled frames, and a palette that had never seen the
     // pointer would quantise it into whatever was nearest.
     FCursorEffect: TExportCursor;
-    // The post-hoc zoom's own state. The log is loaded a second time
-    // rather than borrowed from FCursorEffect: the cursor effect is
-    // absent whenever no pointer was asked for, and a zoom does not
-    // depend on a pointer.
-    FZoomLog: TSidecarLog;
+    // The take's event sidecar, loaded ONCE for this whole export and
+    // lent to whatever needs it: the zoom reads its click and framing
+    // tracks, and the cursor effect draws its pointer track. The two
+    // used to load it independently, so an export asking for both parsed
+    // the same file twice — and the parse is the expensive part.
+    // Nil when there is none or it was refused, and FSidecarNote then
+    // carries the loader's own reason.
+    FLog: TSidecarLog;
+    FSidecarNote: string;
     FZoomClicks: TZoomClickArray;
     FZoomWalker: TZoomWalker;
     FZoomBase: TLiveRect;
@@ -287,7 +318,14 @@ type
     // instant, which is the one case a zoom must not crop through — see
     // Knips.Export.ZoomTrack.FramingRectAt.
     function FramingAt(ASeconds: Double; out ARect: TLiveRect): Boolean;
-    procedure EnsureTargetSize(ASourceWidth, ASourceHeight: Integer);
+    // The take's event sidecar, loaded once for the whole export.
+    procedure LoadSidecar;
+    // False with a message when the canvas the movie asks for is past
+    // what an export may hold (Knips.Export.Bitmap's budget). Asked
+    // before a single buffer is allocated, because the size a movie
+    // reports is the size that would be believed.
+    function EnsureTargetSize(ASourceWidth, ASourceHeight: Integer;
+      out AError: string): Boolean;
     procedure PrepareSmoothCursor;
     procedure PrepareZoom;
     procedure NoteUnframedFrames;
@@ -319,6 +357,13 @@ type
     property OnProgress: TGifExportProgressEvent read FOnProgress
       write FOnProgress;
   end;
+
+// A finished report as the neutral facts Knips.Options composes the
+// export's wording from — the counterpart of
+// Knips.Export.Render.RenderFactsOf, and here for the same reason: the
+// CLI and the two MCP export tools each described the same work in
+// their own words.
+function ExportFactsOf(const AReport: TExportReport): TExportAppliedFacts;
 
 {$ENDIF}
 
@@ -448,7 +493,7 @@ begin
   ReleaseHeldFrame;
   FreeAndNil(FReader);
   FreeAndNil(FCursorEffect);
-  FreeAndNil(FZoomLog);
+  FreeAndNil(FLog);
   inherited Destroy;
 end;
 
@@ -460,7 +505,7 @@ begin
   ARect := FZoomBase;
   if not FFramingPanned then
     Exit(True);
-  ARect := FramingRectAt(FZoomLog, ASeconds, Stale);
+  ARect := FramingRectAt(FLog, ASeconds, Stale);
   if (ARect.Width <= 0) or (ARect.Height <= 0) then
   begin
     ARect := FZoomBase;
@@ -659,11 +704,14 @@ begin
   until False;
 end;
 
-procedure TExportSession.EnsureTargetSize(ASourceWidth,
-  ASourceHeight: Integer);
+function TExportSession.EnsureTargetSize(ASourceWidth,
+  ASourceHeight: Integer; out AError: string): Boolean;
 var
   TargetWidth: Integer;
+  Refusal: string;
 begin
+  Result := True;
+  AError := '';
   if FReport.PixelWidth > 0 then
     Exit;
   FReport.SourceWidth := ASourceWidth;
@@ -676,8 +724,23 @@ begin
   FReport.PixelWidth := TargetWidth;
   FReport.PixelHeight := ScaledHeightForWidth(ASourceWidth, ASourceHeight,
     TargetWidth);
+  // Before the two allocations below, which is the whole point: a movie
+  // whose header claims 30000x30000 used to get two buffers at that size
+  // and take the machine's memory with it, and no sink was ever reached
+  // to say no.
+  Refusal := BgraCanvasRefusal(FReport.PixelWidth, FReport.PixelHeight);
+  if Refusal <> '' then
+  begin
+    AError := Format('%s reports a %dx%d picture: %s',
+      [FOptions.InputPath, ASourceWidth, ASourceHeight, Refusal]);
+    FReport.PixelWidth := 0;
+    FReport.PixelHeight := 0;
+    Exit(False);
+  end;
   BgraImageResize(FScaled, FReport.PixelWidth, FReport.PixelHeight);
   BgraImageResize(FPending, FReport.PixelWidth, FReport.PixelHeight);
+  // Once, before either effect asks for it.
+  LoadSidecar;
   PrepareSmoothCursor;
   PrepareZoom;
   // Both effects are settled now and neither is touched again, so this
@@ -689,45 +752,61 @@ end;
 // Every refusal is a note rather than a failure, exactly as the cursor's
 // are: an export whose zoom could not be applied is still the right
 // animation, and it is the crop that is missing.
-procedure TExportSession.PrepareZoom;
+// The take's event sidecar, once. Everything after this either has a
+// log or has FSidecarNote to say why not.
+procedure TExportSession.LoadSidecar;
 var
-  Available: TSidecarEffectAvailability;
+  Log: TSidecarLog;
   Error: string;
 begin
-  if not FOptions.Effects.ZoomOnClick or (FZoomLog <> nil) then
+  if FLog <> nil then
     Exit;
-  FZoomLog := TSidecarLog.Create;
-  if not FZoomLog.LoadFromFile(SidecarPathFor(FOptions.InputPath), Error) then
+  Log := TSidecarLog.Create;
+  if not Log.LoadFromFile(SidecarPathFor(FOptions.InputPath), Error) then
   begin
     // The loader's own reason. It is "no event sidecar at <path>" for
     // the ordinary case and something quite different for a file from a
     // newer knips or one that is not a knips sidecar at all — see
     // TSidecarLog.TooNew and .ForeignFormat, which had no reader
     // anywhere until this line stopped overwriting them.
-    FReport.ZoomNote := Error;
-    FreeAndNil(FZoomLog);
+    FSidecarNote := Error;
+    Log.Free;
     Exit;
   end;
-  Available := AvailableExportEffects(FZoomLog);
+  FReport.SidecarSkippedLines := Log.SkippedLines;
+  FLog := Log;
+end;
+
+procedure TExportSession.PrepareZoom;
+var
+  Available: TSidecarEffectAvailability;
+begin
+  if not FOptions.Effects.ZoomOnClick then
+    Exit;
+  if FLog = nil then
+  begin
+    FReport.ZoomNote := FSidecarNote;
+    Exit;
+  end;
+  Available := AvailableExportEffects(FLog);
   if not Available.CanZoomOnClick then
   begin
     // The zoom's own reason; see the same line in Knips.Export.Render.
     FReport.ZoomNote := Available.ZoomReason;
-    FreeAndNil(FZoomLog);
     Exit;
   end;
-  FZoomClicks := ZoomClicksFromLog(FZoomLog);
+  FZoomClicks := ZoomClicksFromLog(FLog);
   FReport.ZoomClicks := Length(FZoomClicks);
   if FReport.ZoomClicks = 0 then
   begin
     FReport.ZoomNote := 'nothing was clicked inside the recorded '
       + 'rectangle, so there was nothing to zoom to';
-    FreeAndNil(FZoomLog);
+    // The log stays: it is the export's, not the zoom's.
     Exit;
   end;
-  FZoomBase := LiveRect(FZoomLog.Header.BaseX, FZoomLog.Header.BaseY,
-    FZoomLog.Header.BaseWidth, FZoomLog.Header.BaseHeight);
-  FFramingPanned := not HasUntouchedFraming(FZoomLog.Header);
+  FZoomBase := LiveRect(FLog.Header.BaseX, FLog.Header.BaseY,
+    FLog.Header.BaseWidth, FLog.Header.BaseHeight);
+  FFramingPanned := not HasUntouchedFraming(FLog.Header);
   FReport.ZoomOnClick := True;
   FZoomWalker := ZoomWalkerStart(FZoomBase, FOptions.Effects.ZoomFactor,
     FOptions.Effects.ZoomHoldSeconds);
@@ -745,16 +824,31 @@ var
 begin
   if FCursorEffect <> nil then
     Exit;
+  // No sidecar, so nothing to borrow — and nothing to try either.
+  // LoadSidecar has already been over this movie and left FSidecarNote
+  // saying why it came back with nothing; handing TExportCursor a nil
+  // log made it load the SAME file a second time, fail the same way,
+  // and produce a message this branch then threw away for FSidecarNote.
+  // The parameter is documented as "the caller's own already-loaded
+  // sidecar, or nil to load one", and this is the caller that always
+  // has one or knows there is none, so it never passes nil: the
+  // borrowed-log path is the only path an export takes.
+  if FLog = nil then
+  begin
+    if EffectsDrawCursor(FOptions.Effects)
+      and (FOptions.Effects.Cursor <> ecmAsRecorded) then
+      FReport.SmoothCursorNote := FSidecarNote;
+    Exit;
+  end;
   FCursorEffect := TExportCursor.Create;
   if FCursorEffect.Prepare(FOptions.InputPath, FOptions.Effects,
-    FReport.PixelWidth, FReport.PixelHeight, Note) then
+    FReport.PixelWidth, FReport.PixelHeight, FLog, Note) then
   begin
     FReport.SmoothCursor := True;
     Exit;
   end;
-  // Told apart by whether the sidecar asked. A movie with no sidecar, or
-  // one whose header says the pointer is already in the pixels, is not
-  // something to report.
+  // Told apart by whether the sidecar asked. A movie whose header says
+  // the pointer is already in the pixels is not something to report.
   if FCursorEffect.Asked then
     FReport.SmoothCursorNote := Note;
   FreeAndNil(FCursorEffect);
@@ -771,12 +865,7 @@ end;
 // is what actually keeps both.
 procedure TExportSession.NoteUnframedFrames;
 begin
-  if FReport.UnframedFrames > 0 then
-    FReport.FramingNote := Format('%d frame(s) run past the end of this '
-      + 'recording''s pointer track, so what they were showing is not '
-      + 'recorded; nothing was cropped for them and the pointer was '
-      + 'placed from the last position the track holds',
-      [FReport.UnframedFrames]);
+  FReport.FramingNote := UnframedFramesNote(FReport.UnframedFrames);
 end;
 
 // A frame that cannot be read has to fail the export. Leaving the
@@ -852,13 +941,22 @@ begin
     // the same buffer: the stride is the frame's, the origin is the
     // crop's. One resample does the crop and the scale together, so a
     // zoomed export costs no more per frame than an unzoomed one.
+    // The box factor is the export's, latched from the UNCROPPED frame
+    // (see BgraResample): a zoom shrinks the crop while the target stays
+    // put, and a factor derived per frame switches kernels partway
+    // through the animation.
+    if FBoxFactorX <= 0 then
+    begin
+      FBoxFactorX := SourceWidth div Max(1, ADestination.Width);
+      FBoxFactorY := SourceHeight div Max(1, ADestination.Height);
+    end;
     if HasCrop then
       BgraResample(PByte(Base) + PtrInt(Crop.Y) * Stride
         + PtrInt(Crop.X) * BgraBytesPerPixel, Stride, Crop.Width,
-        Crop.Height, ADestination, FScratch)
+        Crop.Height, ADestination, FScratch, FBoxFactorX, FBoxFactorY)
     else
       BgraResample(PByte(Base), Stride, SourceWidth, SourceHeight,
-        ADestination, FScratch);
+        ADestination, FScratch, FBoxFactorX, FBoxFactorY);
     // After the resample, into the scaled frame: the sprite was rendered
     // at the OUTPUT's scale, so drawing it before would shrink it with
     // the picture and soften its edges twice over. With a crop in force
@@ -1115,10 +1213,17 @@ begin
     try
       while NextEmittedFrame(Frame) do
       begin
+        if StopRequested then
+        begin
+          AError := ExportCancelledMessage;
+          Exit;
+        end;
         if Sampler.TakeFrame(Index) then
         begin
-          EnsureTargetSize(Integer(CVPixelBufferGetWidth(Frame.PixelBuffer)),
-            Integer(CVPixelBufferGetHeight(Frame.PixelBuffer)));
+          if not EnsureTargetSize(
+            Integer(CVPixelBufferGetWidth(Frame.PixelBuffer)),
+            Integer(CVPixelBufferGetHeight(Frame.PixelBuffer)), AError) then
+            Exit;
           if not ScaleFrame(Frame, FScaled, AError) then
             Exit;
           Quantizer.SampleFrame(@FScaled.Pixels[0], FScaled.BytesPerRow,
@@ -1218,7 +1323,7 @@ begin
   Planner := TFrameDelayPlanner.Create(FOptions.FramesPerSecond,
     ASink.TicksPerSecond, ASink.MinimumDelayTicks);
   try
-    if not ASink.Open(FOptions.OutputPath, AError) then
+    if not ASink.Open(FTempPath, AError) then
       Exit;
     HasPending := False;
     BaseSeconds := 0;
@@ -1226,8 +1331,15 @@ begin
     try
       while NextEmittedFrame(Frame) do
       begin
-        EnsureTargetSize(Integer(CVPixelBufferGetWidth(Frame.PixelBuffer)),
-          Integer(CVPixelBufferGetHeight(Frame.PixelBuffer)));
+        if StopRequested then
+        begin
+          AError := ExportCancelledMessage;
+          Exit;
+        end;
+        if not EnsureTargetSize(
+          Integer(CVPixelBufferGetWidth(Frame.PixelBuffer)),
+          Integer(CVPixelBufferGetHeight(Frame.PixelBuffer)), AError) then
+          Exit;
         if not ScaleFrame(Frame, FScaled, AError) then
           Exit;
         if HasPending then
@@ -1302,6 +1414,24 @@ begin
   end;
 end;
 
+function ExportFactsOf(const AReport: TExportReport): TExportAppliedFacts;
+begin
+  Result := DefaultExportAppliedFacts;
+  Result.Format := AReport.Format;
+  Result.PaletteColors := AReport.PaletteColors;
+  Result.ExactPalette := AReport.ExactPalette;
+  Result.SampledFrames := AReport.SampledFrames;
+  Result.SmoothCursor := AReport.SmoothCursor;
+  Result.SmoothCursorFrames := AReport.SmoothCursorFrames;
+  Result.SmoothCursorOffFrame := AReport.SmoothCursorOffFrame;
+  Result.ZoomOnClick := AReport.ZoomOnClick;
+  Result.ZoomedFrames := AReport.ZoomedFrames;
+  Result.ZoomClicks := AReport.ZoomClicks;
+  Result.SynthesizedFrames := AReport.SynthesizedFrames;
+  Result.SynthesisFramesPerSecond := AReport.SynthesisFramesPerSecond;
+  Result.UnframedFrames := AReport.UnframedFrames;
+end;
+
 function TExportSession.Run(out AError: string): Boolean;
 var
   Palette: TGifPalette;
@@ -1313,6 +1443,8 @@ begin
   // A fresh run measures afresh; a stale count would make
   // ExpectedFrameCount lie before any pass has run.
   FMeasuredFrames := 0;
+  FBoxFactorX := 0;
+  FBoxFactorY := 0;
   FSynthesisKnown := False;
   FSynthesisPossible := False;
   AError := '';
@@ -1321,6 +1453,15 @@ begin
   FReport.InputPath := FOptions.InputPath;
   FReport.OutputPath := FOptions.OutputPath;
   FReport.ExactPalette := True;
+
+  // One policy for every writer: a symlink at the output is refused by
+  // name rather than written through. `knips export` used to open the
+  // path and destroy whatever the link pointed at while reporting
+  // success against the link's own name.
+  AError := OutputPathRefusal(FOptions.OutputPath);
+  if AError <> '' then
+    Exit;
+  FTempPath := RenderTemporaryPathFor(FOptions.OutputPath);
 
   FReader := TMovieReader.Create(FOptions.InputPath);
   if not FReader.Open(AError) then
@@ -1339,7 +1480,9 @@ begin
   else
     // APNG quantises nothing, so there is nothing to learn from a first
     // pass; the size comes from the track the reader already opened.
-    EnsureTargetSize(FReader.PixelWidth, FReader.PixelHeight);
+    if not EnsureTargetSize(FReader.PixelWidth, FReader.PixelHeight,
+      AError) then
+      Exit;
 
   if FVerbose then
   begin
@@ -1378,6 +1521,8 @@ begin
   Written := False;
   try
     BeginPass;
+    if not ClaimTemporary(FTempPath, AError) then
+      Exit;
     Written := WriteFrames(Sink, AError);
   finally
     // The sink owns the output stream, so it has to go before the file
@@ -1388,12 +1533,19 @@ begin
   end;
   if not Written then
   begin
-    DeleteFile(FOptions.OutputPath);
+    SweepTemporary(FTempPath);
     Exit;
   end;
+  // Only here does the previous animation stop being the answer.
+  if not CommitTemporary(FTempPath, FOptions.OutputPath, AError) then
+    Exit;
+  SweepTemporary(FTempPath);
   // Counted rather than assumed, for the same reason Big Cursor's frames
   // are: a pointer that was asked for and silently drawn into nothing
   // looks exactly like one that was never asked for.
+  // Composed last, when all three notes are settled.
+  if FReport.SynthesizedFrames > 0 then
+    FReport.SynthesisFramesPerSecond := FOptions.FramesPerSecond;
   if FCursorEffect <> nil then
   begin
     FReport.SmoothCursorFrames := FCursorEffect.DrawnFrames;
@@ -1409,6 +1561,10 @@ begin
         + 'none of them has one drawn into it',
         [FReport.SmoothCursorOffFrame]);
   end;
+  // Last, when all three are settled: the one sentence a caller with a
+  // single line shows.
+  FReport.Note := EffectNoteSummary(FReport.FramingNote,
+    FReport.SmoothCursorNote, FReport.ZoomNote);
   Result := True;
 end;
 

@@ -123,6 +123,8 @@ uses
 
   CocoaAll,
   Knips.Capture.CoreMedia,
+  Knips.Export.Atomic,
+  Knips.Export.Bitmap,
   Knips.Export.Cadence,
   Knips.Export.CursorEffect,
   Knips.Export.MovieReader,
@@ -212,6 +214,11 @@ type
     ElapsedSeconds: Double;
     RealtimeFactor: Double;
     OutputBytes: Int64;
+    // Lines of the take's event sidecar the loader could not use. Never
+    // a failure — the loader is deliberately tolerant — but a hole in
+    // the track this render drew from, so it is reported rather than
+    // left inside TSidecarLog (Knips.Options.SidecarSkippedLinesNote).
+    SidecarSkippedLines: Integer;
   end;
 
   // Per-frame progress for a caller with a window to update. Runs on the
@@ -250,6 +257,16 @@ type
     FEstimatedFrames: Int64;
     // Where the movie is built before it is renamed onto FOutputPath.
     FTempPath: string;
+    // Whether the caller asked, in so many words, for a copy —
+    // `--effects=none` on the CLI, cursor "none" with zoom off over
+    // MCP. It is the one request a render honours by applying nothing,
+    // and without it a render that applies nothing is refused.
+    FExplicitCopy: Boolean;
+    // vImage's own scratch for the high-quality scaler, held across the
+    // whole render rather than allocated per frame. Grown to fit,
+    // never shrunk; freed in Destroy.
+    FScaleScratch: Pointer;
+    FScaleScratchSize: clong;
     // The frame synthesis (Knips.Export.Cadence). FHeldBuffer is the
     // last source frame, retained past the reader's own lifetime for it
     // — the reader's buffer is only valid until the next NextFrame, and
@@ -323,10 +340,22 @@ type
     // see TRenderReport.Note.
     function Run(out AError: string): Boolean;
     property Report: TRenderReport read FReport;
+    // Set before Run when the caller asked for a copy in so many words:
+    // `--effects=none`, or MCP's cursor "none" with zoom off. Without
+    // it, a render that would apply nothing is refused rather than
+    // writing a duplicate of its input and calling it a deliverable.
+    property ExplicitCopy: Boolean read FExplicitCopy write FExplicitCopy;
     property Verbose: Boolean read FVerbose write FVerbose;
     property OnProgress: TRenderProgressEvent read FOnProgress
       write FOnProgress;
   end;
+
+// A finished report as the neutral facts Knips.Options composes the
+// wording from. It is here rather than at each front end because both
+// of them held the same fourteen assignments, in the same order, and a
+// field added to TRenderReport had to be remembered in two places or
+// silently vanish from one face's summary.
+function RenderFactsOf(const AReport: TRenderReport): TRenderAppliedFacts;
 
 {$ENDIF}
 
@@ -339,7 +368,6 @@ const
   // encoder will take frames, and when it will not the loop has nothing
   // to do but wait. A millisecond is short enough that the wait never
   // shows up in the render time and long enough not to be a spin.
-  IdleSliceSeconds = 0.001;
   // Two minutes of idle slices. It bounds every wait in this unit, not
   // only the finish: a render runs on the app's MAIN thread, so a
   // framework that stops answering does not slow a render down, it hangs
@@ -351,16 +379,12 @@ const
   // slow — a long take, a busy encoder — never reaches it however long
   // it takes.
   FinishTimeoutSlices = 120000;
-  // How long CommitOutput will wait for the temporary to settle before
-  // giving up on the rename, and how long one wait is. Half a second in
-  // twenty-five-millisecond turns; see CommitOutput for what it is
-  // waiting FOR.
-  CommitAttempts = 20;
-  CommitSettleSeconds = 0.025;
-  // Keyframe every four seconds, as the recorder does.
-  KeyframeIntervalSeconds = 4;
   // How often progress is reported and the autorelease pool drained.
   ProgressEveryFrames = 30;
+  // Knips.Export.MovieWriter's KeyframeIntervalSeconds is used directly
+  // — this pass encodes into the same container the recorder does, and
+  // "as the recorder does" was a comment beside a second copy of the
+  // number.
   PoolDrainEveryFrames = 128;
   // vImage_Flags. kvImageHighQualityResampling (32) picks the more
   // expensive Lanczos path; a zoom is an *upscale* of screen content,
@@ -368,6 +392,9 @@ const
   // notices. kvImageNoFlags is 0 and is what the temp-buffer query takes.
   kvImageNoFlags = 0;
   kvImageHighQualityResampling = 32;
+  // Ask for the scratch size instead of doing the work. vImage returns
+  // the number of bytes its kernel wants rather than scaling anything.
+  kvImageGetTempBufferSize = 128;
 
 type
   vImagePixelCount = culong;
@@ -457,6 +484,12 @@ begin
   FreeAndNil(FCursor);
   FreeAndNil(FReader);
   FreeAndNil(FLog);
+  if FScaleScratch <> nil then
+  begin
+    FreeMem(FScaleScratch);
+    FScaleScratch := nil;
+    FScaleScratchSize := 0;
+  end;
   inherited Destroy;
 end;
 
@@ -519,6 +552,8 @@ begin
   FreeAndNil(FLog);
   FLog := TSidecarLog.Create;
   Result := FLog.LoadFromFile(SidecarPathFor(FInputPath), Error);
+  if Result then
+    FReport.SidecarSkippedLines := FLog.SkippedLines;
   if not Result then
   begin
     FSidecarLoadError := Error;
@@ -577,8 +612,11 @@ begin
   if EffectsDrawCursor(FEffects) then
   begin
     FCursor := TExportCursor.Create;
+    // The render's own log, lent rather than loaded again: this pass
+    // used to parse the take's sidecar TWICE, once here and once inside
+    // TExportCursor, at the full cost of the parse each time.
     if FCursor.Prepare(FInputPath, FEffects, FReader.PixelWidth,
-      FReader.PixelHeight, Note) then
+      FReader.PixelHeight, FLog, Note) then
       FReport.CursorDrawn := True
     else
     begin
@@ -604,6 +642,8 @@ begin
   Destination := nil;
   try
     try
+      if not ClaimTemporary(FTempPath, AError) then
+        Exit;
       Source := TFileStream.Create(FInputPath, fmOpenRead or fmShareDenyNone);
       Destination := TFileStream.Create(FTempPath, fmCreate);
       Destination.CopyFrom(Source, 0);
@@ -619,71 +659,35 @@ begin
   FReport.Copied := Result;
 end;
 
-// The one instant at which the old deliverable stops being the answer.
-//
-// rename(2) replaces the destination atomically within one filesystem, so
-// there is deliberately no DeleteFile first: deleting and then renaming
-// would open exactly the window this exists to close.
-//
-// **It is retried, and the retry is a wait rather than a hope.**
-// AVAssetWriter's completion handler having fired does not mean the file
-// at FTempPath has stopped moving: for a fast-start output the framework
-// assembles the movie from its own scratch and puts it at that path with
-// a replace of its own, and under the macOS sandbox that replace goes
-// through a shim (the `.sb-<token>` neighbour). Measured on the release
-// build: one render in twelve came back `could not replace …` — the
-// temporary was momentarily not there to rename. Half a second of
-// twenty-five-millisecond turns covers it; a temporary that is still
-// missing after that is genuinely missing, and the error then says so
-// with the errno and whether the file exists, because those two facts
-// are the whole diagnosis.
-function TRenderSession.CommitOutput(out AError: string): Boolean;
-var
-  Attempt: Integer;
+// Both are Knips.Export.Atomic's, which every writer that can replace a
+// file the user already has now shares. They stay as methods because the
+// temporary's path is this session's, and because the render calls them
+// from six places.
+function RenderFactsOf(const AReport: TRenderReport): TRenderAppliedFacts;
 begin
-  AError := '';
-  Result := False;
-  for Attempt := 1 to CommitAttempts do
-  begin
-    if RenameFile(FTempPath, FOutputPath) then
-      Exit(True);
-    // A run-loop turn rather than a sleep: this is the main thread, and
-    // whatever the frameworks have left to do may want it.
-    CFRunLoopRunInMode(kCFRunLoopDefaultMode, CommitSettleSeconds, False);
-  end;
-  AError := Format('the render finished but could not replace %s after '
-    + '%.2fs (errno %d, temporary %s)', [FOutputPath,
-    CommitAttempts * CommitSettleSeconds, fpgeterrno,
-    BoolToStr(FileExists(FTempPath), 'present', 'gone')]);
-  SweepTemporaries;
+  Result := DefaultRenderAppliedFacts;
+  Result.ZoomApplied := AReport.ZoomApplied;
+  Result.ZoomedFrames := AReport.ZoomedFrames;
+  Result.FramesWritten := AReport.FramesWritten;
+  Result.UsableClicks := AReport.UsableClicks;
+  Result.CursorDrawn := AReport.CursorDrawn;
+  Result.CursorFrames := AReport.CursorFrames;
+  Result.CursorOffFrameFrames := AReport.CursorOffFrameFrames;
+  Result.SynthesizedFrames := AReport.SynthesizedFrames;
+  Result.SynthesisFramesPerSecond := AReport.SynthesisFramesPerSecond;
+  Result.AudioTracks := AReport.AudioTracks;
+  Result.AudioPassthrough := AReport.AudioPassthrough;
+  Result.AudioSamples := AReport.AudioSamples;
+end;
+
+function TRenderSession.CommitOutput(out AError: string): Boolean;
+begin
+  Result := CommitTemporary(FTempPath, FOutputPath, AError);
 end;
 
 procedure TRenderSession.SweepTemporaries;
-var
-  Search: TSearchRec;
-  Directory, Pattern: string;
 begin
-  if FTempPath = '' then
-    Exit;
-  Directory := ExtractFilePath(FTempPath);
-  // The temporary itself and every neighbour whose name begins with it —
-  // AVAssetWriter's fast-start scratch arrives as
-  // `<temporary>.sb-<token>` under the sandbox. The pattern carries the
-  // whole temporary name, which ends in RenderTemporarySuffix, so it
-  // cannot match the deliverable (which never contains that suffix) or
-  // any take.
-  Pattern := ExtractFileName(FTempPath) + '*';
-  if FindFirst(Directory + Pattern, faAnyFile, Search) <> 0 then
-    Exit;
-  try
-    repeat
-      if (Search.Attr and faDirectory) <> 0 then
-        Continue;
-      DeleteFile(Directory + Search.Name);
-    until FindNext(Search) <> 0;
-  finally
-    FindClose(Search);
-  end;
+  SweepTemporary(FTempPath);
 end;
 
 function TRenderSession.OpenWriter(out AError: string): Boolean;
@@ -697,13 +701,28 @@ var
 begin
   Result := False;
   AError := '';
-  // The TEMPORARY is what is opened and what is replaced; the
-  // deliverable is not touched until the rename in CommitOutput.
-  if FileExists(FTempPath) and not DeleteFile(FTempPath) then
+  // The one place the frame size this pass will allocate against is
+  // settled, so the one place to ask whether it is allocatable. The
+  // reader has already refused a picture bigger than the canvas budget
+  // — twice, once on the header's claim and once on the decoded picture
+  // — and this asks again at the moment the pixel-buffer pool and the
+  // vImage scratch are about to be sized from it. Cheap, and the last
+  // thing standing between a hostile movie and a multi-gigabyte
+  // allocation.
+  if not BgraCanvasFits(FReader.PixelWidth, FReader.PixelHeight) then
   begin
-    AError := 'cannot replace ' + FTempPath;
+    AError := Format('%s decodes to a %dx%d picture: %s',
+      [FInputPath, FReader.PixelWidth, FReader.PixelHeight,
+      BgraCanvasRefusal(FReader.PixelWidth, FReader.PixelHeight)]);
     Exit;
   end;
+  // The TEMPORARY is what is opened and what is replaced; the
+  // deliverable is not touched until the rename in CommitOutput. The
+  // claim also writes the owner marker beside it, which is what stops
+  // the next `knips record` sweeping this render's scratch out from
+  // under it.
+  if not ClaimTemporary(FTempPath, AError) then
+    Exit;
   if not ContainerForPath(FOutputPath, Container) then
     Container := ocMPEG4;
   if Container = ocQuickTime then
@@ -960,6 +979,7 @@ var
   Source, Framing: TLiveRect;
   FramingKnown: Boolean;
   From, Onto: vImage_Buffer;
+  Needed: clong;
   ScaleError: clong;
   Pool: CVPixelBufferPoolRef;
 begin
@@ -1097,7 +1117,22 @@ begin
           Onto.width := FReport.PixelWidth;
           Onto.height := FReport.PixelHeight;
           Onto.rowBytes := DestinationStride;
-          ScaleError := vImageScale_ARGB8888(@From, @Onto, nil,
+          // The scratch buffer, ours rather than vImage's. Passing nil
+          // makes it allocate and free a Lanczos workspace per frame —
+          // measured at 111 MB of reclaimable churn over one render.
+          // The size is asked for first, because a zoom's crop changes
+          // shape between frames and an undersized scratch is not a
+          // slow render, it is a corrupted one; the buffer only ever
+          // grows, so after the first few frames the query is all that
+          // happens.
+          Needed := vImageScale_ARGB8888(@From, @Onto, nil,
+            kvImageGetTempBufferSize or kvImageHighQualityResampling);
+          if Needed > FScaleScratchSize then
+          begin
+            ReAllocMem(FScaleScratch, Needed);
+            FScaleScratchSize := Needed;
+          end;
+          ScaleError := vImageScale_ARGB8888(@From, @Onto, FScaleScratch,
             kvImageHighQualityResampling);
           if ScaleError <> 0 then
           begin
@@ -1241,7 +1276,7 @@ begin
       Idle := 0
     else
     begin
-      CFRunLoopRunInMode(kCFRunLoopDefaultMode, IdleSliceSeconds, False);
+      CFRunLoopRunInMode(kCFRunLoopDefaultMode, FrameworkSliceSeconds, False);
       Inc(Idle);
       // See FinishTimeoutSlices. This used to be `while not ready`, with
       // nothing to end it: an input that never came back ready hung the
@@ -1355,6 +1390,16 @@ begin
   Pool := NSAutoreleasePool(NSAutoreleasePool.alloc.init);
   try
     repeat
+      // Ctrl-C between two frames rather than at whatever instruction
+      // the signal happened to land on. The temporary is swept by the
+      // caller's failure path and the previous deliverable is never
+      // touched, so a cancelled render costs the render and nothing
+      // else.
+      if StopRequested then
+      begin
+        AError := ExportCancelledMessage;
+        Exit;
+      end;
       Moved := False;
       if not VideoDone and FVideoInput.isReadyForMoreMediaData then
       begin
@@ -1422,7 +1467,7 @@ begin
         Idle := 0
       else
       begin
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, IdleSliceSeconds, False);
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, FrameworkSliceSeconds, False);
         Inc(Idle);
         // The same bound AwaitVideoInput has, on the same reasoning:
         // neither input coming back ready is indistinguishable from a
@@ -1459,7 +1504,7 @@ begin
   WaitCount := 0;
   while (not GRenderFinishReady) and (WaitCount < FinishTimeoutSlices) do
   begin
-    CFRunLoopRunInMode(kCFRunLoopDefaultMode, IdleSliceSeconds, False);
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, FrameworkSliceSeconds, False);
     Inc(WaitCount);
   end;
   if not GRenderFinishReady then
@@ -1613,7 +1658,20 @@ begin
     AError := 'the take and the deliverable are the same file';
     Exit;
   end;
-  FTempPath := FOutputPath + RenderTemporarySuffix;
+  AError := OutputPathRefusal(FOutputPath);
+  if AError <> '' then
+    Exit;
+  FTempPath := RenderTemporaryPathFor(FOutputPath);
+  // The same refusal the output gets, and it has to come BEFORE the
+  // sweep below. SweepTemporaries unlinks the temporary path outright,
+  // so a symlink planted at that name was removed by the pre-run sweep
+  // and the lstat guard inside ClaimTemporary then had nothing left to
+  // refuse — no data was lost either way, but the unit promises not to
+  // touch a link at a path it writes and this order was the one place
+  // it did. `export` refuses in the same words at the same point.
+  AError := OutputPathRefusal(FTempPath);
+  if AError <> '' then
+    Exit;
   // A temporary left by a render that was killed. Removed rather than
   // reused: nothing here knows how far the dead one got.
   SweepTemporaries;
@@ -1634,22 +1692,35 @@ begin
   if LoadSidecar then
     PrepareEffects;
 
-  // A take that can take NO effect at all is refused rather than copied.
-  // Copying it would produce a byte-identical second movie and a second
-  // sidecar beside the first, for ever, and call that a render — which
-  // is not a service, it is a duplicate the user then has to find and
-  // delete. A take that CAN be rendered and was simply asked for nothing
-  // is a different thing and still copies: `--effects=none` is a real
-  // request for the raw pixels as the deliverable.
+  // A render that would apply NOTHING is refused rather than copied.
+  // Copying produces a byte-identical second movie and a second sidecar
+  // beside the first, for ever, and calls that a render — which is not a
+  // service, it is a duplicate the user then has to find and delete.
+  //
+  // The question is what ACTUALLY applied, not what the take could take
+  // in principle. Asking availability let a take through whose sidecar
+  // had a button event the zoom could not use — CanZoomOnClick is true
+  // for any click at all, and the render then drops the right-button
+  // ones, the menu-bar ones and the ones outside the rectangle — so
+  // `render --effects=zoom` on a take with no usable click reported
+  // success and wrote the duplicate.
+  //
+  // `--effects=none` is the exception and the only one: a real request
+  // for the raw pixels as the deliverable, which is a copy on purpose.
   Available := AvailableExportEffects(FLog);
-  if not (Available.CanDrawCursor or Available.CanZoomOnClick) then
+  if not (FReport.ZoomApplied or FReport.CursorDrawn or FExplicitCopy) then
   begin
-    AError := 'nothing in this take can be applied after the fact';
+    AError := 'nothing this render was asked for can be applied to this '
+      + 'take';
     // The loader's reason wins where there is one: a sidecar refused for
     // its VERSION is a different problem from one that is not there, and
     // the refusal is the only place either is ever said out loud.
     if FSidecarLoadError <> '' then
       AError := AError + ' (' + FSidecarLoadError + ')'
+    else if FReport.ZoomNote <> '' then
+      AError := AError + ' (' + FReport.ZoomNote + ')'
+    else if FReport.CursorNote <> '' then
+      AError := AError + ' (' + FReport.CursorNote + ')'
     else if Available.Reason <> '' then
       AError := AError + ' (' + Available.Reason + ')';
     AError := AError + '; it is already the deliverable';
@@ -1658,7 +1729,9 @@ begin
 
   if not FReport.ZoomApplied and not FReport.CursorDrawn then
   begin
-    // Nothing was asked for that applies. The deliverable is the take.
+    // Only reachable through FExplicitCopy now: the caller asked for the
+    // raw pixels as the deliverable. The take is copied byte for byte
+    // rather than re-encoded to produce the same picture.
     if not CopyRawTake(AError) then
     begin
       SweepTemporaries;
@@ -1785,12 +1858,7 @@ begin
   // — this is the only note of the three about the PIXELS being other
   // than the take could account for, and a cosmetic note about an effect
   // must not be able to hide it.
-  if FReport.UnframedFrames > 0 then
-    FReport.FramingNote := Format('%d frame(s) run past the end of this '
-      + 'take''s pointer track, so what they were showing is not '
-      + 'recorded; nothing was cropped for them and the pointer was '
-      + 'placed from the last position the track holds',
-      [FReport.UnframedFrames]);
+  FReport.FramingNote := UnframedFramesNote(FReport.UnframedFrames);
   FReport.Note := EffectNoteSummary(FReport.FramingNote,
     FReport.CursorNote, FReport.ZoomNote);
   MeasureOutput;

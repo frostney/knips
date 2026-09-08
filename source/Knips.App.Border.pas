@@ -135,7 +135,6 @@ uses
 const
   ViewClassName = 'KnipsBorderView';
   ViewSuperclassName = 'NSView';
-  OwnerIvarName = 'knipsOwner';
   // Points, so two device pixels on a Retina display — a one-point hair
   // reads as a smudge next to a window edge. The whole width lies
   // outside the recorded rectangle, so widening it costs the user

@@ -44,6 +44,9 @@ type
     procedure TestEveryRequiredKeyIsDeclared;
     procedure TestTheNewToolsPromiseTheirAnswers;
     procedure TestUnconditionalKeysAreRequired;
+    procedure TestTheExportsDeclareWhatTheyEmit;
+    procedure TestAPayloadIsCheckedAgainstItsOwnSchema;
+    procedure TestEveryToolHasReadableProperties;
   end;
 
   TRenderArgumentTests = class(TTestSuite)
@@ -84,6 +87,8 @@ type
     procedure TestNamesTheRenderOutput;
     procedure TestUsableClicksIsTheRendersOwnCount;
     procedure TestASparseTrackSaysSoInWords;
+    procedure TestEveryKeyItCarriesIsDeclared;
+    procedure TestItReportsWhatTheLoaderCouldNotUse;
   end;
 
   TScalarTests = class(TTestSuite)
@@ -94,6 +99,7 @@ type
     procedure TestReadsInteger;
     procedure TestRejectsFractionalInteger;
     procedure TestRejectsStringForInteger;
+    procedure TestRejectsAnIntegerOutsideTheSignedRange;
     procedure TestReadsNumber;
     procedure TestReadsStringAndBoolean;
     procedure TestRejectsWrongStringType;
@@ -186,7 +192,6 @@ type
   public
     procedure SetupTests; override;
     procedure TestRecordingSummaryNamesThePath;
-    procedure TestExportSummaryNamesTheFormat;
     procedure TestSparseTrackNoteOnlyForARawTake;
   end;
 
@@ -266,12 +271,25 @@ end;
 
 procedure TToolTableTests.TestEveryToolIsDescribed;
 var
-  Tool: TKnipsMcpTool;
+  Tool, Other: TKnipsMcpTool;
 begin
   // A tool an agent cannot tell apart from another is a tool it will
-  // pick wrong; the description is the whole selection surface.
+  // pick wrong; the description is the whole selection surface. So the
+  // check is that they DIFFER, not merely that each is long enough —
+  // ten identical thirty-character descriptions would have passed the
+  // old assertion and told a client nothing.
   for Tool := Low(TKnipsMcpTool) to High(TKnipsMcpTool) do
+  begin
     Expect<Boolean>(Length(KnipsMcpToolDescription(Tool)) > 30).ToBe(True);
+    for Other := Low(TKnipsMcpTool) to High(TKnipsMcpTool) do
+      if Other <> Tool then
+        Expect<Boolean>(KnipsMcpToolDescription(Other)
+          = KnipsMcpToolDescription(Tool)).ToBe(False);
+    // And no flag spellings: a description is the one place a client is
+    // told what a tool does, and `--out` is not an argument it has.
+    Expect<Boolean>(Pos('--', KnipsMcpToolDescription(Tool)) > 0)
+      .ToBe(False);
+  end;
 end;
 
 { TOutputSchemaTests }
@@ -285,6 +303,12 @@ begin
     TestTheNewToolsPromiseTheirAnswers);
   Test('an always-emitted key is a required key',
     TestUnconditionalKeysAreRequired);
+  Test('the exports declare the six fields they always emitted',
+    TestTheExportsDeclareWhatTheyEmit);
+  Test('a payload is checked against its own schema, key by key',
+    TestAPayloadIsCheckedAgainstItsOwnSchema);
+  Test('every tool''s property list is readable',
+    TestEveryToolHasReadableProperties);
 end;
 
 function TOutputSchemaTests.SchemaOf(ATool: TKnipsMcpTool): TJSONObject;
@@ -427,6 +451,113 @@ begin
     'cursor_off_frame_frames']);
 end;
 
+procedure TOutputSchemaTests.TestTheExportsDeclareWhatTheyEmit;
+
+  procedure PinDeclaredAndRequired(ATool: TKnipsMcpTool;
+    const AKeys: array of string);
+  var
+    Schema, Properties: TJSONObject;
+    Required: TJSONArray;
+    I, J: Integer;
+    Found: Boolean;
+  begin
+    Schema := SchemaOf(ATool);
+    try
+      Properties := Schema.Find('properties') as TJSONObject;
+      Required := Schema.Find('required') as TJSONArray;
+      for I := Low(AKeys) to High(AKeys) do
+      begin
+        Expect<Boolean>(Properties.Find(AKeys[I]) <> nil).ToBe(True);
+        Found := False;
+        for J := 0 to Required.Count - 1 do
+          if Required[J].AsString = AKeys[I] then
+            Found := True;
+        Expect<Boolean>(Found).ToBe(True);
+      end;
+    finally
+      Schema.Free;
+    end;
+  end;
+
+begin
+  // The six the export handlers emitted on every successful path and
+  // this schema did not declare at all — a GIF's palette among them,
+  // which is the single biggest fact about what the file looks like. A
+  // client validating structuredContent in strict mode rejected a good
+  // export over them; one planning against the schema could not see
+  // them. Emitted unconditionally, so promised unconditionally.
+  PinDeclaredAndRequired(kmtExportGif, ['palette_colors', 'exact_palette',
+    'sampled_frames', 'synthesized_frames', 'synthesis_fps',
+    'unframed_frames', 'sidecar_skipped_lines']);
+  PinDeclaredAndRequired(kmtExportApng, ['palette_colors',
+    'exact_palette', 'sampled_frames', 'synthesized_frames',
+    'synthesis_fps', 'unframed_frames', 'sidecar_skipped_lines']);
+  // The render says it too, and take_info answers it for a take nobody
+  // has rendered yet.
+  PinDeclaredAndRequired(kmtRender, ['sidecar_skipped_lines']);
+end;
+
+procedure TOutputSchemaTests.TestAPayloadIsCheckedAgainstItsOwnSchema;
+var
+  Payload: TJSONObject;
+begin
+  // The check itself, on a payload built to be wrong. This is what runs
+  // at the one place every structured result leaves the server
+  // (Knips.Mcp.KnipsStructuredResult), so a payload that outgrows its
+  // schema says so on the first call rather than at the next audit.
+  Payload := TJSONObject.Create(['path', '/tmp/demo.gif',
+    'palette_colors', 255]);
+  try
+    Expect<string>(McpUndeclaredPayloadKeys(kmtExportGif, Payload))
+      .ToBe('');
+  finally
+    Payload.Free;
+  end;
+  Payload := TJSONObject.Create(['path', '/tmp/demo.gif',
+    'invented_field', 3]);
+  try
+    Expect<string>(McpUndeclaredPayloadKeys(kmtExportGif, Payload))
+      .ToBe('invented_field');
+  finally
+    Payload.Free;
+  end;
+  // Every offender named, not just the first: a schema that has fallen
+  // this far behind is fixed in one pass or not at all.
+  Payload := TJSONObject.Create(['first_invention', 1,
+    'second_invention', 2]);
+  try
+    Expect<string>(McpUndeclaredPayloadKeys(kmtRender, Payload))
+      .ToBe('first_invention, second_invention');
+  finally
+    Payload.Free;
+  end;
+  // A tool with no payload at all is not an offender.
+  Expect<string>(McpUndeclaredPayloadKeys(kmtRender, nil)).ToBe('');
+end;
+
+procedure TOutputSchemaTests.TestEveryToolHasReadableProperties;
+var
+  Tool: TKnipsMcpTool;
+  Names: TMcpKeyArray;
+  Schema, Properties: TJSONObject;
+begin
+  // The parse the check above depends on. An unreadable schema would
+  // make every key look undeclared, which is a loud failure rather than
+  // a silent one — but only if the parse is exercised on every host.
+  for Tool := Low(TKnipsMcpTool) to High(TKnipsMcpTool) do
+  begin
+    Names := KnipsMcpSchemaProperties(Tool);
+    Expect<Boolean>(Length(Names) > 0).ToBe(True);
+    Schema := SchemaOf(Tool);
+    try
+      Properties := Schema.Find('properties') as TJSONObject;
+      Expect<Integer>(Length(Names)).ToBe(Properties.Count);
+    finally
+      Schema.Free;
+    end;
+  end;
+end;
+
 { TRenderArgumentTests }
 
 procedure TRenderArgumentTests.SetupTests;
@@ -508,6 +639,8 @@ begin
   Test('an explicit null counts as absent', TestNullCountsAsAbsent);
   Test('reads an integer', TestReadsInteger);
   Test('rejects a fractional integer', TestRejectsFractionalInteger);
+  Test('rejects a whole number outside the 32-bit signed range',
+    TestRejectsAnIntegerOutsideTheSignedRange);
   Test('rejects a string where an integer belongs',
     TestRejectsStringForInteger);
   Test('reads a fractional number', TestReadsNumber);
@@ -606,6 +739,52 @@ begin
     Expect<Boolean>(McpOptionalInteger(Arguments, 'fps', Value,
       Error)).ToBe(False);
     Expect<Boolean>(Error <> '').ToBe(True);
+  finally
+    Arguments.Free;
+  end;
+end;
+
+procedure TScalarTests.TestRejectsAnIntegerOutsideTheSignedRange;
+var
+  Arguments: TJSONObject;
+  Value: Integer;
+  Error: string;
+begin
+  // `{"width": 4294971392}` is a whole number and legal JSON, and it
+  // used to reach `AValue: Integer` as a truncating Int64 assignment:
+  // the client got `Tool execution failed: Range check error`, a leaked
+  // implementation detail where a refusal naming the argument belonged.
+  Arguments := ParseArguments('{"width": 4294971392}');
+  try
+    Value := 800;
+    Expect<Boolean>(McpOptionalInteger(Arguments, 'width', Value,
+      Error)).ToBe(False);
+    Expect<Boolean>(Pos('width', Error) > 0).ToBe(True);
+    Expect<Boolean>(Pos('out of range', Error) > 0).ToBe(True);
+    // Refused, and the caller's value untouched: a refusal that half
+    // applied itself would be worse than the range check error.
+    Expect<Integer>(Value).ToBe(800);
+  finally
+    Arguments.Free;
+  end;
+  // The other end, and the same answer.
+  Arguments := ParseArguments('{"width": -4294971392}');
+  try
+    Value := 800;
+    Expect<Boolean>(McpOptionalInteger(Arguments, 'width', Value,
+      Error)).ToBe(False);
+    Expect<Integer>(Value).ToBe(800);
+  finally
+    Arguments.Free;
+  end;
+  // And the boundaries themselves are inside the range, so the check is
+  // a range check and not an off-by-one.
+  Arguments := ParseArguments('{"width": 2147483647}');
+  try
+    Value := 0;
+    Expect<Boolean>(McpOptionalInteger(Arguments, 'width', Value,
+      Error)).ToBe(True);
+    Expect<Integer>(Value).ToBe(2147483647);
   finally
     Arguments.Free;
   end;
@@ -1906,6 +2085,10 @@ begin
     TestUsableClicksIsTheRendersOwnCount);
   Test('a sparse track says so in words as well as numbers',
     TestASparseTrackSaysSoInWords);
+  Test('every key the answer carries is declared in the schema',
+    TestEveryKeyItCarriesIsDeclared);
+  Test('a sidecar with unreadable lines says how many',
+    TestItReportsWhatTheLoaderCouldNotUse);
 end;
 
 function TTakeInfoTests.Info(const ASidecar: string): TJSONObject;
@@ -2051,8 +2234,12 @@ var
 begin
   Answer := Info(TakeSidecar('smooth', True));
   try
+    // The literal path, not the function that produced it: asserting
+    // one call of DefaultMcpRenderPath against another only says the
+    // payload used that function, which is the one thing the reader can
+    // already see. What is under test is the path a client receives.
     Expect<string>(Answer.Get('render_output_path', ''))
-      .ToBe(DefaultMcpRenderPath('/tmp/demo.mp4'));
+      .ToBe('/tmp/demo-rendered.mp4');
   finally
     Answer.Free;
   end;
@@ -2139,14 +2326,68 @@ begin
   end;
 end;
 
+procedure TTakeInfoTests.TestEveryKeyItCarriesIsDeclared;
+
+  procedure ExpectDeclared(const ASidecar: string);
+  var
+    Answer: TJSONObject;
+  begin
+    Answer := Info(ASidecar);
+    try
+      Expect<string>(McpUndeclaredPayloadKeys(kmtTakeInfo, Answer))
+        .ToBe('');
+    finally
+      Answer.Free;
+    end;
+  end;
+
+begin
+  // The real builder against the real schema, over every shape this
+  // answer has: no sidecar at all, a finished take, a take with no
+  // trailer, and one whose loader threw a line away. take_info is the
+  // one payload builder in this program that is neutral, so it is the
+  // one this check can drive off Darwin — the other nine are checked at
+  // the chokepoint every structured result leaves the server through
+  // (Knips.Mcp.KnipsStructuredResult).
+  ExpectDeclared('');
+  ExpectDeclared(TakeSidecar('smooth', True));
+  ExpectDeclared(TakeSidecar('system', False));
+  ExpectDeclared(DenseSidecar);
+  ExpectDeclared(TakeSidecar('smooth', True) + LineEnding
+    + '{"k":"cursor","t":100.0,"x":1,"y":2,"b":0}');
+end;
+
+procedure TTakeInfoTests.TestItReportsWhatTheLoaderCouldNotUse;
+var
+  Answer: TJSONObject;
+begin
+  // Clean file, nothing thrown away.
+  Answer := Info(TakeSidecar('smooth', True));
+  try
+    Expect<Integer>(Answer.Get('sidecar_skipped_lines', -1)).ToBe(0);
+  finally
+    Answer.Free;
+  end;
+  // Two lines the loader cannot use: a stamp that does not advance and
+  // a record kind this version does not know. Neither is an error and
+  // both leave the track thinner than the file looks, which is a fact a
+  // client planning a render is entitled to before it spends the time.
+  Answer := Info(TakeSidecar('smooth', True) + LineEnding
+    + '{"k":"cursor","t":100.0,"x":1,"y":2,"b":0}' + LineEnding
+    + '{"k":"invented","t":105.0}');
+  try
+    Expect<Integer>(Answer.Get('sidecar_skipped_lines', -1)).ToBe(2);
+  finally
+    Answer.Free;
+  end;
+end;
+
 { TSummaryTests }
 
 procedure TSummaryTests.SetupTests;
 begin
   Test('a recording summary names its file',
     TestRecordingSummaryNamesThePath);
-  Test('an export summary names its format',
-    TestExportSummaryNamesTheFormat);
   Test('the sparse-track note fires only for a raw take',
     TestSparseTrackNoteOnlyForARawTake);
 end;
@@ -2159,16 +2400,6 @@ begin
   Expect<Boolean>(Pos('/tmp/clip.mp4', Line) > 0).ToBe(True);
   Expect<Boolean>(Pos('1280x720', Line) > 0).ToBe(True);
   Expect<Boolean>(Pos('128 frames', Line) > 0).ToBe(True);
-end;
-
-procedure TSummaryTests.TestExportSummaryNamesTheFormat;
-var
-  Line: string;
-begin
-  Line := McpExportSummary('/tmp/clip.gif', efGif, 800, 450, 60, 3.0,
-    2048 * 1024);
-  Expect<Boolean>(Pos('GIF', Line) > 0).ToBe(True);
-  Expect<Boolean>(Pos('2048 kB', Line) > 0).ToBe(True);
 end;
 
 procedure TSummaryTests.TestSparseTrackNoteOnlyForARawTake;

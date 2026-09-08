@@ -28,6 +28,7 @@ uses
 
   CocoaAll,
   Knips.Capture.CoreMedia,
+  Knips.Export.Bitmap,
   MacOSAll;
 
 {$linkframework AVFoundation}
@@ -140,10 +141,14 @@ type
     FSample: CMSampleBufferRef;
     FPixelWidth: Integer;
     FPixelHeight: Integer;
+    // Whether the picture has been measured rather than taken from the
+    // header. Set once, by MeasurePicture, at Open.
+    FMeasuredPicture: Boolean;
     FDurationSeconds: Double;
     FNominalFrameRate: Double;
     FLastError: string;
     procedure ReleaseSample;
+    procedure MeasurePicture;
     function BuildOutputSettings: NSDictionary;
     function ReaderError(const APrefix: string): string;
   public
@@ -161,6 +166,9 @@ type
     // because the reader failed rather than because it ran out.
     function NextFrame(out AFrame: TMovieReaderFrame): Boolean;
     procedure StopPass;
+    // The decoded picture's own size, measured at Open from one real
+    // frame. The track's naturalSize only when nothing decoded at all —
+    // a header is a claim, and it is not taken on trust.
     property PixelWidth: Integer read FPixelWidth;
     property PixelHeight: Integer read FPixelHeight;
     property DurationSeconds: Double read FDurationSeconds;
@@ -231,6 +239,7 @@ var
   URL: NSURL;
   Tracks: NSArray;
   Size: CGSize;
+  Refusal: string;
 begin
   Result := False;
   AError := '';
@@ -287,7 +296,75 @@ begin
   if not (FDurationSeconds > 0) then
     FDurationSeconds := 0;
   FNominalFrameRate := FTrack.nominalFrameRate;
+
+  // A container header is a claim, not a measurement, and every consumer
+  // downstream sizes its buffers from this number. An MP4 whose tkhd and
+  // avc1 say 30000x30000 over 800x600 media is one hex edit away from
+  // any recording; believing it cost 6.4 GB resident.
+  //
+  // The claim is checked BEFORE anything is decoded, so an absurd one
+  // costs a directory read and a refusal rather than a decode pass over
+  // a file that was never going to be exported. Then one frame is
+  // decoded and the picture settles what the header only asserted: a
+  // decoder that hands back 800x600 for an 8000x8000 tkhd has told us
+  // which of the two to believe. (A decoder that honours the sample
+  // entry and pads the picture out to the header's size has told us
+  // that too, and the budget above is what bounds *that*.) A movie
+  // nothing decodes keeps the header's numbers, which are then all
+  // there is.
+  Refusal := BgraCanvasRefusal(FPixelWidth, FPixelHeight);
+  if Refusal <> '' then
+  begin
+    AError := Format('%s reports a %dx%d video track: %s',
+      [FInputPath, FPixelWidth, FPixelHeight, Refusal]);
+    Exit;
+  end;
+  MeasurePicture;
+  // One decode, and then the SAME budget again against what came back.
+  // The check above is against the header's claim; MeasurePicture then
+  // overwrites FPixelWidth/FPixelHeight with the picture the decoder
+  // actually produced, and everything downstream sizes its buffers from
+  // those — the render's pixel-buffer pool, its vImage scratch, the
+  // export's canvases. A decoder that pads an 800x600 media out to a
+  // hostile sample entry would have walked straight past a check that
+  // ran only on the header.
+  Refusal := BgraCanvasRefusal(FPixelWidth, FPixelHeight);
+  if Refusal <> '' then
+  begin
+    AError := Format('%s decodes to a %dx%d picture: %s',
+      [FInputPath, FPixelWidth, FPixelHeight, Refusal]);
+    Exit;
+  end;
   Result := True;
+end;
+
+// The probe Open runs: one decode pass over the head of the movie, the
+// first real frame's dimensions, and then the pass is thrown away. The
+// reader is rewound by StartPass, so this costs the caller nothing but
+// the one keyframe.
+procedure TMovieReader.MeasurePicture;
+var
+  Frame: TMovieReaderFrame;
+  Error: string;
+begin
+  if FMeasuredPicture then
+    Exit;
+  FMeasuredPicture := True;
+  if not StartPass(0, 0, Error) then
+    Exit;
+  try
+    if not NextFrame(Frame) then
+      Exit;
+    if (Integer(CVPixelBufferGetWidth(Frame.PixelBuffer)) > 0)
+      and (Integer(CVPixelBufferGetHeight(Frame.PixelBuffer)) > 0) then
+    begin
+      FPixelWidth := Integer(CVPixelBufferGetWidth(Frame.PixelBuffer));
+      FPixelHeight := Integer(CVPixelBufferGetHeight(Frame.PixelBuffer));
+    end;
+  finally
+    StopPass;
+    FLastError := '';
+  end;
 end;
 
 function TMovieReader.BuildOutputSettings: NSDictionary;

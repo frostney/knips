@@ -21,6 +21,7 @@ uses
 
   CocoaAll,
   Knips.Capture.ScreenCaptureKit,
+  Knips.Options,
   MacOSAll;
 
 type
@@ -97,8 +98,7 @@ implementation
 const
   // 5000 x 1 ms run-loop slices, as in the prototype.
   QueryTimeoutSlices = 5000;
-  RunLoopSliceSeconds = 0.001;
-  DefaultQueryTimeoutSeconds = QueryTimeoutSlices * RunLoopSliceSeconds;
+  DefaultQueryTimeoutSeconds = QueryTimeoutSlices * FrameworkSliceSeconds;
 
 var
   GContentResult: SCShareableContent = nil;
@@ -187,13 +187,13 @@ begin
     SCShareableContent.getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
       ObjCBOOL(False), ObjCBOOL(True), ContentCompletionHandler);
 
-    Slices := Round(ATimeoutSeconds / RunLoopSliceSeconds);
+    Slices := Round(ATimeoutSeconds / FrameworkSliceSeconds);
     if Slices < 1 then
       Slices := 1;
     WaitCount := 0;
     while (not GContentReady) and (WaitCount < Slices) do
     begin
-      CFRunLoopRunInMode(kCFRunLoopDefaultMode, RunLoopSliceSeconds, False);
+      CFRunLoopRunInMode(kCFRunLoopDefaultMode, FrameworkSliceSeconds, False);
       Inc(WaitCount);
     end;
 

@@ -137,7 +137,8 @@ begin
   Result := False;
   ARecording := DefaultRecordingOptions;
   ARecording.OutputPath := StringValue(AOptions, 'out', '');
-  ARecording.DisplayIndex := IntegerValue(AOptions, 'display', -1);
+  ARecording.DisplayIndex := IntegerValue(AOptions, 'display',
+    MainDisplayIndex);
   ARecording.WindowID := Cardinal(IntegerValue(AOptions, 'window', 0));
   if FlagPresent(AOptions, 'window') then
     ARecording.TargetKind := ctkWindow;
@@ -183,8 +184,6 @@ function BuildExportOptions(const AOptions: TOptionArray;
   out AExport: TExportOptions; out AError: string): Boolean;
 var
   TrimText, CursorText, EffectsText: string;
-  FromCursorFlag: TExportCursorMode;
-  CursorNamed: Boolean;
 begin
   Result := False;
   AExport := DefaultExportOptions;
@@ -198,32 +197,15 @@ begin
   // MP4 render all take. --cursor names one member of it; --effects names
   // the set, and is what the playback window's control and `knips render`
   // both speak.
+  // Both spellings, reconciled in Knips.Options: naming two cursor words
+  // INSIDE one --effects list is already refused rather than resolved
+  // last-one-wins (ParseExportEffects), and this is the same rule across
+  // the two ways of saying it.
   CursorText := StringValue(AOptions, 'cursor', '');
-  if not ParseExportCursorMode(CursorText, AExport.Effects.Cursor) then
-  begin
-    AError := '--cursor must be as-recorded, none, smooth, or big';
-    Exit;
-  end;
-  FromCursorFlag := AExport.Effects.Cursor;
   EffectsText := StringValue(AOptions, 'effects', '');
-  if not ParseExportEffectsNaming(EffectsText, AExport.Effects,
-    CursorNamed, AError) then
+  if not ReconcileCursorAndEffects(CursorText, EffectsText, AExport.Effects,
+    AError) then
     Exit;
-  // Two spellings of one setting, and the list ran second — so
-  // `--cursor=big --effects=smooth-cursor` used to apply the list and
-  // throw the flag away without a word. Naming two cursor words INSIDE
-  // one --effects list is already refused rather than resolved
-  // last-one-wins (ParseExportEffects); this is the same rule across the
-  // two ways of saying it. Agreeing is fine: `--cursor=none
-  // --effects=no-cursor` says one thing twice.
-  if (Trim(CursorText) <> '') and CursorNamed
-    and (AExport.Effects.Cursor <> FromCursorFlag) then
-  begin
-    AError := '--cursor and --effects both name the pointer and disagree '
-      + '(--cursor=' + Trim(CursorText) + ' against --effects='
-      + Trim(EffectsText) + '); pass one of them';
-    Exit;
-  end;
 
   TrimText := StringValue(AOptions, 'trim', '');
   if TrimText <> '' then
@@ -456,7 +438,9 @@ end;
 
 // True when the movie beside this path was recorded with the pointer left
 // out for an export to draw back. Reading the sidecar's header is enough,
-// so this does not load a track it is not going to use.
+// and now that is all it reads: the comment made that claim while the
+// call underneath it parsed the whole track — every sample of it — to
+// look at one field of line one.
 function MovieWantsSmoothCursor(const AMoviePath: string): Boolean;
 var
   Log: TSidecarLog;
@@ -465,7 +449,7 @@ begin
   Result := False;
   Log := TSidecarLog.Create;
   try
-    if Log.LoadFromFile(SidecarPathFor(AMoviePath), Error) then
+    if Log.LoadFromFile(SidecarPathFor(AMoviePath), slmHeaderOnly, Error) then
       Result := Log.Header.CursorRender = scrSmooth;
   finally
     Log.Free;
@@ -498,6 +482,10 @@ begin
       + '--no-dither do not apply to a passthrough trim and are ignored');
     Flush(ErrOutput);
   end;
+  // Ctrl-C mid-trim now fails cleanly rather than killing the process
+  // where it stands: the neighbour is swept and the movie the caller
+  // already had is untouched (Knips.Export.Atomic).
+  InstallStopSignals;
   Session := TMovieTrimSession.Create(AOptions);
   try
     if not Session.Run(Error) then
@@ -506,10 +494,9 @@ begin
       Flush(ErrOutput);
       Exit(ExitFailure);
     end;
-    WriteLn(Format('wrote %s: %.2fs–%.2fs of %.2fs, %d kB (streams copied)',
-      [Session.Report.OutputPath, Session.Report.StartSeconds,
-      Session.Report.EndSeconds, Session.Report.SourceDurationSeconds,
-      Session.Report.OutputBytes div 1024]));
+    WriteLn(TrimSummaryLine(Session.Report.OutputPath,
+      Session.Report.StartSeconds, Session.Report.EndSeconds,
+      Session.Report.SourceDurationSeconds, Session.Report.OutputBytes));
     Result := ExitOk;
   finally
     Session.Free;
@@ -521,7 +508,7 @@ function HandleExport(const APositionals: TStringList;
 var
   Options: TExportOptions;
   Session: TExportSession;
-  Error, Warning, Palette: string;
+  Error, Warning: string;
 begin
   if not BuildExportOptions(AOptions, Options, Error) then
   begin
@@ -531,6 +518,9 @@ begin
   end;
   if Options.Format = efMovie then
     Exit(HandleTrimExport(Options, AOptions));
+  // See HandleTrimExport: an export that is stopped must not be able to
+  // destroy the animation that was already at that path.
+  InstallStopSignals;
   Session := TExportSession.Create(Options);
   try
     if not Session.Run(Error) then
@@ -539,31 +529,16 @@ begin
       Flush(ErrOutput);
       Exit(ExitFailure);
     end;
-    if Session.Report.Format = efGif then
-    begin
-      Palette := Format(' (%d colours', [Session.Report.PaletteColors]);
-      if not Session.Report.ExactPalette then
-        Palette := Palette + ', 6-bit histogram';
-      Palette := Palette + ')';
-    end
-    else
-      Palette := ' (truecolour)';
-    // The synthetic pointer, when there was one. Counted rather than
-    // assumed: a pointer that was asked for and drawn into nothing looks
-    // exactly like one that was never asked for.
-    if Session.Report.SmoothCursor then
-      Palette := Palette + Format(
-        ', export cursor on %d frames (%d off frame)',
-        [Session.Report.SmoothCursorFrames,
-        Session.Report.SmoothCursorOffFrame]);
-    if Session.Report.ZoomOnClick then
-      Palette := Palette + Format(', zoom on %d frames from %d clicks',
-        [Session.Report.ZoomedFrames, Session.Report.ZoomClicks]);
-    WriteLn(Format('wrote %s: %dx%d, %d frames, %.1fs, %d kB%s',
-      [Session.Report.OutputPath, Session.Report.PixelWidth,
-      Session.Report.PixelHeight, Session.Report.FramesWritten,
-      Session.Report.DurationSeconds, Session.Report.OutputBytes div 1024,
-      Palette]));
+    // Every clause of what this export did, composed once in
+    // Knips.Options so the CLI, the MCP export tools and the playback
+    // window describe the same work in the same words and the same
+    // order. The render round did this for renders and never reached
+    // the export side; this is that half.
+    WriteLn(ExportSummaryLine(Session.Report.OutputPath,
+      Session.Report.PixelWidth, Session.Report.PixelHeight,
+      Session.Report.FramesWritten, Session.Report.DurationSeconds,
+      Session.Report.OutputBytes,
+      ExportAppliedSummary(ExportFactsOf(Session.Report))));
     // The sidecar asked for a pointer and it could not be drawn. Never a
     // failure — the animation is right, it is the pointer that is missing
     // — but never silent either, because the movie has none of its own.
@@ -591,7 +566,17 @@ begin
     begin
       Flush(Output);
       WriteLn(ErrOutput, ProgramName, ' export: ',
-        Session.Report.FramingNote);
+        EffectFramingNoteLine(Session.Report.FramingNote));
+      Flush(ErrOutput);
+    end;
+    // And what the sidecar loader could not use. The loader is tolerant
+    // on purpose and says nothing about it; a run that drew a pointer
+    // from a track with holes in it should say so.
+    if Session.Report.SidecarSkippedLines > 0 then
+    begin
+      Flush(Output);
+      WriteLn(ErrOutput, ProgramName, ' export: ',
+        SidecarSkippedLinesNote(Session.Report.SidecarSkippedLines));
       Flush(ErrOutput);
     end;
     // How close the pre-export estimate came. Printed because an estimate
@@ -631,7 +616,7 @@ var
   Effects: TExportEffects;
   Facts: TRenderAppliedFacts;
   Session: TRenderSession;
-  InputPath, OutputPath, Error, Applied: string;
+  InputPath, OutputPath, Error, Applied, EffectsText: string;
 begin
   InputPath := StringValue(AOptions, 'in', '');
   OutputPath := StringValue(AOptions, 'out', '');
@@ -666,15 +651,19 @@ begin
     Flush(ErrOutput);
     Exit(ExitUsage);
   end;
+  EffectsText := StringValue(AOptions, 'effects', '');
   Effects := DefaultExportEffects;
-  if not ParseExportEffects(StringValue(AOptions, 'effects', ''), Effects,
-    Error) then
+  if not ParseExportEffects(EffectsText, Effects, Error) then
   begin
     WriteLn(ErrOutput, ProgramName, ' render: ', Error);
     Flush(ErrOutput);
     Exit(ExitUsage);
   end;
+  InstallStopSignals;
   Session := TRenderSession.Create(InputPath, OutputPath, Effects);
+  // `--effects=none` is a request for the raw pixels as the
+  // deliverable, and the only way to ask a render to apply nothing.
+  Session.ExplicitCopy := ExportEffectsRequestCopy(EffectsText);
   try
     if not Session.Run(Error) then
     begin
@@ -687,20 +676,11 @@ begin
     // the same work in the same words. The two used to hold a
     // byte-identical copy of it each, which is exactly the duplication
     // that drifts the first time one clause is reworded.
-    Facts := RenderAppliedFacts;
-    Facts.ZoomApplied := Session.Report.ZoomApplied;
-    Facts.ZoomedFrames := Session.Report.ZoomedFrames;
-    Facts.FramesWritten := Session.Report.FramesWritten;
-    Facts.UsableClicks := Session.Report.UsableClicks;
-    Facts.CursorDrawn := Session.Report.CursorDrawn;
-    Facts.CursorFrames := Session.Report.CursorFrames;
-    Facts.CursorOffFrameFrames := Session.Report.CursorOffFrameFrames;
-    Facts.SynthesizedFrames := Session.Report.SynthesizedFrames;
-    Facts.SynthesisFramesPerSecond :=
-      Session.Report.SynthesisFramesPerSecond;
-    Facts.AudioTracks := Session.Report.AudioTracks;
-    Facts.AudioPassthrough := Session.Report.AudioPassthrough;
-    Facts.AudioSamples := Session.Report.AudioSamples;
+    // Fourteen assignments used to sit here and again in the other
+    // front end, byte for byte. The report is the render's own record,
+    // so the render is where it gets turned into the neutral facts the
+    // wording is composed from.
+    Facts := RenderFactsOf(Session.Report);
     Applied := RenderAppliedSummary(Facts);
     WriteLn(RenderSummaryLine(Session.Report.OutputPath,
       Session.Report.PixelWidth, Session.Report.PixelHeight,
@@ -726,7 +706,7 @@ begin
     Flush(Output);
     if Session.Report.FramingNote <> '' then
       WriteLn(ErrOutput, ProgramName, ' render: ',
-        Session.Report.FramingNote);
+        EffectFramingNoteLine(Session.Report.FramingNote));
     // The two wrappers come from Knips.Options for the same reason the
     // clause list above does: one field, one set of words, whichever
     // face is reporting it.
@@ -736,6 +716,11 @@ begin
     if Session.Report.ZoomNote <> '' then
       WriteLn(ErrOutput, ProgramName, ' render: ',
         EffectZoomNoteLine(Session.Report.ZoomNote));
+    // And what the sidecar loader could not use — same sentence the
+    // export prints, from the same function.
+    if Session.Report.SidecarSkippedLines > 0 then
+      WriteLn(ErrOutput, ProgramName, ' render: ',
+        SidecarSkippedLinesNote(Session.Report.SidecarSkippedLines));
     Flush(ErrOutput);
     Result := ExitOk;
   finally
@@ -808,7 +793,9 @@ begin
         Continue;
       if (Window.Width = 0) or (Window.Height = 0) then
         Continue;
-      WriteLn(Format('%-10d  %5dx%-5d   %-22s %s', [Window.WindowID,
+      // %u, not %d: a CGWindowID is unsigned and 4294967295 printed as
+      // "-1" is not an id anybody can pass back in.
+      WriteLn(Format('%-10u  %5dx%-5d   %-22s %s', [Window.WindowID,
         Window.Width, Window.Height, Copy(Window.ApplicationName, 1, 22),
         Window.Title]));
     end;
@@ -976,11 +963,19 @@ begin
       Exit;
     end;
     Sustainable := 1000 / Milliseconds;
+    // Two different numbers, and the difference is the point.
+    // Sustainable is arithmetic: what the per-frame mean implies if
+    // nothing else ever gets in the way. Achieved is what the run
+    // actually managed, wall clock, queue waits and all — it is the one
+    // TCameraBlur reports live and the one nothing printed, so a
+    // pipeline that was fast per frame and slow in aggregate looked
+    // fine here.
     WriteLn(Format('camera background blur cost: %.1f ms/frame at '
-      + '%dx%d (%.1f ms of it Vision), %.0f fps sustainable against a '
-      + '%d fps preview', [Milliseconds, FrameWidth, FrameHeight,
+      + '%dx%d (%.1f ms of it Vision), %.0f fps sustainable and %.0f fps '
+      + 'achieved against a %d fps preview',
+      [Milliseconds, FrameWidth, FrameHeight,
       Blur.MeanSegmentationMilliseconds, Sustainable,
-      PreviewFramesPerSecond]));
+      Blur.AchievedFramesPerSecond, PreviewFramesPerSecond]));
     if Sustainable < PreviewFramesPerSecond then
       WriteLn('camera background blur: SLOWER than the preview on this '
         + 'Mac — the picture will drop frames while it is on');
@@ -1173,7 +1168,17 @@ begin
   if CameraBlurSupported then
   begin
     WriteLn('camera background blur: available (Vision + CoreImage)');
-    ProbeCameraBlurCost;
+    // Behind a flag. It costs more than the whole of the rest of the
+    // probe (the measurement is at ProbeOptions) and it gates NOTHING —
+    // a slow Mac gets a warning and the probe still passes — so the
+    // check that runs before every handoff should not be paying for it.
+    // `knips probe --blur-cost` when the question is whether this
+    // machine can hold 30 fps with the effect on.
+    if FlagPresent(AOptions, 'blur-cost') then
+      ProbeCameraBlurCost
+    else
+      WriteLn('camera background blur cost: not measured '
+        + '(pass --blur-cost)');
   end
   else
     WriteLn('camera background blur: unavailable on this Mac');
@@ -1223,7 +1228,14 @@ begin
     end;
   end;
 
-  TempPath := IncludeTrailingPathDelimiter(GetTempDir) + 'knips-probe.mp4';
+  // GetTempDir prefers $TEMP, which on macOS is not the temporary
+  // directory anybody means: $TMPDIR is, and it is the per-user one the
+  // sandbox and every other Apple convention point at. GetTempDir(False)
+  // still falls back to /tmp when neither is set.
+  TempPath := IncludeTrailingPathDelimiter(GetEnvironmentVariable('TMPDIR'));
+  if TempPath = PathDelim then
+    TempPath := IncludeTrailingPathDelimiter(GetTempDir);
+  TempPath := TempPath + 'knips-probe.mp4';
   Writer := TMovieWriter.Create(TempPath, ocMPEG4, 1280, 720,
     DefaultFramesPerSecond, MinBitRate);
   try
@@ -1318,8 +1330,27 @@ begin
 end;
 
 // Option objects are owned by the registry once the subcommand is added.
+// The one flag `probe` takes. Measuring the camera blur gates nothing
+// and costs MORE than the rest of the probe put together: measured on
+// this machine at 0.33 s of a 0.58 s run, against 0.25 s without it.
+// The comment used to say "40-50% of the probe's wall time", which was
+// the wrong side of half; this is the one place the measurement is
+// written down and the site that runs it points here.
+//
+// TOptionArray is managed and a function result is not initialised on
+// entry, so SetLength on it reads whatever the caller's variable held.
+// `Result := nil` first, here and in the three below.
+function ProbeOptions: TOptionArray;
+begin
+  Result := nil;
+  SetLength(Result, 1);
+  Result[0] := TFlagOption.Create('blur-cost',
+    'Also measure the camera background blur, which costs a few seconds');
+end;
+
 function RecordOptions: TOptionArray;
 begin
+  Result := nil;
   SetLength(Result, 11);
   Result[0] := TStringOption.Create('out',
     'Output file; .mp4 or .mov (required)');
@@ -1350,6 +1381,7 @@ end;
 
 function ExportOptions: TOptionArray;
 begin
+  Result := nil;
   SetLength(Result, 8);
   Result[0] := TStringOption.Create('in',
     'Input movie; .mp4 or .mov (required)');
@@ -1376,6 +1408,7 @@ end;
 
 function RenderOptions: TOptionArray;
 begin
+  Result := nil;
   SetLength(Result, 3);
   Result[0] := TStringOption.Create('in',
     'The raw take to render; .mp4 or .mov (required)');
@@ -1497,7 +1530,7 @@ begin
       @HandleMcp, NoOptions));
     Registry.Add(TSubcommand.Create('probe',
       'Verify the runtime-built ObjC class and framework linking', '',
-      @HandleProbe, NoOptions));
+      @HandleProbe, ProbeOptions));
     {$ELSE}
     Registry.Add(TSubcommand.Create('app',
       'Run the menu-bar app (macOS only)', '', @HandleUnsupported,

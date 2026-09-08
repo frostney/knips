@@ -1,15 +1,27 @@
-# knips pre-commit hook.
+# knips git hooks.
 #
-# Install once per fresh clone:  lefthook install
+# Install once per clone:  lefthook install
 #
-# Local pre-commit runs the canonical formatter (`lwpt format`) and
-# re-stages any files it rewrites. The heavyweight gates — `lwpt format
-# --check`, `lwpt build`, `lwpt test`, `knips probe` on a Mac — belong to
-# the PR / CI flow so local commits stay fast.
+# This file describes the ONLY automated gates knips has. There is no CI
+# service behind it: no GitHub Actions workflow, no pipeline, nothing
+# that runs when a branch is pushed to a server. Documentation used to
+# say the heavyweight gates "belong to the PR / CI flow", which read as
+# though something else was running them. Nothing was.
+#
+#   pre-commit  the canonical formatter (`lwpt format`), re-staging what
+#               it rewrites. Fast, so ordinary commits stay fast.
+#   pre-push    the real gate: format --check, build, test, and the
+#               agents-block check. About a minute, measured, and it is
+#               the last moment before work leaves the machine.
+#
+# The release gate — `lwpt build --mode release` plus `knips probe` on
+# the release binary — is not here, because it needs a Mac with Screen
+# Recording permission and takes minutes. It is `tools/release-gate.sh`,
+# run by hand before a release (see DEFINITION_OF_DONE.md).
 #
 # lwpt is expected on PATH. Point KNIPS_LWPT at another lwpt binary to
-# override. Do NOT bypass with `git commit --no-verify` unless a
-# maintainer explicitly authorises it.
+# override. Do NOT bypass with `git commit --no-verify` or
+# `git push --no-verify` unless a maintainer explicitly authorises it.
 
 min_version: 1.5.0
 
@@ -26,3 +38,38 @@ pre-commit:
         lwpt format failed. Inspect the output above; the formatter only
         fails when it cannot parse a file. If lwpt is missing entirely
         (fresh clone), install it first — see docs/quick-start.md.
+
+pre-push:
+  # Ordered and fail-fast: each step is cheaper than the one after it,
+  # so the common failure is also the fastest one to find out about.
+  piped: true
+
+  commands:
+
+    1_format:
+      run: ${KNIPS_LWPT:-lwpt} format --check
+      fail_text: |
+        Formatting differs from the canonical style. Run `lwpt format`
+        and commit what it rewrites. (--check only reports; it never
+        edits, which is why this is a separate step from the pre-commit
+        one.)
+
+    2_build:
+      run: ${KNIPS_LWPT:-lwpt} build
+      fail_text: |
+        The dev build failed. Nothing else in this gate can be trusted
+        until it compiles.
+
+    3_test:
+      run: ${KNIPS_LWPT:-lwpt} test
+      fail_text: |
+        A co-located suite failed. Every platform-neutral unit has one
+        and they all run on any host, so this failure is real wherever
+        you are seeing it.
+
+    4_agents:
+      run: ${KNIPS_LWPT:-lwpt} agents --check
+      fail_text: |
+        The generated block at the end of AGENTS.md is stale. Run
+        `lwpt agents` and commit the result. Edit AGENTS.md, never
+        CLAUDE.md — that is a symlink to it.

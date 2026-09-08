@@ -37,6 +37,32 @@ const
   BgraAlphaOffset = 3;
   // Below this reduction factor a box pre-pass costs more than it buys.
   BoxReduceThreshold = 2;
+  // The largest canvas anything here will allocate.
+  //
+  // A movie's container header is not evidence. An MP4 whose tkhd and
+  // avc1 say 30000x30000 while its media is 800x600 is a file anybody
+  // can produce with a hex editor, and the export pipeline used to
+  // believe it: two BGRA buffers at the header's size, allocated before
+  // any sink had a chance to object, which measured at 6.4 GB resident
+  // for an APNG and past 7 GB for a GIF. Smaller lies were worse,
+  // because they *worked*: 8000x8000 succeeded and wrote an
+  // "8000x8000" animation out of an 800x600 recording.
+  //
+  // So the allocator has a budget of its own, in Int64, checked before
+  // a byte is reserved — the same shape Knips.Export.Apng's per-frame
+  // guard has. Both bounds are checked: the per-side one keeps the
+  // arithmetic inside a 32-bit index, and the area one keeps the total
+  // inside memory.
+  //
+  // 160 MB at four bytes a pixel is forty megapixels. An 8K frame
+  // (7680x4320) is 33 and the largest display Apple ships is 20
+  // (6016x3384), so nothing knips can record comes near it; an
+  // 8000x8000 canvas is 64 and does not fit, which is the point. An
+  // export holds several canvases at once — two here and the sink's
+  // own — so the peak is a multiple of this, and that multiple is why
+  // the number is not simply "as much as will fit".
+  MaxBgraCanvasDimension = 32767;
+  MaxBgraCanvasBytes = Int64(160) * 1024 * 1024;
 
 type
   TBgraImage = record
@@ -54,7 +80,23 @@ type
     Rows: TBgraImage;
   end;
 
+// Why a canvas of this size cannot be allocated, or '' when it can.
+// The message names the dimensions, because the number a caller has to
+// change is the only thing it is short of.
+//
+// Asked BEFORE allocation by everything that sizes a canvas from a
+// movie's own header (Knips.Export.Pipeline, Knips.Export.MovieReader),
+// and again inside BgraImageResize, which is the last line of defence
+// for a path that forgot to ask.
+function BgraCanvasRefusal(AWidth, AHeight: Integer): string;
+
+// Whether a canvas of this size is inside the budget.
+function BgraCanvasFits(AWidth, AHeight: Integer): Boolean;
+
 // Allocates (or resizes) the image; contents are undefined afterwards.
+// A size past the budget leaves the image EMPTY rather than allocating
+// it — BgraCanvasRefusal is what turns that into a message, and every
+// production caller asks it first.
 procedure BgraImageResize(var AImage: TBgraImage; AWidth, AHeight: Integer);
 
 function BgraImageRow(const AImage: TBgraImage; AY: Integer): PByte;
@@ -95,9 +137,26 @@ procedure BgraBoxReduce(const ASource: PByte; ASourceBytesPerRow,
 // box pass already landed on the target size, which is what the app's
 // point-size GIF default arranges. AScratch is reused between frames so
 // a long export allocates once.
+//
+// ABoxFactorX/Y are the reduction the CALLER decided on, or 0 to derive
+// it from this call's own dimensions. An export passes the factor its
+// BASE rectangle implies, once, and passes the same one for every frame.
+// Derived per frame it is not stable: a post-hoc Zoom on Click shrinks
+// the source crop while the target stays the size it is, so a zoom that
+// walks the crop past BoxReduceThreshold used to switch kernels in the
+// middle of the animation — box-then-bicubic on one frame and bicubic
+// alone on the next, which is a visible change of sharpness in a
+// sequence that should only be getting closer.
+//
+// The clamp is what is left of that: a crop small enough that the
+// latched factor would reduce it below the destination cannot have a
+// box pass at all, and there the pre-pass really does stop. That is a
+// change of situation rather than an accident of rounding, and it is
+// documented in docs/architecture.md's resampling paragraph.
 procedure BgraResample(const ASource: PByte; ASourceBytesPerRow,
   ASourceWidth, ASourceHeight: Integer; var ADestination: TBgraImage;
-  var AScratch: TResampleScratch);
+  var AScratch: TResampleScratch; ABoxFactorX: Integer = 0;
+  ABoxFactorY: Integer = 0);
 
 // Height that keeps the source aspect ratio at ATargetWidth; never 0.
 function ScaledHeightForWidth(ASourceWidth, ASourceHeight,
@@ -131,12 +190,45 @@ type
     Weight: array of Integer;
   end;
 
+function BgraCanvasRefusal(AWidth, AHeight: Integer): string;
+begin
+  Result := '';
+  if (AWidth <= 0) or (AHeight <= 0) then
+    Exit;
+  if (AWidth > MaxBgraCanvasDimension) or (AHeight > MaxBgraCanvasDimension)
+    then
+    Exit(Format('a %dx%d canvas is past the %d pixel per-side limit',
+      [AWidth, AHeight, MaxBgraCanvasDimension]));
+  if Int64(AWidth) * Int64(AHeight) * BgraBytesPerPixel
+    > MaxBgraCanvasBytes then
+    Result := Format('a %dx%d canvas needs more than %d MB a frame, past '
+      + 'the %d MB an export may hold',
+      [AWidth, AHeight,
+      (Int64(AWidth) * Int64(AHeight) * BgraBytesPerPixel) div (1024 * 1024),
+      MaxBgraCanvasBytes div (1024 * 1024)]);
+end;
+
+function BgraCanvasFits(AWidth, AHeight: Integer): Boolean;
+begin
+  Result := BgraCanvasRefusal(AWidth, AHeight) = '';
+end;
+
 procedure BgraImageResize(var AImage: TBgraImage; AWidth, AHeight: Integer);
 begin
   if AWidth < 0 then
     AWidth := 0;
   if AHeight < 0 then
     AHeight := 0;
+  // The budget, here as well as at every caller: a resize this unit
+  // cannot honour leaves an empty image, which BgraImageIsEmpty reports
+  // and every consumer already treats as nothing to draw. Refusing is
+  // the only safe answer — SetLength of four gigabytes does not fail
+  // gracefully, it takes the machine with it.
+  if not BgraCanvasFits(AWidth, AHeight) then
+  begin
+    AWidth := 0;
+    AHeight := 0;
+  end;
   AImage.Width := AWidth;
   AImage.Height := AHeight;
   AImage.BytesPerRow := AWidth * BgraBytesPerPixel;
@@ -444,7 +536,8 @@ end;
 
 procedure BgraResample(const ASource: PByte; ASourceBytesPerRow,
   ASourceWidth, ASourceHeight: Integer; var ADestination: TBgraImage;
-  var AScratch: TResampleScratch);
+  var AScratch: TResampleScratch; ABoxFactorX: Integer;
+  ABoxFactorY: Integer);
 var
   FactorX, FactorY, Row: Integer;
 begin
@@ -458,8 +551,21 @@ begin
     Exit;
   end;
 
-  FactorX := ASourceWidth div ADestination.Width;
-  FactorY := ASourceHeight div ADestination.Height;
+  // The caller's latched factor where it gave one, and this frame's own
+  // where it did not. See the declaration for why an export latches it.
+  // Clamped either way: a factor that would reduce below the
+  // destination would hand the bicubic pass an UPSCALE, which is the
+  // one thing the box pre-pass exists to avoid.
+  FactorX := ABoxFactorX;
+  if FactorX <= 0 then
+    FactorX := ASourceWidth div ADestination.Width
+  else if FactorX > ASourceWidth div ADestination.Width then
+    FactorX := ASourceWidth div ADestination.Width;
+  FactorY := ABoxFactorY;
+  if FactorY <= 0 then
+    FactorY := ASourceHeight div ADestination.Height
+  else if FactorY > ASourceHeight div ADestination.Height then
+    FactorY := ASourceHeight div ADestination.Height;
   if (FactorX >= BoxReduceThreshold) and (FactorY >= BoxReduceThreshold) then
   begin
     BgraImageResize(AScratch.Reduced, ASourceWidth div FactorX,

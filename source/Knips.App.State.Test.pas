@@ -166,6 +166,8 @@ type
     procedure TestRenderProgressIsClamped;
     procedure TestTheUnavailableLineStaysNarrow;
     procedure TestAWindowTakeIsCompositedOnlyWhereItBuysSomething;
+    procedure TestTheCompositingNoteSaysWhatToTurnOff;
+    procedure TestTheRecoveryNoteOffersTheWayToADeliverable;
   end;
 
   TWindowMenuTests = class(TTestSuite)
@@ -1884,6 +1886,10 @@ begin
     TestTheUnavailableLineStaysNarrow);
   Test('a window take is composited only where compositing buys '
     + 'something', TestAWindowTakeIsCompositedOnlyWhereItBuysSomething);
+  Test('and the user is told which setting caused it',
+    TestTheCompositingNoteSaysWhatToTurnOff);
+  Test('a recovered take says how to get a deliverable out of it',
+    TestTheRecoveryNoteOffersTheWayToADeliverable);
 end;
 
 procedure TEffectDefaultsTests.TestTheDefaultDrawsThePointer;
@@ -1932,6 +1938,58 @@ begin
   Expect<Boolean>(WindowTakeNeedsCompositing(Effects, False)).ToBe(True);
   Effects.Cursor := ecmBig;
   Expect<Boolean>(WindowTakeNeedsCompositing(Effects, False)).ToBe(True);
+end;
+
+// The sentence that goes with that answer. It used to have no words at
+// all: the decision was taken from state the user cannot see, it
+// changes what the file contains, and it left no trace outside the log.
+procedure TEffectDefaultsTests.TestTheCompositingNoteSaysWhatToTurnOff;
+var
+  Effects: TExportEffects;
+begin
+  // The whole sentence, because it is the whole of the explanation: it
+  // has to say what is happening AND what to change to stop it.
+  Expect<string>(WindowCompositingNote(DefaultAppEffects, False))
+    .ToBe('with any effect on, this window is recorded through its '
+    + 'display — overlapping windows appear; set the pointer to none '
+    + 'and zoom off for the clean isolated capture');
+  // Nothing to explain when the take keeps the desktop-independent
+  // capture, which is what people expect a window recording to be.
+  Effects := DefaultAppEffects;
+  Effects.Cursor := ecmNone;
+  Effects.ZoomOnClick := False;
+  Expect<string>(WindowCompositingNote(Effects, False)).ToBe('');
+  // ...but the camera brings it back, and the sentence is the same one:
+  // the consequence is the same whichever setting caused it.
+  Expect<string>(WindowCompositingNote(Effects, True))
+    .ToBe(WindowCompositingNote(DefaultAppEffects, False));
+end;
+
+procedure TEffectDefaultsTests
+  .TestTheRecoveryNoteOffersTheWayToADeliverable;
+begin
+  Expect<string>(RecoveredTakesNote(0, 0, 'x-raw.mp4')).ToBe('');
+  // One take, and it is renderable: the whole sentence, because the
+  // second half is what was missing — the menu named the raw file and
+  // gave no route from it to a deliverable.
+  Expect<string>(RecoveredTakesNote(1, 1, 'demo-raw.mp4'))
+    .ToBe('an earlier recording did not finish and has been recovered: '
+    + 'demo-raw.mp4 — it is a raw take, so open it and use Re-export to '
+    + 'get a deliverable');
+  // One take that nothing can be applied to: no offer, because there is
+  // nothing on the other end of it.
+  Expect<string>(RecoveredTakesNote(1, 0, 'demo-raw.mp4'))
+    .ToBe('an earlier recording did not finish and has been recovered: '
+    + 'demo-raw.mp4');
+  Expect<string>(RecoveredTakesNote(3, 3, 'demo-raw.mp4'))
+    .ToBe('3 earlier recordings did not finish and have been recovered '
+    + '— they are raw takes, so open one and use Re-export to get a '
+    + 'deliverable');
+  // Some of them, which is the case the count is for.
+  Expect<string>(RecoveredTakesNote(3, 2, 'demo-raw.mp4'))
+    .ToBe('3 earlier recordings did not finish and have been recovered '
+    + '— 2 of them are raw takes, so open one and use Re-export to get '
+    + 'a deliverable');
 end;
 
 procedure TEffectDefaultsTests.TestZoomMigratesFromTheOldToggle;

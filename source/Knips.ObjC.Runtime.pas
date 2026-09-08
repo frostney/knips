@@ -24,6 +24,14 @@ uses
 
   objc;
 
+const
+  // The pointer ivar every runtime-built class here keeps its Pascal
+  // owner in. Seven units declared the same private copy of this string,
+  // which is seven chances for one of them to be spelled differently —
+  // and a class whose ivar is named `knipsowner` looks exactly like a
+  // class whose owner was never set.
+  OwnerIvarName = 'knipsOwner';
+
 type
   // A method body: a `cdecl` routine whose first two parameters are the
   // receiver (id) and the selector (SEL), followed by the declared ones.
@@ -81,6 +89,29 @@ function RespondsToSelector(AInstance: id; const ASelector: string): Boolean;
 function ClassImplementsSelector(AClass: pobjc_class;
   const ASelector: string): Boolean;
 
+// An autorelease pool around one unit of work, as libobjc's own C API
+// rather than as NSAutoreleasePool.
+//
+// Here for the reason the whole unit is here: a caller gets a pool
+// without taking `{$modeswitch objectivec2}` and the framework metadata
+// that comes with it. `knips mcp` is the caller that needed it —
+// a long-lived process that runs an unbounded number of AVFoundation
+// sessions and had no pool at all, so every autoreleased factory object
+// each one made (AVAssetWriter, AVAssetReader, AVURLAsset, the NSURLs
+// and NSDictionaries around them) sat in no pool and was never drained:
+// measured at +19.5 MB and exactly +3 file descriptors per
+// record -> render -> export cycle, without bound. Every other face
+// has a pool already — the CLI exits, and the menu-bar app has
+// AppKit's.
+//
+// objc_autoreleasePoolPush/Pop are what @autoreleasepool compiles to.
+// Pop must be given the token its matching Push returned, and pools
+// must be popped in the reverse order they were pushed, so every caller
+// pairs them in a try..finally.
+function BeginAutoreleasePool: Pointer;
+
+procedure EndAutoreleasePool(APool: Pointer);
+
 {$ENDIF}
 
 implementation
@@ -101,6 +132,22 @@ procedure MessageSendVoid(ASelf: id; AOperation: SEL);
   cdecl; external name 'objc_msgSend';
 function MessageSendBoolSel(ASelf: id; AOperation: SEL;
   AArgument: SEL): ObjCBOOL; cdecl; external name 'objc_msgSend';
+
+function AutoreleasePoolPush: Pointer;
+  cdecl; external name 'objc_autoreleasePoolPush';
+procedure AutoreleasePoolPop(APool: Pointer);
+  cdecl; external name 'objc_autoreleasePoolPop';
+
+function BeginAutoreleasePool: Pointer;
+begin
+  Result := AutoreleasePoolPush;
+end;
+
+procedure EndAutoreleasePool(APool: Pointer);
+begin
+  if APool <> nil then
+    AutoreleasePoolPop(APool);
+end;
 
 function Selector(const AName: string): SEL; inline;
 begin

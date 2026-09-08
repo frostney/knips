@@ -251,10 +251,18 @@ spike.
 
 ## Verified
 
-- Neutral units: **523 test cases across sixteen co-located suites**,
-  `lwpt test` green on macOS and on Linux in `tools/linux-ci.sh`. The
-  carried code is the framework glue and nothing else; everything decidable
-  was moved out of it and is now tested on every host.
+- Neutral units: **sixteen co-located suites**, `lwpt test` green on
+  macOS and on Linux in `tools/linux-ci.sh`. The carried code is the
+  framework glue and nothing else; everything decidable was moved out of
+  it and is now tested on every host.
+
+  The case COUNT differs by host and this used to quote only one of the
+  two numbers as though it were both: **596 on macOS, 586 on Linux and
+  under Wine.** The difference is `Knips.Recording.Recovery.Test`, whose
+  sweep and pid suites are inside `{$IFDEF DARWIN}` — eleven cases there,
+  replaced off-Darwin by the one neutral case that pins the sweep's
+  naming rules, so the suite is loudly present rather than absent and the
+  suite counts still match.
 - Every Darwin unit and the program type-check for `aarch64-darwin` with
   an FPC 3.2.2 cross compiler against the real `MacOSAll`/`CocoaAll`
   ([docs/tooling.md](tooling.md)).

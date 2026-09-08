@@ -43,8 +43,6 @@ const
   // Longer messages are elided in the menu; the full text goes to NSLog.
   MaxErrorTitleLength = 60;
   ErrorTitlePrefix = 'Last error: ';
-  // The GIF a recording exports to sits beside it, under the same name.
-  GifFileExtension = '.gif';
   // What the "Export as GIF…" button asks for. The CLI's own default
   // (the movie's own width) is the right answer for a hand-written
   // command and the wrong one for a one-click button: a Retina region
@@ -381,6 +379,13 @@ function FormatElapsed(ASeconds: Int64): string;
 function RecordingFileName(const AWhen: TDateTime): string;
 
 // ~/Movies/knips/, with a trailing path delimiter.
+// The same folder as a phrase to show somebody — `~/Movies/knips/` on
+// macOS, `~/Videos/knips/` elsewhere. It exists because the MCP tool
+// schema described the default output location with that path spelled
+// out as a literal, on a surface whose whole point is telling a client
+// the truth about where files go.
+function RecordingsFolderLabel: string;
+
 function RecordingsDirectory(const AHomeDirectory: string): string;
 
 // Two overlay corners into a region. Both points are already in the
@@ -696,6 +701,36 @@ function DefaultAppEffects: TExportEffects;
 function WindowTakeNeedsCompositing(const AEffects: TExportEffects;
   ACameraVisible: Boolean): Boolean;
 
+// What to TELL somebody the first time that answer is yes.
+//
+// The decision above is invisible: it is taken from the saved effect
+// defaults plus whether the camera happens to be up, it changes what
+// the resulting file contains, and until now it left no trace outside
+// `~/Library/Logs/Knips.log` — which nobody reads. A window recording
+// that came back with the notification that appeared over it baked in
+// looked like a bug, and the way out of it is one sentence long.
+//
+// '' when the take keeps ScreenCaptureKit's desktop-independent
+// capture, which needs no explanation because it is what people expect.
+function WindowCompositingNote(const AEffects: TExportEffects;
+  ACameraVisible: Boolean): string;
+
+// What the app says after finishing off takes a dead process left
+// behind.
+//
+// ARecovered is how many were recovered; ARenderable is how many of
+// those an effect could still be applied to. That second number is the
+// point: a recovered take is left RAW — the process died before the
+// render — so what the user gets back is `…-raw.mp4`, which is not the
+// name or the file they were expecting. Until now the menu said only
+// that something had been recovered, with the raw name in the
+// Last-error slot and no hint that a deliverable was one click away.
+// Nothing is rendered automatically: a launch is the wrong moment to
+// spend minutes of somebody's machine on a file they have not asked
+// for.
+function RecoveredTakesNote(ARecovered, ARenderable: Integer;
+  const AFirstName: string): string;
+
 // The one-way migration from the three menu toggles the effects replaced.
 // Both consult the old key only where the new one has never been written,
 // and neither writes the old one back — the same shape the audio
@@ -753,7 +788,7 @@ const
   RecordingsFolderName = 'knips';
   RecordingFilePrefix = 'knips-';
   RecordingTimestampFormat = 'yyyymmdd-hhnnss';
-  RecordingFileExtension = '.mp4';
+  RecordingFileExtension = Mpeg4FileExtension;
   // The status item while the deliverable is being rendered off the raw
   // take, and the playback window's title while a re-export is running.
   // A glyph rather than a word for the status item: the menu bar is
@@ -857,6 +892,11 @@ begin
   Result := RecordingFilePrefix
     + FormatDateTime(RecordingTimestampFormat, AWhen)
     + RecordingFileExtension;
+end;
+
+function RecordingsFolderLabel: string;
+begin
+  Result := '~/' + MoviesFolderName + '/' + RecordingsFolderName + '/';
 end;
 
 function RecordingsDirectory(const AHomeDirectory: string): string;
@@ -1128,6 +1168,43 @@ begin
   // records, so it is a request like the other two.
   Result := ACameraVisible or AEffects.ZoomOnClick
     or (AEffects.Cursor <> ecmNone);
+end;
+
+function WindowCompositingNote(const AEffects: TExportEffects;
+  ACameraVisible: Boolean): string;
+begin
+  Result := '';
+  if not WindowTakeNeedsCompositing(AEffects, ACameraVisible) then
+    Exit;
+  Result := 'with any effect on, this window is recorded through its '
+    + 'display — overlapping windows appear; set the pointer to none '
+    + 'and zoom off for the clean isolated capture';
+end;
+
+function RecoveredTakesNote(ARecovered, ARenderable: Integer;
+  const AFirstName: string): string;
+begin
+  Result := '';
+  if ARecovered <= 0 then
+    Exit;
+  if ARecovered = 1 then
+    Result := 'an earlier recording did not finish and has been '
+      + 'recovered: ' + AFirstName
+  else
+    Result := Format('%d earlier recordings did not finish and have been '
+      + 'recovered', [ARecovered]);
+  if ARenderable <= 0 then
+    Exit;
+  if ARenderable = ARecovered then
+    if ARecovered = 1 then
+      Result := Result + ' — it is a raw take, so open it and use '
+        + 'Re-export to get a deliverable'
+    else
+      Result := Result + ' — they are raw takes, so open one and use '
+        + 'Re-export to get a deliverable'
+  else
+    Result := Result + Format(' — %d of them are raw takes, so open one '
+      + 'and use Re-export to get a deliverable', [ARenderable]);
 end;
 
 function MigratedEffectZoom(AHasNewKey, ANewValue,

@@ -185,6 +185,48 @@ type
     procedure TestRenderOutputMustBeAMovie;
   end;
 
+  // The export's half of the same job. It had none at all: `knips
+  // export` and the MCP export tools each composed their own sentence.
+  TExportWordingTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestAPngSaysTruecolour;
+    procedure TestGifNamesItsPalette;
+    procedure TestAnInexactPaletteIsShouted;
+    procedure TestEveryClauseAppearsInOrder;
+    procedure TestTheSummaryLine;
+    procedure TestTheTrimLine;
+    procedure TestTheFramingNoteHasOneSpelling;
+  end;
+
+  // The half of the export surface that had no assertion at all: whether
+  // an --effects list NAMED the pointer, and the refusal that answer
+  // drives when --cursor names it too.
+  TCursorNamingTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestTheThreeCursorWordsCountAsNaming;
+    procedure TestZoomAndNothingDoNotName;
+    procedure TestNoneNamesThePointerToo;
+    procedure TestAgreeingSpellingsAreAccepted;
+    procedure TestDisagreeingSpellingsAreRefused;
+    procedure TestEitherSpellingAloneIsFine;
+    procedure TestAnUnknownCursorWordIsRefusedByName;
+    procedure TestAnEmptyCursorModeIsNotParsed;
+  end;
+
+  // The three shapes a render temporary's family takes, and the fourth
+  // that is somebody else's file. The crash sweep turns on this.
+  TTemporaryNameTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestTheTemporaryItself;
+    procedure TestTheOwnerMarker;
+    procedure TestTheSandboxShadow;
+    procedure TestAnOrdinaryFileIsNotOurs;
+    procedure TestTheDerivedPaths;
+  end;
+
 { TRegionTests }
 
 procedure TRegionTests.SetupTests;
@@ -1291,10 +1333,12 @@ begin
     Expect<string>(ExportCursorModeName(Parsed))
       .ToBe(ExportCursorModeName(Mode));
   end;
-  // An empty string is the default, not an error: it is what an unset
-  // --cursor looks like.
-  Expect<Boolean>(ParseExportCursorMode('', Parsed)).ToBe(True);
-  Expect<string>(ExportCursorModeName(Parsed)).ToBe('as-recorded');
+  // An empty string is NOT the default and is not a mode: an unset
+  // --cursor is a caller with nothing to parse, and the difference
+  // between that and an explicit `as-recorded` is a difference this
+  // function has to be able to report. See
+  // TCursorNamingTests.TestAnEmptyCursorModeIsNotParsed.
+  Expect<Boolean>(ParseExportCursorMode('', Parsed)).ToBe(False);
   Expect<Boolean>(ParseExportCursorMode('BIG', Parsed)).ToBe(True);
   Expect<string>(ExportCursorModeName(Parsed)).ToBe('big');
   Expect<Boolean>(ParseExportCursorMode('enormous', Parsed)).ToBe(False);
@@ -1723,7 +1767,7 @@ end;
 
 procedure TRenderWordingTests.TestNothingAppliedSaysNothing;
 begin
-  Expect<string>(RenderAppliedSummary(RenderAppliedFacts)).ToBe('');
+  Expect<string>(RenderAppliedSummary(DefaultRenderAppliedFacts)).ToBe('');
 end;
 
 procedure TRenderWordingTests.TestEveryClauseAppears;
@@ -1731,7 +1775,7 @@ var
   Facts: TRenderAppliedFacts;
   Line: string;
 begin
-  Facts := RenderAppliedFacts;
+  Facts := DefaultRenderAppliedFacts;
   Facts.ZoomApplied := True;
   Facts.ZoomedFrames := 34;
   Facts.FramesWritten := 100;
@@ -1762,7 +1806,7 @@ begin
   // The render pass has no re-encoding path, so this branch should
   // never fire — and if it ever does, it must be impossible to miss in
   // the summary rather than buried in a comment.
-  Facts := RenderAppliedFacts;
+  Facts := DefaultRenderAppliedFacts;
   Facts.AudioTracks := 1;
   Facts.AudioSamples := 9;
   Facts.AudioPassthrough := False;
@@ -1823,6 +1867,347 @@ begin
   Expect<Boolean>(ValidateRenderOutputPath('', Error)).ToBe(False);
 end;
 
+{ TExportWordingTests }
+
+procedure TExportWordingTests.SetupTests;
+begin
+  Test('an APNG says truecolour and nothing about a palette',
+    TestAPngSaysTruecolour);
+  Test('a GIF names the colours it quantised to',
+    TestGifNamesItsPalette);
+  Test('a histogram that overflowed says so',
+    TestAnInexactPaletteIsShouted);
+  Test('framing, then cursor, then zoom, then the filled frames',
+    TestEveryClauseAppearsInOrder);
+  Test('the whole line a finished export reports', TestTheSummaryLine);
+  Test('the whole line a finished trim reports', TestTheTrimLine);
+  Test('the framing note is one sentence, not two',
+    TestTheFramingNoteHasOneSpelling);
+end;
+
+procedure TExportWordingTests.TestAPngSaysTruecolour;
+var
+  Facts: TExportAppliedFacts;
+begin
+  Facts := DefaultExportAppliedFacts;
+  Facts.Format := efApng;
+  Facts.PaletteColors := 0;
+  Expect<string>(ExportAppliedSummary(Facts)).ToBe(' (truecolour)');
+end;
+
+procedure TExportWordingTests.TestGifNamesItsPalette;
+var
+  Facts: TExportAppliedFacts;
+begin
+  Facts := DefaultExportAppliedFacts;
+  Facts.Format := efGif;
+  Facts.PaletteColors := 255;
+  Expect<string>(ExportAppliedSummary(Facts)).ToBe(' (255 colours)');
+end;
+
+procedure TExportWordingTests.TestAnInexactPaletteIsShouted;
+var
+  Facts: TExportAppliedFacts;
+begin
+  Facts := DefaultExportAppliedFacts;
+  Facts.Format := efGif;
+  Facts.PaletteColors := 255;
+  Facts.ExactPalette := False;
+  Expect<string>(ExportAppliedSummary(Facts))
+    .ToBe(' (255 colours, 6-bit histogram)');
+end;
+
+procedure TExportWordingTests.TestEveryClauseAppearsInOrder;
+var
+  Facts: TExportAppliedFacts;
+begin
+  Facts := DefaultExportAppliedFacts;
+  Facts.Format := efGif;
+  Facts.PaletteColors := 128;
+  Facts.SmoothCursor := True;
+  Facts.SmoothCursorFrames := 145;
+  Facts.SmoothCursorOffFrame := 3;
+  Facts.ZoomOnClick := True;
+  Facts.ZoomedFrames := 35;
+  Facts.ZoomClicks := 1;
+  Facts.SynthesizedFrames := 12;
+  Facts.SynthesisFramesPerSecond := 20;
+  // The whole sentence, not a substring search: the ORDER is the thing
+  // under test, and a Pos() check would pass on any permutation.
+  Expect<string>(ExportAppliedSummary(Facts))
+    .ToBe(' (128 colours), export cursor on 145 frames (3 off frame), '
+    + 'zoom on 35 frames from 1 clicks, 12 frames filled in at 20 fps '
+    + 'where the capture had none');
+end;
+
+procedure TExportWordingTests.TestTheSummaryLine;
+var
+  Facts: TExportAppliedFacts;
+begin
+  Facts := DefaultExportAppliedFacts;
+  Facts.Format := efApng;
+  Expect<string>(ExportSummaryLine('/tmp/clip.apng', 800, 450, 60, 3.0,
+    2048 * 1024, ExportAppliedSummary(Facts)))
+    .ToBe('wrote /tmp/clip.apng: 800x450, 60 frames, 3.0s, 2048 kB '
+    + '(truecolour)');
+end;
+
+procedure TExportWordingTests.TestTheTrimLine;
+begin
+  Expect<string>(TrimSummaryLine('/tmp/cut.mp4', 2, 5, 8.5, 4096 * 1024))
+    .ToBe('wrote /tmp/cut.mp4: 2.00s–5.00s of 8.50s, 4096 kB '
+    + '(streams copied)');
+end;
+
+procedure TExportWordingTests.TestTheFramingNoteHasOneSpelling;
+begin
+  Expect<string>(UnframedFramesNote(0)).ToBe('');
+  // The MP4 render said "this take's" and the animation export said
+  // "this recording's", about the same fact, from two copies of the
+  // same Format call. One sentence now, asserted whole.
+  Expect<string>(UnframedFramesNote(7))
+    .ToBe('7 frame(s) run past the end of this take''s pointer track, so '
+    + 'what they were showing is not recorded; nothing was cropped for '
+    + 'them and the pointer was placed from the last position the track '
+    + 'holds');
+  // The third wrapper passes the note through unchanged; it exists so a
+  // caller composes the same way for all three notes.
+  Expect<string>(EffectFramingNoteLine(UnframedFramesNote(7)))
+    .ToBe(UnframedFramesNote(7));
+  Expect<string>(EffectFramingNoteLine('')).ToBe('');
+end;
+
+{ TCursorNamingTests }
+
+procedure TCursorNamingTests.SetupTests;
+begin
+  Test('smooth-cursor, big-cursor and no-cursor all name the pointer',
+    TestTheThreeCursorWordsCountAsNaming);
+  Test('zoom and an empty list do not name it',
+    TestZoomAndNothingDoNotName);
+  Test('none names the pointer as well as the zoom',
+    TestNoneNamesThePointerToo);
+  Test('--cursor and --effects may say the same thing twice',
+    TestAgreeingSpellingsAreAccepted);
+  Test('--cursor and --effects may not disagree about it',
+    TestDisagreeingSpellingsAreRefused);
+  Test('either spelling on its own applies', TestEitherSpellingAloneIsFine);
+  Test('an unknown --cursor word is refused by name',
+    TestAnUnknownCursorWordIsRefusedByName);
+  Test('the empty string is not a cursor mode',
+    TestAnEmptyCursorModeIsNotParsed);
+end;
+
+procedure TCursorNamingTests.TestTheThreeCursorWordsCountAsNaming;
+var
+  Effects: TExportEffects;
+  Named: Boolean;
+  Error: string;
+begin
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ParseExportEffectsNaming('smooth-cursor', Effects, Named,
+    Error)).ToBe(True);
+  Expect<Boolean>(Named).ToBe(True);
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ParseExportEffectsNaming('big-cursor', Effects, Named,
+    Error)).ToBe(True);
+  Expect<Boolean>(Named).ToBe(True);
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ParseExportEffectsNaming('no-cursor', Effects, Named,
+    Error)).ToBe(True);
+  Expect<Boolean>(Named).ToBe(True);
+  // And the fourth spelling, which names the pointer by naming the value
+  // it already has — the whole reason "named" is not the same question
+  // as "changed".
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ParseExportEffectsNaming('as-recorded', Effects, Named,
+    Error)).ToBe(True);
+  Expect<Boolean>(Named).ToBe(True);
+  Expect<Boolean>(Effects.Cursor = ecmAsRecorded).ToBe(True);
+end;
+
+procedure TCursorNamingTests.TestZoomAndNothingDoNotName;
+var
+  Effects: TExportEffects;
+  Named: Boolean;
+  Error: string;
+begin
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ParseExportEffectsNaming('zoom', Effects, Named, Error))
+    .ToBe(True);
+  Expect<Boolean>(Named).ToBe(False);
+  Expect<Boolean>(Effects.ZoomOnClick).ToBe(True);
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ParseExportEffectsNaming('', Effects, Named, Error))
+    .ToBe(True);
+  Expect<Boolean>(Named).ToBe(False);
+end;
+
+procedure TCursorNamingTests.TestNoneNamesThePointerToo;
+var
+  Effects: TExportEffects;
+  Named: Boolean;
+  Error: string;
+begin
+  // `none` is no pointer AND no zoom, so it names the pointer as surely
+  // as `no-cursor` does.
+  Effects := DefaultExportEffects;
+  Effects.ZoomOnClick := True;
+  Expect<Boolean>(ParseExportEffectsNaming('none', Effects, Named, Error))
+    .ToBe(True);
+  Expect<Boolean>(Named).ToBe(True);
+  Expect<Boolean>(Effects.ZoomOnClick).ToBe(False);
+  Expect<Boolean>(Effects.Cursor = ecmNone).ToBe(True);
+end;
+
+procedure TCursorNamingTests.TestAgreeingSpellingsAreAccepted;
+var
+  Effects: TExportEffects;
+  Error: string;
+begin
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ReconcileCursorAndEffects('none', 'no-cursor', Effects,
+    Error)).ToBe(True);
+  Expect<string>(Error).ToBe('');
+  Expect<Boolean>(Effects.Cursor = ecmNone).ToBe(True);
+end;
+
+procedure TCursorNamingTests.TestDisagreeingSpellingsAreRefused;
+var
+  Effects: TExportEffects;
+  Error: string;
+begin
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ReconcileCursorAndEffects('big', 'smooth-cursor', Effects,
+    Error)).ToBe(False);
+  // The whole sentence, because it is what the user reads and both
+  // offending values have to be in it.
+  Expect<string>(Error).ToBe('--cursor and --effects both name the '
+    + 'pointer and disagree (--cursor=big against '
+    + '--effects=smooth-cursor); pass one of them');
+end;
+
+procedure TCursorNamingTests.TestEitherSpellingAloneIsFine;
+var
+  Effects: TExportEffects;
+  Error: string;
+begin
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ReconcileCursorAndEffects('big', '', Effects, Error))
+    .ToBe(True);
+  Expect<Boolean>(Effects.Cursor = ecmBig).ToBe(True);
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ReconcileCursorAndEffects('', 'zoom,smooth-cursor',
+    Effects, Error)).ToBe(True);
+  Expect<Boolean>(Effects.Cursor = ecmSmooth).ToBe(True);
+  Expect<Boolean>(Effects.ZoomOnClick).ToBe(True);
+end;
+
+procedure TCursorNamingTests.TestAnUnknownCursorWordIsRefusedByName;
+var
+  Effects: TExportEffects;
+  Error: string;
+begin
+  Effects := DefaultExportEffects;
+  Expect<Boolean>(ReconcileCursorAndEffects('enormous', '', Effects, Error))
+    .ToBe(False);
+  Expect<string>(Error)
+    .ToBe('--cursor must be as-recorded, none, smooth, or big');
+end;
+
+procedure TCursorNamingTests.TestAnEmptyCursorModeIsNotParsed;
+var
+  Mode: TExportCursorMode;
+begin
+  // It used to come back True as as-recorded, so a caller with nothing
+  // to parse could not tell that from a caller who asked for the
+  // default — which is how a saved effect default whose `cursor` key is
+  // not a string silently overrode the legacy keys it was meant to
+  // migrate.
+  Expect<Boolean>(ParseExportCursorMode('', Mode)).ToBe(False);
+  Expect<Boolean>(ParseExportCursorMode('   ', Mode)).ToBe(False);
+  Expect<Boolean>(ParseExportCursorMode('as-recorded', Mode)).ToBe(True);
+  Expect<Boolean>(Mode = ecmAsRecorded).ToBe(True);
+end;
+
+{ TTemporaryNameTests }
+
+procedure TTemporaryNameTests.SetupTests;
+begin
+  Test('the temporary itself', TestTheTemporaryItself);
+  Test('its owner marker', TestTheOwnerMarker);
+  Test('AVAssetWriter''s sandbox shadow of it', TestTheSandboxShadow);
+  Test('a user file that merely contains the suffix is not ours',
+    TestAnOrdinaryFileIsNotOurs);
+  Test('the two derived paths', TestTheDerivedPaths);
+end;
+
+procedure TTemporaryNameTests.TestTheTemporaryItself;
+var
+  Name: string;
+begin
+  Expect<Boolean>(ClassifyRenderTemporary('demo.mp4'
+    + RenderTemporarySuffix, Name) = rtkTemporary).ToBe(True);
+  Expect<string>(Name).ToBe('demo.mp4' + RenderTemporarySuffix);
+end;
+
+procedure TTemporaryNameTests.TestTheOwnerMarker;
+var
+  Name: string;
+begin
+  Expect<Boolean>(ClassifyRenderTemporary('demo.mp4'
+    + RenderTemporarySuffix + RenderTemporaryOwnerSuffix, Name)
+    = rtkOwnerMarker).ToBe(True);
+  // The temporary it belongs to, so a caller can judge the whole family
+  // at once.
+  Expect<string>(Name).ToBe('demo.mp4' + RenderTemporarySuffix);
+end;
+
+procedure TTemporaryNameTests.TestTheSandboxShadow;
+var
+  Name: string;
+begin
+  Expect<Boolean>(ClassifyRenderTemporary('demo.mp4'
+    + RenderTemporarySuffix + '.sb-1a2b3c', Name)
+    = rtkSandboxShadow).ToBe(True);
+  Expect<string>(Name).ToBe('demo.mp4' + RenderTemporarySuffix);
+  // A bare `.sb-` with no token is not a name the framework produces.
+  Expect<Boolean>(ClassifyRenderTemporary('demo.mp4'
+    + RenderTemporarySuffix + '.sb-', Name) = rtkNotOurs).ToBe(True);
+end;
+
+procedure TTemporaryNameTests.TestAnOrdinaryFileIsNotOurs;
+var
+  Name: string;
+begin
+  // The file the old `*<suffix>*` glob actually destroyed.
+  Expect<Boolean>(ClassifyRenderTemporary('notes'
+    + RenderTemporarySuffix + '.txt', Name) = rtkNotOurs).ToBe(True);
+  Expect<string>(Name).ToBe('');
+  Expect<Boolean>(ClassifyRenderTemporary('demo.mp4', Name)
+    = rtkNotOurs).ToBe(True);
+  // Nothing but the suffix: no deliverable in front of it, so it names
+  // no render either.
+  Expect<Boolean>(ClassifyRenderTemporary(RenderTemporarySuffix, Name)
+    = rtkNotOurs).ToBe(True);
+end;
+
+procedure TTemporaryNameTests.TestTheDerivedPaths;
+var
+  Name: string;
+begin
+  Expect<string>(RenderTemporaryPathFor('/tmp/demo.mp4'))
+    .ToBe('/tmp/demo.mp4' + RenderTemporarySuffix);
+  Expect<string>(RenderTemporaryOwnerPathFor('/tmp/demo.mp4'
+    + RenderTemporarySuffix))
+    .ToBe('/tmp/demo.mp4' + RenderTemporarySuffix
+    + RenderTemporaryOwnerSuffix);
+  // The round trip the render itself makes.
+  Expect<Boolean>(ClassifyRenderTemporary(
+    ExtractFileName(RenderTemporaryPathFor('demo.mp4')), Name)
+    = rtkTemporary).ToBe(True);
+end;
+
 begin
   TestRunnerProgram.AddSuite(TRegionTests.Create('ParseCaptureRegion'));
   TestRunnerProgram.AddSuite(TContainerTests.Create('ContainerForPath'));
@@ -1839,6 +2224,12 @@ begin
   TestRunnerProgram.AddSuite(TDerivedValueTests.Create('derived values'));
   TestRunnerProgram.AddSuite(TRenderWordingTests.Create(
     'what a render reports, in both front ends'' words'));
+  TestRunnerProgram.AddSuite(TExportWordingTests.Create(
+    'what an export reports, in every front end''s words'));
+  TestRunnerProgram.AddSuite(TCursorNamingTests.Create(
+    'the two spellings of one pointer setting'));
+  TestRunnerProgram.AddSuite(TTemporaryNameTests.Create(
+    'what a render temporary is called'));
   TestRunnerProgram.Run;
   ExitCode := TestResultToExitCode;
 end.

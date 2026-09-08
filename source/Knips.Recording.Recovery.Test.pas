@@ -26,9 +26,9 @@ program Knips.Recording.Recovery.Test;
 uses
   SysUtils,
 
+  Knips.Options,
   {$IFDEF DARWIN}
   BaseUnix,
-  Knips.Options,
   Knips.Recording.Recovery,
   {$ENDIF}
   TestingPascalLibrary;
@@ -39,6 +39,13 @@ type
   private
     FDirectory: string;
     procedure MakeFile(const AName: string);
+    // A temporary nobody owns any more: the file plus an owner marker
+    // naming a pid that is gone. That is what the sweep is FOR, and
+    // since the pid gate landed it is also the only shape it removes on
+    // sight — a bare temporary with no marker is inside its grace
+    // period and is somebody's live render until proved otherwise.
+    procedure MakeAbandonedTemporary(const AName: string);
+    function DeadPid: Integer;
     function Exists(const AName: string): Boolean;
     procedure OpenDirectory;
     procedure CloseDirectory;
@@ -47,6 +54,10 @@ type
     procedure TestRemovesTemporariesAndCountsThem;
     procedure TestLeavesRealTakesAlone;
     procedure TestSandboxShadowFilesGoToo;
+    procedure TestALiveRendersTemporaryIsLeftAlone;
+    procedure TestAnUnmarkedTemporaryIsLeftAlone;
+    procedure TestAnUnmarkedTemporaryPastTheGraceIsSwept;
+    procedure TestAFileThatMerelyContainsTheSuffixIsLeftAlone;
     procedure TestAnAbsentDirectoryIsNotAnError;
   end;
 
@@ -61,7 +72,7 @@ type
   TUnsupportedTests = class(TTestSuite)
   public
     procedure SetupTests; override;
-    procedure TestRecoveryIsDarwinOnly;
+    procedure TestTheSweepsNamingRulesAreStillNeutral;
   end;
   {$ENDIF}
 
@@ -77,6 +88,14 @@ begin
     TestLeavesRealTakesAlone);
   Test('the sandbox shadow file beside a temporary goes with it',
     TestSandboxShadowFilesGoToo);
+  Test('a temporary whose owning render is still running survives',
+    TestALiveRendersTemporaryIsLeftAlone);
+  Test('a temporary with no owner marker is inside its grace period',
+    TestAnUnmarkedTemporaryIsLeftAlone);
+  Test('an unmarked temporary older than the grace period is swept',
+    TestAnUnmarkedTemporaryPastTheGraceIsSwept);
+  Test('an ordinary file that merely contains the suffix is not ours',
+    TestAFileThatMerelyContainsTheSuffixIsLeftAlone);
   Test('a directory that is not there is not an error',
     TestAnAbsentDirectoryIsNotAnError);
 end;
@@ -120,6 +139,30 @@ begin
   end;
 end;
 
+function TSweepTests.DeadPid: Integer;
+begin
+  // Walk down from a high pid until one is genuinely unused, the same
+  // way TestAnAbsentPidIsNotAlive does, so nothing here depends on a
+  // particular number being free.
+  Result := 99999;
+  while (Result > 90000) and ProcessIsAlive(Result) do
+    Dec(Result);
+end;
+
+procedure TSweepTests.MakeAbandonedTemporary(const AName: string);
+var
+  Marker: TextFile;
+begin
+  MakeFile(AName);
+  AssignFile(Marker, FDirectory + RenderTemporaryOwnerPathFor(AName));
+  Rewrite(Marker);
+  try
+    WriteLn(Marker, DeadPid);
+  finally
+    CloseFile(Marker);
+  end;
+end;
+
 function TSweepTests.Exists(const AName: string): Boolean;
 begin
   Result := FileExists(FDirectory + AName);
@@ -129,11 +172,15 @@ procedure TSweepTests.TestRemovesTemporariesAndCountsThem;
 begin
   OpenDirectory;
   try
-    MakeFile('one.mp4' + RenderTemporarySuffix);
-    MakeFile('two.mp4' + RenderTemporarySuffix);
+    MakeAbandonedTemporary('one.mp4' + RenderTemporarySuffix);
+    MakeAbandonedTemporary('two.mp4' + RenderTemporarySuffix);
     Expect<Integer>(SweepRenderTemporaries(FDirectory)).ToBe(2);
     Expect<Boolean>(Exists('one.mp4' + RenderTemporarySuffix)).ToBe(False);
     Expect<Boolean>(Exists('two.mp4' + RenderTemporarySuffix)).ToBe(False);
+    // The owner markers go with the temporaries they named, or the next
+    // pass would find a directory of markers naming nothing.
+    Expect<Boolean>(Exists(RenderTemporaryOwnerPathFor('one.mp4'
+      + RenderTemporarySuffix))).ToBe(False);
     // And a second pass over the same directory finds nothing, which is
     // the state every ordinary start is in.
     Expect<Integer>(SweepRenderTemporaries(FDirectory)).ToBe(0);
@@ -150,7 +197,7 @@ begin
     MakeFile('take-raw.knips.jsonl');
     MakeFile('take.mp4');
     MakeFile('take.knips.jsonl');
-    MakeFile('take.mp4' + RenderTemporarySuffix);
+    MakeAbandonedTemporary('take.mp4' + RenderTemporarySuffix);
     Expect<Integer>(SweepRenderTemporaries(FDirectory)).ToBe(1);
     // The four that matter. A sweep that took a raw take with it would
     // destroy the one file that makes a render repeatable, which is the
@@ -171,11 +218,112 @@ begin
     // AVAssetWriter under the sandbox writes `<output>.sb-<token>`
     // beside its output, so a killed render leaves two files and the
     // pattern has to have a trailing wildcard as well as a leading one.
-    MakeFile('x.mp4' + RenderTemporarySuffix);
+    MakeAbandonedTemporary('x.mp4' + RenderTemporarySuffix);
     MakeFile('x.mp4' + RenderTemporarySuffix + '.sb-1a2b3c');
-    Expect<Integer>(SweepRenderTemporaries(FDirectory)).ToBe(2);
+    // One, not two: the count is temporaries removed, not files. A
+    // caller told "2 leftover render scratch file(s) removed" about one
+    // dead render is being told a number that means nothing.
+    Expect<Integer>(SweepRenderTemporaries(FDirectory)).ToBe(1);
     Expect<Boolean>(Exists('x.mp4' + RenderTemporarySuffix
       + '.sb-1a2b3c')).ToBe(False);
+    Expect<Boolean>(Exists('x.mp4' + RenderTemporarySuffix)).ToBe(False);
+  finally
+    CloseDirectory;
+  end;
+end;
+
+procedure TSweepTests.TestALiveRendersTemporaryIsLeftAlone;
+var
+  Marker: TextFile;
+begin
+  OpenDirectory;
+  try
+    // The reproducer that made the pid gate necessary: the sweep runs at
+    // every `knips record` and every app launch, and it used to delete
+    // whatever matched — including the temporary a render running in
+    // another process was at that moment writing into.
+    MakeFile('live.mp4' + RenderTemporarySuffix);
+    MakeFile('live.mp4' + RenderTemporarySuffix + '.sb-9f9f9f');
+    AssignFile(Marker, FDirectory
+      + RenderTemporaryOwnerPathFor('live.mp4' + RenderTemporarySuffix));
+    Rewrite(Marker);
+    try
+      WriteLn(Marker, FpGetPid);
+    finally
+      CloseFile(Marker);
+    end;
+    Expect<Integer>(SweepRenderTemporaries(FDirectory)).ToBe(0);
+    Expect<Boolean>(Exists('live.mp4' + RenderTemporarySuffix)).ToBe(True);
+    // The whole family survives together, marker and shadow included: a
+    // live render that lost its scratch is a render that fails at the
+    // rename.
+    Expect<Boolean>(Exists('live.mp4' + RenderTemporarySuffix
+      + '.sb-9f9f9f')).ToBe(True);
+    Expect<Boolean>(Exists(RenderTemporaryOwnerPathFor('live.mp4'
+      + RenderTemporarySuffix))).ToBe(True);
+  finally
+    CloseDirectory;
+  end;
+end;
+
+procedure TSweepTests.TestAnUnmarkedTemporaryIsLeftAlone;
+begin
+  OpenDirectory;
+  try
+    // No marker at all — a render from a build before markers existed,
+    // or one whose marker could not be written. Judged by age instead,
+    // and one made a moment ago is inside the grace period.
+    MakeFile('unmarked.mp4' + RenderTemporarySuffix);
+    Expect<Integer>(SweepRenderTemporaries(FDirectory)).ToBe(0);
+    Expect<Boolean>(Exists('unmarked.mp4'
+      + RenderTemporarySuffix)).ToBe(True);
+  finally
+    CloseDirectory;
+  end;
+end;
+
+procedure TSweepTests.TestAnUnmarkedTemporaryPastTheGraceIsSwept;
+var
+  Path: string;
+begin
+  OpenDirectory;
+  try
+    // The other half of the age rule, and the half nothing exercised:
+    // an unmarked temporary is judged by its modification time, and one
+    // older than TemporaryGraceMinutes is scratch nobody is writing
+    // into. Without this the grace period could be any length at all —
+    // including forever — and the suite would still be green.
+    //
+    // Backdated rather than waited for. FileSetDate is the only way to
+    // reach the branch in a test that has to finish, and an hour is far
+    // enough past the ten-minute grace to survive a slow machine and a
+    // clock that is not quite the filesystem's.
+    MakeFile('stale.mp4' + RenderTemporarySuffix);
+    Path := FDirectory + 'stale.mp4' + RenderTemporarySuffix;
+    Expect<Integer>(FileSetDate(Path, DateTimeToFileDate(Now - 1 / 24)))
+      .ToBe(0);
+    Expect<Integer>(SweepRenderTemporaries(FDirectory)).ToBe(1);
+    Expect<Boolean>(Exists('stale.mp4'
+      + RenderTemporarySuffix)).ToBe(False);
+  finally
+    CloseDirectory;
+  end;
+end;
+
+procedure TSweepTests.TestAFileThatMerelyContainsTheSuffixIsLeftAlone;
+begin
+  OpenDirectory;
+  try
+    // The file that was actually destroyed by the old `*<suffix>*`
+    // pattern. Three shapes are ours and a fourth is somebody's notes.
+    MakeFile('notes' + RenderTemporarySuffix + '.txt');
+    MakeFile(RenderTemporarySuffix);
+    Expect<Integer>(SweepRenderTemporaries(FDirectory)).ToBe(0);
+    Expect<Boolean>(Exists('notes' + RenderTemporarySuffix
+      + '.txt')).ToBe(True);
+    // A name that is nothing BUT the suffix has no deliverable in front
+    // of it, so it names no render either.
+    Expect<Boolean>(Exists(RenderTemporarySuffix)).ToBe(True);
   finally
     CloseDirectory;
   end;
@@ -202,10 +350,13 @@ end;
 procedure TProcessTests.TestThisProcessIsAlive;
 begin
   Expect<Boolean>(ProcessIsAlive(FpGetPid)).ToBe(True);
-  // The parent too, which is a process this one may not signal — EPERM
-  // rather than success, and the answer has to be "alive" all the same.
-  // That arm is the one worth having: reading EPERM as "gone" would let
-  // recovery re-mux a movie another user's recorder is still writing.
+  // The parent too. It is usually the same uid, so the kernel answers
+  // success and the EPERM arm is not what runs here — a shell's child
+  // may signal its shell. The arm is still the one worth having, and
+  // this assertion is not what proves it: reading EPERM as "gone" would
+  // let recovery re-mux a movie another USER's recorder is still
+  // writing, and no test on this machine can produce that answer
+  // without a second account.
   Expect<Boolean>(ProcessIsAlive(FpGetPPid)).ToBe(True);
 end;
 
@@ -238,17 +389,28 @@ end;
 
 procedure TUnsupportedTests.SetupTests;
 begin
-  Test('the recovery pass is not built on this host',
-    TestRecoveryIsDarwinOnly);
+  Test('the sweep''s naming rules are neutral and still hold here',
+    TestTheSweepsNamingRulesAreStillNeutral);
 end;
 
-procedure TUnsupportedTests.TestRecoveryIsDarwinOnly;
+procedure TUnsupportedTests.TestTheSweepsNamingRulesAreStillNeutral;
+var
+  Name: string;
 begin
   // Knips.Recording.Recovery has no interface off Darwin: the re-mux it
   // exists to perform is AVAssetExportSession. The suite says so out
   // loud rather than being absent, so a Linux run's suite count matches
   // a macOS run's and nobody has to work out which one is missing.
-  Expect<Boolean>(True).ToBe(True);
+  //
+  // It used to say it with `Expect(True).ToBe(True)`, which is a test
+  // that cannot fail. There IS something here worth asserting on every
+  // host: the naming rules the sweep turns on live in Knips.Options and
+  // are neutral, so a Linux run can still pin the one decision that
+  // stops the pass deleting somebody's file.
+  Expect<Boolean>(ClassifyRenderTemporary('demo.mp4'
+    + RenderTemporarySuffix, Name) = rtkTemporary).ToBe(True);
+  Expect<Boolean>(ClassifyRenderTemporary('notes'
+    + RenderTemporarySuffix + '.txt', Name) = rtkNotOurs).ToBe(True);
 end;
 
 {$ENDIF}

@@ -46,6 +46,7 @@ uses
   Knips.Capture.CoreMedia,
   Knips.Capture.ScreenCaptureKit,
   Knips.ObjC.Runtime,
+  Knips.Options,
   MacOSAll;
 
 // The Microphone TCC grant is asked of AVFoundation, which is where the
@@ -272,7 +273,6 @@ const
   OutputClassName = 'KnipsStreamOutput';
   OutputSuperclassName = 'NSObject';
   OutputProtocolName = 'SCStreamOutput';
-  OwnerIvarName = 'knipsOwner';
   SampleSelector = 'stream:didOutputSampleBuffer:ofType:';
   StreamClassName = 'SCStream';
   UpdateSelector = 'updateConfiguration:completionHandler:';
@@ -288,7 +288,6 @@ const
   QueueDepth = 5;
   CompletionTimeoutSlices = 5000;
   StopTimeoutSlices = 3000;
-  RunLoopSliceSeconds = 0.001;
   // How long a *second* Start waits for a first one's abandoned handler
   // before refusing. Short: this only ever runs after a timeout, and the
   // caller (the menu-bar app) must not freeze on a retry.
@@ -416,7 +415,7 @@ begin
   WaitCount := 0;
   while GStartPending and (WaitCount < StalePendingSlices) do
   begin
-    CFRunLoopRunInMode(kCFRunLoopDefaultMode, RunLoopSliceSeconds, False);
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, FrameworkSliceSeconds, False);
     Inc(WaitCount);
   end;
   if GStartPending then
@@ -680,7 +679,7 @@ begin
   WaitCount := 0;
   while GUpdatePending and (WaitCount < PendingUpdateSlices) do
   begin
-    CFRunLoopRunInMode(kCFRunLoopDefaultMode, RunLoopSliceSeconds, False);
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, FrameworkSliceSeconds, False);
     Inc(WaitCount);
   end;
   if not GUpdatePending then
@@ -943,7 +942,7 @@ begin
   WaitCount := 0;
   while (not GStartReady) and (WaitCount < CompletionTimeoutSlices) do
   begin
-    CFRunLoopRunInMode(kCFRunLoopDefaultMode, RunLoopSliceSeconds, False);
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, FrameworkSliceSeconds, False);
     Inc(WaitCount);
   end;
   if not GStartReady then
@@ -978,7 +977,7 @@ begin
   WaitCount := 0;
   while (not GStopReady) and (WaitCount < StopTimeoutSlices) do
   begin
-    CFRunLoopRunInMode(kCFRunLoopDefaultMode, RunLoopSliceSeconds, False);
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, FrameworkSliceSeconds, False);
     Inc(WaitCount);
   end;
   // The stop is not confirmable, so this is not a failure and the
