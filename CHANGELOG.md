@@ -15,6 +15,43 @@ Changelog](https://keepachangelog.com/en/1.1.0/)'s: **Added**,
 
 ### Added
 
+- **A sidecar cannot point recovery at a movie outside its own
+  directory.** The event sidecar's `movie` field was documented as a
+  bare file name and never checked: a sidecar planted in a recording
+  directory naming `../B/victim.mp4` made the next `knips record` (and
+  the app at launch) re-mux and replace a movie one directory up. The
+  reader now states the rule in code (`SidecarMovieNameIsBare`), the
+  recovery pass refuses such a name and a movie path that is a
+  symbolic link, and a take it will not act on is left exactly as
+  found — sidecar included, so a planted file cannot switch recovery
+  off for the name it carries. A backslash stays legal in a macOS file
+  name and is not refused.
+- **A rendered deliverable is encoded with the recorder's own bit-rate
+  budget.** The render pass configured its H.264 writer from the raw
+  take's average frame rate, which on a still-screen take carried by the
+  idle heartbeat is a few frames per second: the budget fell to the
+  1 Mbit/s floor and keyframes landed every twenty frames while the
+  render filled in thirty frames a second of zoom and pointer motion.
+  It now takes the take's configured rate from the sidecar header,
+  through the one settings builder the recorder uses, so a
+  1280×720 @ 30 fps deliverable gets 2.49 Mbit/s and a keyframe every
+  four seconds, exactly like the take it came from.
+- `knips render --effects=none` copies the take in megabyte chunks, so
+  a Ctrl-C is honoured within a megabyte rather than after the whole
+  copy — and a short read fails the copy instead of quietly committing
+  a truncated deliverable, which the whole-file copy could.
+- **The release runbook is the Definition of Done.** `docs/deployment.md`
+  said to run git-cliff over a changelog that is hand-maintained by
+  rule; it now says to bump both version numbers, close this section
+  by hand, run `tools/release-gate.sh` and tag. The last three
+  statements implying a CI service runs the gates are gone.
+- **`docs/architecture.md` describes the current design; its superseded
+  measurements moved to `docs/measurements.md`.** The architecture
+  document had grown to 3,400 lines, a third of them narrating what a
+  number used to be. Every current constant, decision and figure stays
+  where it was, every heading anchor still resolves, and the history is
+  an appendix linked both ways.
+
 - **Every file knips replaces is now replaced atomically, and a Ctrl-C
   cannot cost you the one you already had.** The MP4 render already
   built into a neighbour and renamed it into place; the GIF and APNG
