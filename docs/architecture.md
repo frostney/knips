@@ -128,7 +128,7 @@
 | --- | --- | --- |
 | CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `render`, `export`, `displays`, `windows`, `mcp`, `probe`; SIGINT/SIGTERM → `StopRequested` |
 | MCP | `Knips.Mcp`, `Knips.Mcp.Params` | The tool surface over pascal-mcp-sdk's stdio transport; the neutral half is the tool table, the output schemas, argument mapping, default paths, and the take-info answer (tested) |
-| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Camera.Blur`, `Knips.App.Live`, `Knips.App.Hotkey`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window and its background-blur pipeline, the live-effect animator, the global stop hotkey, and the neutral state machine (tested) |
+| App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Camera.Blur`, `Knips.App.CameraRide`, `Knips.App.Live`, `Knips.App.Hotkey`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window and its background-blur pipeline, the camera dock and the 5 Hz poll that keeps it — and a composited window recording's own source rectangle — on a recorded window as it moves, the live-effect animator, the global stop hotkey, and the neutral state machine (tested) |
 | Recording | `Knips.Recording`, `Knips.Recording.LiveMath`, `Knips.Recording.CursorMath`, `Knips.Recording.CursorOverlay`, `Knips.Recording.Heartbeat`, `Knips.Recording.Sidecar`, `Knips.Recording.Recovery` | Target → filter + geometry → writer → stream; progress; report. The live-effect, big-cursor and idle-heartbeat arithmetic are neutral and tested; the overlay is the Darwin half that makes the sprite and blits it. The event sidecar is the neutral, tested file format (docs/event-sidecar.md) and recovery is the Darwin pass that finishes off a take whose process died |
 | Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
 | Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.MovieTrim`, `Knips.Export.Pipeline`, `Knips.Export.Render`, `Knips.Export.CursorEffect` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; AVAssetExportSession passthrough trim; the shared GIF/APNG pipeline; the raw-take → deliverable render (video re-encoded, audio copied); the pointer drawn back in at render/export time from the sidecar |
@@ -1657,7 +1657,7 @@ capture.
 So the camera is put in the file the only way it can be: **a window
 recording captures the DISPLAY instead**, with a source rectangle sitting
 exactly on that window's frame.
-`TAppController.CompositeWindowForPending` rewrites the pending request
+`TCameraRide.CompositeWindowForPending` (Knips.App.CameraRide, the helper the controller owns) rewrites the pending request
 before anything else reads it — the window's AppKit frame from
 `CGWindowListCopyWindowInfo`, the display holding its centre from
 `DisplayIDForScreenRect`, and `ScreenRectRegion` (the inverse of
