@@ -129,7 +129,7 @@
 | CLI | `knips.pas` | lwpt `cli` package: `app`, `record`, `render`, `export`, `displays`, `windows`, `mcp`, `probe`; SIGINT/SIGTERM → `StopRequested` |
 | MCP | `Knips.Mcp`, `Knips.Mcp.Params` | The tool surface over pascal-mcp-sdk's stdio transport; the neutral half is the tool table, the output schemas, argument mapping, default paths, and the take-info answer (tested) |
 | App | `Knips.App`, `Knips.App.Overlay`, `Knips.App.Border`, `Knips.App.Playback`, `Knips.App.Camera`, `Knips.App.Camera.Blur`, `Knips.App.CameraRide`, `Knips.App.Live`, `Knips.App.Hotkey`, `Knips.App.State` | Status item + menu, selection overlay, the recording frame, the playback/export window, the camera picture-in-picture window and its background-blur pipeline, the camera dock and the 5 Hz poll that keeps it — and a composited window recording's own source rectangle — on a recorded window as it moves, the live-effect animator, the global stop hotkey, and the neutral state machine (tested) |
-| Recording | `Knips.Recording`, `Knips.Recording.LiveMath`, `Knips.Recording.CursorMath`, `Knips.Recording.CursorOverlay`, `Knips.Recording.Heartbeat`, `Knips.Recording.Sidecar`, `Knips.Recording.Recovery` | Target → filter + geometry → writer → stream; progress; report. The live-effect, big-cursor and idle-heartbeat arithmetic are neutral and tested; the overlay is the Darwin half that makes the sprite and blits it. The event sidecar is the neutral, tested file format (docs/event-sidecar.md) and recovery is the Darwin pass that finishes off a take whose process died |
+| Recording | `Knips.Recording`, `Knips.Recording.LiveMath`, `Knips.Recording.CursorMath`, `Knips.Recording.CursorSprite`, `Knips.Recording.CursorOverlay`, `Knips.Recording.Heartbeat`, `Knips.Recording.Sidecar`, `Knips.Recording.Recovery` | Target → filter + geometry → writer → stream; progress; report. The live-effect, big-cursor and idle-heartbeat arithmetic are neutral and tested; the sprite unit is the one Quartz routine that renders the arrow, for the recording and the export alike, and the overlay is the Darwin half that blits it. The event sidecar is the neutral, tested file format (docs/event-sidecar.md) and recovery is the Darwin pass that finishes off a take whose process died |
 | Capture | `Knips.Capture.ShareableContent`, `Knips.Capture.Stream` | SCShareableContent query (run-loop pumped); SCStream + runtime output object |
 | Export (Darwin) | `Knips.Export.MovieWriter`, `Knips.Export.MovieReader`, `Knips.Export.MovieTrim`, `Knips.Export.Pipeline`, `Knips.Export.Render`, `Knips.Export.CursorEffect` | AVAssetWriter/Input bindings; AVAssetReader/TrackOutput bindings; AVAssetExportSession passthrough trim; the shared GIF/APNG pipeline; the raw-take → deliverable render (video re-encoded, audio copied); the pointer drawn back in at render/export time from the sidecar |
 | Export (neutral) | `Knips.Export.Gif`, `Knips.Export.Apng`, `Knips.Export.Bitmap`, `Knips.Export.Timing`, `Knips.Export.SizeEstimate`, `Knips.Export.ZoomTrack`, `Knips.Export.Cadence` | Median cut, dithering, LZW, GIF89a writer; APNG chunks, PNG filters, paszlib; BGRA buffer + resampling; frame-delay planning; the pre-export size estimate and the in-flight projection; the post-recording Zoom on Click replayed from the click track; and the frame-synthesis arithmetic — where a render may put a frame the capture never made, whether that frame would be a different picture from the one before it, and how much one gap may ever cost. `Knips.Export.Cadence` depends on nothing at all and both `Knips.Export.Render` and `Knips.Export.Pipeline` consume it, so an MP4 and a GIF fill the same gaps the same way (all tested) |
@@ -2795,8 +2795,10 @@ the finished file, so they inherit it for nothing.
 
 `Knips.Recording.CursorMath` is the whole of the arithmetic and has no
 framework in it (tested, like `Knips.Recording.LiveMath`).
-`Knips.Recording.CursorOverlay` is the Darwin half: `Prepare` on the main
-thread before the capture starts, `DrawInto` on the capture queue.
+`Knips.Recording.CursorSprite` is the arrow itself, shared with the
+export's drawn pointer. `Knips.Recording.CursorOverlay` is the rest of
+the Darwin half: `Prepare` on the main thread before the capture starts,
+`DrawInto` on the capture queue.
 
 **The mapping.** A frame is `PixelWidth × PixelHeight` showing the
 rectangle ScreenCaptureKit is currently reading, in the recorded
@@ -2809,8 +2811,9 @@ rectangle to the output. The rectangle is fed from
 what the animator asked for, because an update inside the epsilon or one
 dropped behind another in flight never reached the framework.
 
-**Two threads.** `Prepare` asks AppKit for `NSCursor.arrowCursor`, picks
-the largest bitmap representation (macOS ships the arrow at 28×40 points
+**Two threads.** `Prepare` asks `Knips.Recording.CursorSprite` for the
+arrow, which is where AppKit is talked to: `NSCursor.arrowCursor`, the
+largest bitmap representation (macOS ships the arrow at 28×40 points
 with representations up to 280×400 pixels, so any sprite this program
 asks for is a *downsample* of real pixels), and draws it into a
 `CGBitmapContext` over a `GetMem` block — raw memory rather than a
@@ -2862,27 +2865,37 @@ The record-time path below is still exactly what `knips record
 --big-cursor` does, and the capture-queue rules it is written to still
 apply there. What changed is who asks for it.
 
-**Two sprite builders, on purpose.** `TCursorOverlay.RenderSprite`
+**One sprite builder, two scales.** `Knips.Recording.CursorSprite` is
+the whole of it: `+[NSCursor arrowCursor]`, the image's largest bitmap
+representation, a `CGBitmapContextCreate` at premultiplied BGRA over a
+`GetMem` block, one `CGContextDrawImage` at the scaled extent, handed
+back as a `TCursorSprite` — pixels, extent, bytes per row, hot spot and
+byte count, and not one managed field, so the capture queue may read it.
+
+It was two. `TCursorOverlay.RenderSprite`
 (`Knips.Recording.CursorOverlay`) and `TExportCursor.RenderSprite`
-(`Knips.Export.CursorEffect`) are near-identical Quartz routines:
-`+[NSCursor arrowCursor]`, the image's TIFF/bitmap representation, a
-`CGBitmapContextCreate` at premultiplied BGRA over a `GetMem` block, one
-`CGContextDrawImage` at the scaled extent. What differs is not a
-parameter but the **kernel**: the record-time one draws at the
-*capture's* scale — `PixelWidth / BaseRect.width`, the recording's own
-pixels per point — into a sprite the capture queue then blits into every
-frame as it arrives; the export-time one draws at the *output's* scale —
-`OutputWidth / Header.BaseWidth`, times the effect's magnification — into
+(`Knips.Export.CursorEffect`) held a copy each, identical down to the
+wording of every error message, kept in step by nothing but a comment in
+both files saying to change them together. The difference that was
+claimed to justify it — a **kernel**, not a parameter — was not one:
+what actually differed was two numbers, and two numbers are arguments.
+`RenderArrowSprite(APixelsPerPoint, AMagnification, ...)` takes them
+apart and passes them to `BigCursorSpriteExtent` in the same expression
+both copies used, so the arithmetic is bit-for-bit what it was.
+
+The **scales** are still two, and they still belong to the callers.
+Record time asks at the *capture's* scale — `PixelWidth /
+BaseRect.width`, the recording's own pixels per point — with Big
+Cursor's fixed 2.5× as its own factor, into a sprite the capture queue
+blits into every frame as it arrives. Export time asks at the *output's*
+scale — `OutputWidth / Header.BaseWidth`, with the effect's resolved
+magnification folded in and 1 passed as the factor, because there the
+magnification is an option and one number has to decide the size — into
 a sprite the render and the GIF pipeline composite into already-scaled
-frames, so a 2× recording exported at half width gets a one-times pointer
-rather than a two-times one. Unifying them would mean a third unit owning
-a Quartz drawing routine that neither layer could reach without importing
-it, for a saving of about thirty lines, and it would fight the divergence
-the two are entitled to — a different magnification rule, a different
-colour space at export. So the duplication stands, and both functions
-carry a comment saying so. **They must be changed together**: a fix to
-one is a fix to the other, and those two comments are the only thing
-keeping them in step.
+frames, so a 2× recording exported at half width gets a one-times
+pointer rather than a two-times one. A colour space or a magnification
+rule that ever does need to differ differs at the call, which is where
+the two were already different.
 
 **The seam with the idle heartbeat.** Big Cursor composites its sprite
 into a frame **on the capture queue, as that frame arrives** — so it

@@ -12,16 +12,20 @@ unit Knips.Recording.CursorOverlay;
 // for nothing — they read the finished file.
 //
 // The arithmetic is all in Knips.Recording.CursorMath, below the Darwin
-// line and unit-tested. What is left here is the two things that cannot
-// be: making the sprite, and reaching the frame's bytes.
+// line and unit-tested, and the sprite itself is all in
+// Knips.Recording.CursorSprite, which the export's drawn pointer
+// (Knips.Export.CursorEffect) renders from too — the two used to hold a
+// copy each of the same Quartz routine. What is left here is the one
+// thing neither of those can do: reaching the frame's bytes on the
+// thread they arrive on.
 //
 // **Two threads, and the split between them is the whole design.**
 //
 // Prepare runs on the main thread, once, before the capture starts. It
-// asks AppKit for the arrow cursor, renders it into a plain BGRA buffer
-// through a CGBitmapContext, and keeps the bytes in a GetMem block —
-// deliberately not a dynamic array, so that nothing the capture queue
-// touches is a managed type at all.
+// asks Knips.Recording.CursorSprite for the arrow at the recording's own
+// scale, which is where AppKit is talked to and where the bytes end up
+// in a GetMem block — deliberately not a dynamic array, so that nothing
+// the capture queue touches is a managed type at all.
 //
 // DrawInto runs on ScreenCaptureKit's capture queue, where this program
 // has no cthreads on Darwin (a Darwin-only rule — ADR-0005) and the
@@ -68,9 +72,6 @@ unit Knips.Recording.CursorOverlay;
 // main thread prints the totals afterwards.
 
 {$I Knips.inc}
-{$IFDEF DARWIN}
-{$modeswitch objectivec2}
-{$ENDIF}
 
 interface
 
@@ -79,27 +80,23 @@ interface
 uses
   SysUtils,
 
-  CocoaAll,
   Knips.Capture.CoreMedia,
   Knips.Capture.PThreadMutex,
-  Knips.ObjC.Runtime,
   Knips.Recording.CursorMath,
+  Knips.Recording.CursorSprite,
   MacOSAll;
 
 type
   TCursorOverlay = class
   private
-    // The sprite, premultiplied BGRA, top row first. Raw memory rather
-    // than a dynamic array: the capture queue reads it, and a managed
-    // type there is exactly what the no-cthreads rules forbid.
-    FPixels: PByte;
-    FPixelCount: PtrUInt;
-    FSpriteWidth: Integer;
-    FSpriteHeight: Integer;
-    FSpriteBytesPerRow: Integer;
-    FHotSpotX: Integer;
-    FHotSpotY: Integer;
-    FReady: Boolean;
+    // The sprite, premultiplied BGRA, top row first, made once on the
+    // main thread by Knips.Recording.CursorSprite. Raw memory rather than
+    // a dynamic array: the capture queue reads it, and a managed type
+    // there is exactly what the no-cthreads rules forbid — which is why
+    // TCursorSprite is a record of integers and one PByte and nothing
+    // else. Its Pixels being non-nil is what "ready" means; there is no
+    // second flag to fall out of step with it.
+    FSprite: TCursorSprite;
     // The recorded display's origin in the global point space
     // CGEventGetLocation answers in. Fixed for the recording; read on the
     // capture queue without a lock because nothing ever writes it again.
@@ -123,9 +120,6 @@ type
     // Capture-queue safe: no allocation, no exception, no managed type.
     procedure Count(var ACounter: Int64);
     function CounterValue(const ACounter: Int64): Int64;
-    function RenderSprite(APixelsPerPoint: Double;
-      out AError: string): Boolean;
-    procedure ReleasePixels;
   public
     constructor Create;
     destructor Destroy; override;
@@ -149,10 +143,10 @@ type
     // outside the captured rectangle, or when the buffer is not the
     // 32BGRA the stream asked for.
     procedure DrawInto(APixelBuffer: CVPixelBufferRef);
-    property SpriteWidth: Integer read FSpriteWidth;
-    property SpriteHeight: Integer read FSpriteHeight;
-    property HotSpotX: Integer read FHotSpotX;
-    property HotSpotY: Integer read FHotSpotY;
+    property SpriteWidth: Integer read FSprite.Width;
+    property SpriteHeight: Integer read FSprite.Height;
+    property HotSpotX: Integer read FSprite.HotSpotX;
+    property HotSpotY: Integer read FSprite.HotSpotY;
     // Frames the sprite was drawn into, frames where the pointer was
     // outside the captured rectangle, and frames refused because the
     // buffer could not be locked or was not the expected layout. The
@@ -164,10 +158,13 @@ type
 
 // Renders the sprite for the main display at its own backing scale and
 // throws it away, reporting what it made. `knips probe` calls this: the
-// one framework dependency Big Cursor has is NSCursor's image, which is
-// nil without an NSApplication and could go nil again on a future macOS,
-// and a line printed before anything is recorded beats a recording that
-// quietly comes out with no pointer at all.
+// one framework dependency Big Cursor has is NSCursor's image — now
+// reached through Knips.Recording.CursorSprite — which is nil without an
+// NSApplication and could go nil again on a future macOS, and a line
+// printed before anything is recorded beats a recording that quietly
+// comes out with no pointer at all. Going through the overlay rather than
+// straight to the renderer is the point: it proves the scale arithmetic
+// this unit does as well as the drawing the other one does.
 function ProbeCursorSprite(out AWidth, AHeight, AHotSpotX,
   AHotSpotY: Integer; out AError: string): Boolean;
 
@@ -178,66 +175,11 @@ implementation
 {$IFDEF DARWIN}
 
 const
-  // NSApplicationActivationPolicyProhibited (NSApplication.h). See
-  // EnsureAppKit below for why a recorder ever sets one.
-  ActivationPolicyProhibited = 2;
-  // CGBitmapContextCreate's flags for premultiplied BGRA: alpha first in
-  // a little-endian 32-bit word is B, G, R, A in memory, which is the
-  // layout kCVPixelFormatType_32BGRA names and the layout the blit
-  // assumes on both sides.
-  PremultipliedBgraFlags = kCGImageAlphaPremultipliedFirst
-    or kCGBitmapByteOrder32Little;
-  BitsPerComponent = 8;
+  // The frame's own layout, checked before anything is written into it:
+  // kCVPixelFormatType_32BGRA is four bytes to the pixel. The sprite's
+  // side of the same fact belongs to Knips.Recording.CursorSprite, which
+  // is what made it.
   BytesPerPixel = 4;
-
-{ AppKit has to be up before NSCursor answers anything: without an
-  NSApplication, +[NSCursor arrowCursor] is nil (measured — it is not
-  merely an image with no representations). The menu-bar app has one long
-  before a recording starts, so this only ever does anything for
-  `knips record --big-cursor`, where it creates NSApp and immediately
-  puts it in the Prohibited activation policy: the process registers with
-  LaunchServices, as any AppKit client does, but takes no Dock tile and
-  no menu bar. The policy is set only when this call is what created
-  NSApp, so it can never overwrite the menu-bar app's own. }
-procedure EnsureAppKit;
-var
-  Created: Boolean;
-begin
-  Created := NSApp = nil;
-  NSApplication.sharedApplication;
-  if Created and (NSApp <> nil) then
-    NSApp.setActivationPolicy(ActivationPolicyProhibited);
-end;
-
-{ The largest bitmap representation the cursor image carries. macOS ships
-  the arrow at 28x40 points with representations up to 280x400 pixels
-  (measured), so a sprite at any scale this program asks for is a
-  *downsample* of real pixels rather than a magnified 28x40 — which is
-  the whole difference between a crisp big pointer and a blurry one.
-  Representations that cannot produce a CGImage are skipped rather than
-  cast blindly; NSImage's contents are whatever AppKit decided to put
-  there. }
-function LargestBitmapRepresentation(AImage: NSImage): NSBitmapImageRep;
-var
-  Representations: NSArray;
-  Candidate: NSBitmapImageRep;
-  I: Integer;
-begin
-  Result := nil;
-  if AImage = nil then
-    Exit;
-  Representations := AImage.representations;
-  if Representations = nil then
-    Exit;
-  for I := 0 to Integer(Representations.count) - 1 do
-  begin
-    if not RespondsToSelector(Representations.objectAtIndex(I), 'CGImage') then
-      Continue;
-    Candidate := NSBitmapImageRep(Representations.objectAtIndex(I));
-    if (Result = nil) or (Candidate.pixelsWide > Result.pixelsWide) then
-      Result := Candidate;
-  end;
-end;
 
 { TCursorOverlay }
 
@@ -251,140 +193,9 @@ destructor TCursorOverlay.Destroy;
 begin
   // The capture queue is long stopped by the time this runs: the session
   // stops the stream before it frees anything (Knips.Recording).
-  ReleasePixels;
+  ReleaseCursorSprite(FSprite);
   PThreadMutexDestroy(FLock);
   inherited Destroy;
-end;
-
-procedure TCursorOverlay.ReleasePixels;
-begin
-  FReady := False;
-  if FPixels <> nil then
-  begin
-    FreeMem(FPixels);
-    FPixels := nil;
-  end;
-  FPixelCount := 0;
-end;
-
-// **This function has a near-identical twin**, and the duplication is
-// deliberate rather than overlooked:
-// Knips.Export.CursorEffect's TExportCursor.RenderSprite
-// builds the same sprite the same way — +[NSCursor arrowCursor], the
-// image's bitmap representation, a CGBitmapContextCreate at
-// premultiplied BGRA, one CGContextDrawImage at the scaled extent.
-//
-// What differs is the scale and when. This one draws at RECORD time, at
-// the CAPTURE's scale, into pixels the capture queue then blits into
-// every frame; the other draws at export time at the OUTPUT's scale.
-// (There is no "kernel" here in any sense — that word belongs to
-// Knips.Export.Bitmap's resampling and said nothing true about either
-// of these.)
-// Unifying them would mean a third unit owning a Quartz drawing routine
-// that neither of these layers could then reach without importing it,
-// for a saving of about thirty lines — and the two are free to diverge
-// (a different magnification rule, a different colour space at export)
-// in a way a shared routine would fight. See docs/architecture.md.
-//
-// **Change them together.** A fix to one is a fix to the other, and the
-// only thing keeping them in step is this note in both files.
-function TCursorOverlay.RenderSprite(APixelsPerPoint: Double;
-  out AError: string): Boolean;
-var
-  Cursor: NSCursor;
-  Image: NSImage;
-  Representation: NSBitmapImageRep;
-  Bitmap: CGImageRef;
-  Space: CGColorSpaceRef;
-  Context: CGContextRef;
-  PointWidth, PointHeight: Double;
-begin
-  Result := False;
-  AError := '';
-  ReleasePixels;
-  EnsureAppKit;
-
-  Cursor := NSCursor.arrowCursor;
-  if Cursor = nil then
-  begin
-    AError := 'AppKit has no arrow cursor to draw';
-    Exit;
-  end;
-  Image := Cursor.image;
-  Representation := LargestBitmapRepresentation(Image);
-  if Representation = nil then
-  begin
-    AError := 'the arrow cursor has no bitmap representation';
-    Exit;
-  end;
-  PointWidth := Image.size.width;
-  PointHeight := Image.size.height;
-  if (PointWidth <= 0) or (PointHeight <= 0) then
-  begin
-    AError := 'the arrow cursor has no size';
-    Exit;
-  end;
-
-  FSpriteWidth := BigCursorSpriteExtent(PointWidth, APixelsPerPoint,
-    BigCursorMagnification);
-  FSpriteHeight := BigCursorSpriteExtent(PointHeight, APixelsPerPoint,
-    BigCursorMagnification);
-  FHotSpotX := BigCursorHotSpot(Cursor.hotSpot.x, PointWidth, FSpriteWidth);
-  FHotSpotY := BigCursorHotSpot(Cursor.hotSpot.y, PointHeight,
-    FSpriteHeight);
-  FSpriteBytesPerRow := FSpriteWidth * BytesPerPixel;
-  FPixelCount := PtrUInt(FSpriteBytesPerRow) * PtrUInt(FSpriteHeight);
-
-  FPixels := GetMem(FPixelCount);
-  if FPixels = nil then
-  begin
-    AError := 'could not allocate the cursor sprite';
-    Exit;
-  end;
-  // Quartz does not clear a buffer it is handed, and the sprite is
-  // mostly transparent; an uncleared one would blit whatever was on the
-  // heap around the arrow.
-  FillChar(FPixels^, FPixelCount, 0);
-
-  Space := CGColorSpaceCreateDeviceRGB;
-  if Space = nil then
-  begin
-    AError := 'CGColorSpaceCreateDeviceRGB failed';
-    ReleasePixels;
-    Exit;
-  end;
-  Context := CGBitmapContextCreate(FPixels, FSpriteWidth, FSpriteHeight,
-    BitsPerComponent, FSpriteBytesPerRow, Space, PremultipliedBgraFlags);
-  CGColorSpaceRelease(Space);
-  if Context = nil then
-  begin
-    AError := 'CGBitmapContextCreate failed for the cursor sprite';
-    ReleasePixels;
-    Exit;
-  end;
-
-  // A bitmap context's memory is top row first even though its user space
-  // has y growing up, so drawing the image into the whole context lands
-  // it the right way up for a buffer that is read row 0 = top — which is
-  // both what a CVPixelBuffer is and what the blit assumes.
-  Bitmap := Representation.CGImage;
-  if Bitmap <> nil then
-  begin
-    CGContextSetInterpolationQuality(Context, kCGInterpolationHigh);
-    CGContextDrawImage(Context, CGRectMake(0, 0, FSpriteWidth,
-      FSpriteHeight), Bitmap);
-    CGContextFlush(Context);
-  end;
-  CGContextRelease(Context);
-  if Bitmap = nil then
-  begin
-    AError := 'the arrow cursor representation has no CGImage';
-    ReleasePixels;
-    Exit;
-  end;
-
-  FReady := True;
-  Result := True;
 end;
 
 function TCursorOverlay.Prepare(ADisplayID: UInt32; APixelWidth,
@@ -412,7 +223,13 @@ begin
   // once, at the size the base geometry implies, and keeps that size in
   // output pixels for the whole file (see the unit comment).
   PixelsPerPoint := APixelWidth / ABaseRect.size.width;
-  if not RenderSprite(PixelsPerPoint, AError) then
+  // Big Cursor's fixed magnification, handed over as its own number: the
+  // shared renderer multiplies the two together the way this unit's own
+  // copy used to, and the export's caller folds its magnification in
+  // differently for reasons of its own.
+  ReleaseCursorSprite(FSprite);
+  if not RenderArrowSprite(PixelsPerPoint, BigCursorMagnification, FSprite,
+    AError) then
     Exit;
 
   PThreadMutexLock(FLock);
@@ -451,7 +268,7 @@ begin
   // type, or sends an Objective-C message; there is no try..finally, so
   // every early exit that has taken the pixel-buffer lock releases it by
   // hand.
-  if not FReady or (FPixels = nil) or (APixelBuffer = nil) then
+  if (FSprite.Pixels = nil) or (APixelBuffer = nil) then
     Exit;
 
   // The pointer's position, in the global point space whose origin is the
@@ -472,8 +289,8 @@ begin
   PThreadMutexUnlock(FLock);
 
   Plan := PlanCursorBlit(Mapping, Location.x - FDisplayOriginX,
-    Location.y - FDisplayOriginY, FSpriteWidth, FSpriteHeight, FHotSpotX,
-    FHotSpotY);
+    Location.y - FDisplayOriginY, FSprite.Width, FSprite.Height,
+    FSprite.HotSpotX, FSprite.HotSpotY);
   if not Plan.Visible then
   begin
     Count(FOffFrame);
@@ -505,8 +322,8 @@ begin
   BytesPerRow := Integer(CVPixelBufferGetBytesPerRow(APixelBuffer));
   if (Base <> nil) and (BytesPerRow >= Mapping.PixelWidth * BytesPerPixel) then
   begin
-    BlitPremultipliedBgra(Base, BytesPerRow, FPixels, FSpriteBytesPerRow,
-      Plan);
+    BlitPremultipliedBgra(Base, BytesPerRow, FSprite.Pixels,
+      FSprite.BytesPerRow, Plan);
     Count(FComposited);
   end
   else
