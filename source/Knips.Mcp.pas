@@ -252,27 +252,6 @@ begin
       + EffectZoomNoteLine(McpArgumentMessage(AZoomNote));
 end;
 
-// Bytes on disk, or 0 when the file cannot be opened. SysUtils has no
-// path-taking FileSize, and a size is what a client wants before it
-// decides whether to attach the thing. Outside the Darwin guard because
-// take_info is: reading a sidecar needs no framework.
-function FileSizeOf(const APath: string): Int64;
-var
-  Handle: THandle;
-begin
-  Result := 0;
-  Handle := FileOpen(APath, fmOpenRead or fmShareDenyNone);
-  if Handle = THandle(-1) then
-    Exit;
-  try
-    Result := FileSeek(Handle, Int64(0), fsFromEnd);
-    if Result < 0 then
-      Result := 0;
-  finally
-    FileClose(Handle);
-  end;
-end;
-
 {$IFNDEF DARWIN}
 // Off Darwin the tool table is identical and every capture tool
 // reports the same in-band refusal the CLI prints — so an agent that
@@ -1205,6 +1184,51 @@ const
     + 'a take recorded with smooth_cursor or with cursor=false.';
   OverwriteHelp = 'Replace "out" if it already exists (default false: '
     + 'an existing file is refused by name rather than destroyed).';
+
+  // The two animation exports, which are one tool with two sinks: the
+  // same input, the same trim, the same effects, the same words about
+  // all of them. They differ in their name, their extension and — the
+  // GIF alone — dithering, because a truecolour APNG has nothing to
+  // dither. Written twice, the two drifted a phrase at a time; written
+  // once, a change to what an export offers reaches both or neither.
+  //
+  // AArticle is a parameter rather than derived: "a .gif" and "an
+  // .apng" is English about how the extension is said aloud, and
+  // guessing it from the letter would be a rule that happens to work
+  // for the two formats this ever has.
+  procedure RegisterAnimationExport(ATool: TKnipsMcpTool;
+    const AFormat, AExtension, AArticle: string; ADithers: Boolean;
+    AMethod: TMCPToolMethod);
+  var
+    Schema: TMCPSchema;
+  begin
+    Schema := ObjectSchema
+      .AddString('in', 'The recorded movie to convert (.mp4 or .mov).')
+      .AddString('out', Format('Output %s; defaults to the input path '
+      + 'with %s %s extension. Returned absolute.',
+      [AExtension, AArticle, AExtension]), False)
+      .AddBoolean('overwrite', OverwriteHelp, False)
+      .AddInteger('fps', Format('Frames per second, %d-%d (default %d).',
+      [MinGifFramesPerSecond, MaxGifFramesPerSecond,
+      DefaultGifFramesPerSecond]), False)
+      .AddInteger('width', Format('Scale to this width in pixels, '
+      + '%d-%d; omit to keep the movie''s own.',
+      [MinGifWidth, MaxGifWidth]), False)
+      .AddNumber('trim_start', 'Seconds to start from.', False)
+      .AddNumber('trim_end', 'Seconds to stop at; omit to run to the '
+      + 'end.', False);
+    // Between trim_end and zoom, where it was written: the property
+    // ORDER is what a client shows a user, so it is part of the tool.
+    if ADithers then
+      Schema := Schema.AddBoolean('dither', 'Floyd-Steinberg dithering '
+        + '(default true). False is smaller but bands.', False);
+    Schema := Schema
+      .AddBoolean('zoom', ZoomHelp, False)
+      .AddString('cursor', CursorHelp, False);
+    AServer.RegisterTool(ToolDefinition(ATool, Schema), AMethod)
+      .Title('Export ' + AFormat).OpenWorldHint(False);
+  end;
+
 begin
   // Input schemas stay inside the server-enforced subset (flat scalar
   // properties) so every call is type-checked before a handler runs; a
@@ -1308,47 +1332,10 @@ begin
     Render)
     .Title('Render a take').OpenWorldHint(False);
 
-  AServer.RegisterTool(ToolDefinition(kmtExportGif,
-    ObjectSchema
-      .AddString('in', 'The recorded movie to convert (.mp4 or .mov).')
-      .AddString('out', 'Output .gif; defaults to the input path with '
-      + 'a .gif extension. Returned absolute.', False)
-      .AddBoolean('overwrite', OverwriteHelp, False)
-      .AddInteger('fps', Format('Frames per second, %d-%d (default %d).',
-      [MinGifFramesPerSecond, MaxGifFramesPerSecond,
-      DefaultGifFramesPerSecond]), False)
-      .AddInteger('width', Format('Scale to this width in pixels, '
-      + '%d-%d; omit to keep the movie''s own.',
-      [MinGifWidth, MaxGifWidth]), False)
-      .AddNumber('trim_start', 'Seconds to start from.', False)
-      .AddNumber('trim_end', 'Seconds to stop at; omit to run to the '
-      + 'end.', False)
-      .AddBoolean('dither', 'Floyd-Steinberg dithering (default true). '
-      + 'False is smaller but bands.', False)
-      .AddBoolean('zoom', ZoomHelp, False)
-      .AddString('cursor', CursorHelp, False)),
-    ExportGif)
-    .Title('Export GIF').OpenWorldHint(False);
-
-  AServer.RegisterTool(ToolDefinition(kmtExportApng,
-    ObjectSchema
-      .AddString('in', 'The recorded movie to convert (.mp4 or .mov).')
-      .AddString('out', 'Output .apng; defaults to the input path with '
-      + 'an .apng extension. Returned absolute.', False)
-      .AddBoolean('overwrite', OverwriteHelp, False)
-      .AddInteger('fps', Format('Frames per second, %d-%d (default %d).',
-      [MinGifFramesPerSecond, MaxGifFramesPerSecond,
-      DefaultGifFramesPerSecond]), False)
-      .AddInteger('width', Format('Scale to this width in pixels, '
-      + '%d-%d; omit to keep the movie''s own.',
-      [MinGifWidth, MaxGifWidth]), False)
-      .AddNumber('trim_start', 'Seconds to start from.', False)
-      .AddNumber('trim_end', 'Seconds to stop at; omit to run to the '
-      + 'end.', False)
-      .AddBoolean('zoom', ZoomHelp, False)
-      .AddString('cursor', CursorHelp, False)),
-    ExportApng)
-    .Title('Export APNG').OpenWorldHint(False);
+  RegisterAnimationExport(kmtExportGif, 'GIF', '.gif', 'a', True,
+    ExportGif);
+  RegisterAnimationExport(kmtExportApng, 'APNG', '.apng', 'an', False,
+    ExportApng);
 
   AServer.RegisterTool(ToolDefinition(kmtExportTrim,
     ObjectSchema

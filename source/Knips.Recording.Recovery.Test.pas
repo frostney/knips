@@ -112,18 +112,6 @@ begin
     Dec(Result);
 end;
 
-function ByteSize(const APath: string): Int64;
-var
-  Handle: THandle;
-begin
-  Result := -1;
-  Handle := FileOpen(APath, fmOpenRead or fmShareDenyNone);
-  if Handle = THandle(-1) then
-    Exit;
-  Result := FileSeek(Handle, Int64(0), fsFromEnd);
-  FileClose(Handle);
-end;
-
 { TSweepTests }
 
 procedure TSweepTests.SetupTests;
@@ -529,8 +517,8 @@ begin
     MakeFile(Victim);
     Sidecar := FChild + 'take' + SidecarExtension;
     PlantSidecar(Sidecar, '..' + PathDelim + 'victim.mp4');
-    SizeBefore := ByteSize(Victim);
-    SidecarBefore := ByteSize(Sidecar);
+    SizeBefore := FileSizeOf(Victim);
+    SidecarBefore := FileSizeOf(Sidecar);
 
     Expect<Integer>(RecoverOrphanedTakes(FChild, Takes, Swept)).ToBe(0);
     Expect<Integer>(Length(Takes)).ToBe(0);
@@ -538,11 +526,11 @@ begin
     // count above is what actually proves it: without the guard the pass
     // reports the planted take, and a re-mux would replace the file.
     Expect<Boolean>(FileExists(Victim)).ToBe(True);
-    Expect<Int64>(ByteSize(Victim)).ToBe(SizeBefore);
+    Expect<Int64>(FileSizeOf(Victim)).ToBe(SizeBefore);
     // And nothing was written back into the sidecar either. A take this
     // pass refuses to act on must not be closed off, or one planted
     // file would permanently disable recovery for the name it carries.
-    Expect<Int64>(ByteSize(Sidecar)).ToBe(SidecarBefore);
+    Expect<Int64>(FileSizeOf(Sidecar)).ToBe(SidecarBefore);
   finally
     CloseDirectories;
   end;
@@ -568,12 +556,12 @@ begin
     Expect<Integer>(FpSymlink(PAnsiChar(Target), PAnsiChar(Link))).ToBe(0);
     Sidecar := FChild + 'take' + SidecarExtension;
     PlantSidecar(Sidecar, 'take.mp4');
-    SizeBefore := ByteSize(Target);
-    SidecarBefore := ByteSize(Sidecar);
+    SizeBefore := FileSizeOf(Target);
+    SidecarBefore := FileSizeOf(Sidecar);
 
     Expect<Integer>(RecoverOrphanedTakes(FChild, Takes, Swept)).ToBe(0);
-    Expect<Int64>(ByteSize(Target)).ToBe(SizeBefore);
-    Expect<Int64>(ByteSize(Sidecar)).ToBe(SidecarBefore);
+    Expect<Int64>(FileSizeOf(Target)).ToBe(SizeBefore);
+    Expect<Int64>(FileSizeOf(Sidecar)).ToBe(SidecarBefore);
     // The link itself is still a link: refused by name, never followed
     // and never replaced.
     Expect<Boolean>(FpReadLink(Link) = Target).ToBe(True);

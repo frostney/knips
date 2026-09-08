@@ -229,18 +229,6 @@ begin
   Result := True;
 end;
 
-function FileByteSize(const APath: string): Int64;
-var
-  Handle: THandle;
-begin
-  Result := 0;
-  Handle := FileOpen(APath, fmOpenRead or fmShareDenyNone);
-  if Handle = THandle(-1) then
-    Exit;
-  Result := FileSeek(Handle, Int64(0), fsFromEnd);
-  FileClose(Handle);
-end;
-
 // Closes the sidecar off so this take is never picked up again. The
 // numbers are the recovered movie's own, read back from the file: the
 // recorder's counters died with it.
@@ -375,7 +363,7 @@ begin
       Exit;
     ATake.MoviePath := MoviePath;
     ATake.SidecarPath := ASidecarPath;
-    ATake.Bytes := FileByteSize(MoviePath);
+    ATake.Bytes := FileSizeOf(MoviePath);
     if ATake.Bytes <= 0 then
     begin
       // The crash beat the first fragment. Nothing to finish, and the
@@ -413,7 +401,7 @@ begin
     if RemuxInPlace(MoviePath, Duration, Error) then
     begin
       ATake.Remuxed := True;
-      ATake.Bytes := FileByteSize(MoviePath);
+      ATake.Bytes := FileSizeOf(MoviePath);
     end
     else
       ATake.Note := 'left as the fragmented file the crash produced, '

@@ -497,21 +497,14 @@ begin
   inherited Destroy;
 end;
 
+// The neutral rule (Knips.Export.ZoomTrack), asked with this session's
+// own take: the MP4 render asks the same question of the same track and
+// the two must not be able to answer it differently.
 function TExportSession.FramingAt(ASeconds: Double;
   out ARect: TLiveRect): Boolean;
-var
-  Stale: Boolean;
 begin
-  ARect := FZoomBase;
-  if not FFramingPanned then
-    Exit(True);
-  ARect := FramingRectAt(FLog, ASeconds, Stale);
-  if (ARect.Width <= 0) or (ARect.Height <= 0) then
-  begin
-    ARect := FZoomBase;
-    Exit(False);
-  end;
-  Result := not Stale;
+  Result := FramingAtInstant(FLog, FFramingPanned, FZoomBase, ASeconds,
+    ARect);
 end;
 
 procedure TExportSession.ReleaseHeldFrame;
@@ -540,21 +533,11 @@ var
   FramingKnown: Boolean;
 begin
   Result := Default(TRenderedFrameShape);
-  Crop := Default(TZoomCrop);
-  Crop.Width := ASourceWidth;
-  Crop.Height := ASourceHeight;
-  Crop.Identity := True;
   FramingKnown := FramingAt(ASeconds, Framing);
-  Source := Framing;
-  if FReport.ZoomOnClick and FramingKnown then
-  begin
-    // The walk is monotonic and ScaleFrame advances it too; advancing to
-    // a time it has already reached is a no-op, which is what makes
-    // asking here safe.
-    FZoomWalker := ZoomWalkerAdvance(FZoomWalker, FZoomClicks, ASeconds);
-    Source := ZoomWalkerSourceRectIn(FZoomWalker, Framing);
-    Crop := ZoomFrameCrop(ASourceWidth, ASourceHeight, Framing, Source);
-  end;
+  // ScaleFrame advances the same walk; see ZoomCropAt for why asking
+  // twice for one instant is safe.
+  Crop := ZoomCropAt(FZoomWalker, FZoomClicks, FReport.ZoomOnClick,
+    FramingKnown, Framing, ASourceWidth, ASourceHeight, ASeconds, Source);
   Result.CropX := Crop.X;
   Result.CropY := Crop.Y;
   Result.CropWidth := Crop.Width;
@@ -904,28 +887,26 @@ begin
         [AFrame.Seconds]);
       Exit;
     end;
-    HasCrop := False;
-    Source := Default(TLiveRect);
-    Crop := Default(TZoomCrop);
     // Inside what the frame SHOWS at this instant, which on a take whose
     // framing panned is not the base rectangle — the same composition
-    // the MP4 render does, from the same track, so a GIF and the movie
-    // beside it crop the same pixels. A frame the track cannot place is
-    // passed through whole rather than cropped against a guess.
+    // the MP4 render does, from the same track and now through the same
+    // arithmetic, so a GIF and the movie beside it crop the same pixels.
+    // A frame the track cannot place is passed through whole rather than
+    // cropped against a guess.
     FramingKnown := FramingAt(AFrame.Seconds, Framing);
-    if FReport.ZoomOnClick and FramingKnown then
-    begin
-      FZoomWalker := ZoomWalkerAdvance(FZoomWalker, FZoomClicks,
-        AFrame.Seconds);
-      Source := ZoomWalkerSourceRectIn(FZoomWalker, Framing);
-      Crop := ZoomFrameCrop(SourceWidth, SourceHeight, Framing, Source);
-      HasCrop := True;
-      if not Crop.Identity then
-        Inc(FReport.ZoomedFrames);
-    end;
+    Crop := ZoomCropAt(FZoomWalker, FZoomClicks, FReport.ZoomOnClick,
+      FramingKnown, Framing, SourceWidth, SourceHeight, AFrame.Seconds,
+      Source);
+    // The helper's own verdict, not a restatement of its guard: whether
+    // the frame was measured against the zoom walk decides which draw
+    // the pointer gets below, and an at-rest zoom is an identity crop
+    // that was still applied.
+    HasCrop := Crop.Applied;
+    if HasCrop and not Crop.Identity then
+      Inc(FReport.ZoomedFrames);
     // Counted whether or not a zoom was asked for: a frame the track
     // cannot place is one whose pointer falls back to the last rectangle
-    // the track holds (HasCrop stays False below, which is exactly that
+    // the track holds (HasCrop is False for it, which is exactly that
     // fallback), and that is worth saying even with no crop in play.
     //
     // One asymmetry with the MP4 render, stated rather than hidden: this
@@ -1119,18 +1100,15 @@ end;
 // metadata plus one stat(2); nothing is decoded for it.
 procedure TExportSession.MeasureSourceDensity;
 var
-  Handle: THandle;
   Bytes: Int64;
   Frames: Double;
 begin
   FSourceDensity := 0;
   if (FReader.NominalFrameRate <= 0) or (FReader.DurationSeconds <= 0) then
     Exit;
-  Handle := FileOpen(FOptions.InputPath, fmOpenRead or fmShareDenyNone);
-  if Handle = THandle(-1) then
+  Bytes := FileSizeOf(FOptions.InputPath);
+  if Bytes <= 0 then
     Exit;
-  Bytes := FileSeek(Handle, Int64(0), fsFromEnd);
-  FileClose(Handle);
   Frames := FReader.DurationSeconds * FReader.NominalFrameRate;
   if Frames < 1 then
     Frames := 1;

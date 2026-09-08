@@ -111,6 +111,14 @@ type
     Width: Integer;
     Height: Integer;
     Identity: Boolean;
+    // True when a zoom walk decided this crop (ZoomCropAt advanced the
+    // walk and measured the frame against it); False when the frame was
+    // passed through whole because nothing was zooming or the framing
+    // was unknown. Not the same question as Identity: a zoom at rest
+    // yields an identity crop that WAS applied, and a caller placing
+    // a pointer against the crop needs to know which of the two it has
+    // — this is what saves it restating ZoomCropAt's own guard.
+    Applied: Boolean;
   end;
 
 // The presses in a loaded sidecar that this effect would act on, in movie
@@ -175,6 +183,46 @@ function ZoomWalkerSourceRectIn(const AWalker: TZoomWalker;
 // straight line through anywhere else.
 function FramingRectAt(const ALog: TSidecarLog; AMovieSeconds: Double;
   out AStale: Boolean): TLiveRect;
+
+// The framing a render composes inside at ASeconds, with the fallbacks
+// every caller of FramingRectAt needs folded in — and it is the same
+// question the MP4 render and the GIF/APNG pipeline both ask, which
+// they used to answer with a copy of this each.
+//
+// AFramingPanned is what the caller learned from the take's own header:
+// a take whose framing never moved shows ABase for the whole file, and
+// the header says so outright, so there is no track to run past and
+// nothing to go stale.
+//
+// **False is the answer that matters.** It means "I do not know what
+// this frame was showing" — past the end of the sample track, or from a
+// sample too degenerate to crop against. A caller must not crop against
+// that and must not place a pointer against it either; ARect still
+// carries ABase so that a caller with nothing else to say has a
+// rectangle, but it is a rectangle nothing was rendered against.
+function FramingAtInstant(const ALog: TSidecarLog; AFramingPanned: Boolean;
+  const ABase: TLiveRect; ASeconds: Double;
+  out ARect: TLiveRect): Boolean;
+
+// The crop one decoded frame comes to at ASeconds, and — through
+// ASource — the rectangle that crop shows in the display's own points,
+// which is what a drawn pointer is placed against.
+//
+// AWalker is advanced in place. The walk is monotonic and a caller asks
+// twice for the same instant: once to decide whether the frame is worth
+// making at all (Knips.Export.Cadence), once to make it. Advancing to a
+// time already reached is a no-op, which is what makes the second ask
+// free — and what makes the shape the cadence measures the shape the
+// draw produces, which is the whole point of computing one ahead of the
+// other.
+//
+// Not zooming, or a framing the track could not name, is the whole
+// frame: the identity crop, with ASource the framing itself. That is
+// the one answer that cannot be wrong about pixels the movie holds.
+function ZoomCropAt(var AWalker: TZoomWalker;
+  const AClicks: TZoomClickArray; AZoomApplied, AFramingKnown: Boolean;
+  const AFraming: TLiveRect; ASourceWidth, ASourceHeight: Integer;
+  ASeconds: Double; out ASource: TLiveRect): TZoomCrop;
 
 // The whole thing at one instant, walked from the start. The reference
 // definition of the effect — the walker is an optimisation of exactly
@@ -416,6 +464,42 @@ begin
   Walker := ZoomWalkerStart(ABase, AFactor, AHoldSeconds);
   Walker := ZoomWalkerAdvance(Walker, AClicks, ASeconds);
   Result := ZoomWalkerSourceRect(Walker);
+end;
+
+function FramingAtInstant(const ALog: TSidecarLog; AFramingPanned: Boolean;
+  const ABase: TLiveRect; ASeconds: Double;
+  out ARect: TLiveRect): Boolean;
+var
+  Stale: Boolean;
+begin
+  ARect := ABase;
+  if not AFramingPanned then
+    Exit(True);
+  ARect := FramingRectAt(ALog, ASeconds, Stale);
+  if (ARect.Width <= 0) or (ARect.Height <= 0) then
+  begin
+    ARect := ABase;
+    Exit(False);
+  end;
+  Result := not Stale;
+end;
+
+function ZoomCropAt(var AWalker: TZoomWalker;
+  const AClicks: TZoomClickArray; AZoomApplied, AFramingKnown: Boolean;
+  const AFraming: TLiveRect; ASourceWidth, ASourceHeight: Integer;
+  ASeconds: Double; out ASource: TLiveRect): TZoomCrop;
+begin
+  ASource := AFraming;
+  Result := Default(TZoomCrop);
+  Result.Width := ASourceWidth;
+  Result.Height := ASourceHeight;
+  Result.Identity := True;
+  if not (AZoomApplied and AFramingKnown) then
+    Exit;
+  AWalker := ZoomWalkerAdvance(AWalker, AClicks, ASeconds);
+  ASource := ZoomWalkerSourceRectIn(AWalker, AFraming);
+  Result := ZoomFrameCrop(ASourceWidth, ASourceHeight, AFraming, ASource);
+  Result.Applied := True;
 end;
 
 // One edge of the crop, rounded to a whole pixel and kept on the frame.

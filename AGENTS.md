@@ -81,7 +81,7 @@ lefthook install                         # once per clone: pre-commit + pre-push
 | --- | --- |
 | `source/knips.pas` | Program: CLI surface (`app`, `record`, `render`, `export`, `displays`, `windows`, `mcp`, `probe`), signals |
 | `source/Knips.ThreadManager.pas` | Pthread-backed RTL locks/events for the no-cthreads build; no thread creation |
-| `source/Knips.Options.pas` | Platform-neutral recording + export option models, validation, large-export advice (tested) |
+| `source/Knips.Options.pas` | Platform-neutral recording + export option models, validation, large-export advice, the bytes on disk at a path every writer reports (tested) |
 | `source/Knips.App.State.pas` | Platform-neutral app state machine, titles, paths, selection maths, window-menu filter, export and render arithmetic, audio-source composition and migration, the saved effect defaults and their one-way migration, camera placement — nearest corner, shape sizes, region flip, ride offsets (tested) |
 | `source/Knips.App.pas` | Menu-bar app: status item, menu, preferences, runtime-built `KnipsAppTarget` |
 | `source/Knips.App.Overlay.pas` | Region selection overlay; runtime-built `KnipsOverlayView`/`KnipsOverlayWindow` |
@@ -94,7 +94,7 @@ lefthook install                         # once per clone: pre-commit + pre-push
 | `source/Knips.Recording.Sidecar.pas` | The event sidecar: the public JSON Lines format for a take's pointer track, clicks, geometry and what was baked into its pixels, and the rule that a silence too long to believe is held rather than interpolated across (tested; [docs/event-sidecar.md](docs/event-sidecar.md)) |
 | `source/Knips.Recording.Recovery.pas` | Finishes off a take whose process died: an unfinished sidecar plus a dead pid, then a passthrough re-mux; also the pid-gated sweep of the scratch a killed render left (tested) |
 | `source/Knips.Export.CursorEffect.pas` | The pointer drawn back into a rendered MP4, a GIF or an APNG from the sidecar's smoothed track |
-| `source/Knips.Export.ZoomTrack.pas` | Platform-neutral post-recording Zoom on Click: the live effect's own easing replayed from the sidecar's click track, composed inside the framing each sample records, and the frame crop it comes to (tested) |
+| `source/Knips.Export.ZoomTrack.pas` | Platform-neutral post-recording Zoom on Click: the live effect's own easing replayed from the sidecar's click track, composed inside the framing each sample records, and the frame crop it comes to — including the framing lookup and the per-frame crop the MP4 render and the GIF/APNG pipeline both ask for (tested) |
 | `source/Knips.Export.Cadence.pas` | Platform-neutral frame synthesis: where a render may put a frame the capture never made, whether that frame would be a different picture from the one before it, and how much one gap may ever cost (tested) |
 | `source/Knips.Export.Render.pas` | The render pass: raw take + sidecar → deliverable MP4. Video re-encoded through an `AVAssetWriterInputPixelBufferAdaptor`, audio copied sample-for-sample, every source frame's presentation stamp passed through unchanged, extra frames interleaved where an effect is animating |
 | `source/Knips.Export.SizeEstimate.pas` | Pre-export size estimate from the source movie's own density, and the in-flight projection (tested) |
