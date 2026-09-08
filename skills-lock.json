@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "skills": {
+    "code-review": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "code-review/SKILL.md",
+      "computedHash": "bf5c3437d04321950a517b53764866192503ac4fdb8805df3badcdef2766b0c8"
+    },
+    "codebase-audit": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "codebase-audit/SKILL.md",
+      "computedHash": "b6bfd3ce9878767e880e1729f662f7fcac0d42ff66354751fa811a3cf41da1c4"
+    },
+    "create-issue": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "create-issue/SKILL.md",
+      "computedHash": "d2f6fc07cc43cb2efb71f7e6352ac245c88c29493402d125440c92a723f12ead"
+    },
+    "create-pr": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "create-pr/SKILL.md",
+      "computedHash": "368773a6bb0642f5f1f69f14e3dbb1c052aed1898017404b31888a55334ca658"
+    },
+    "git-workflow": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "git-workflow/SKILL.md",
+      "computedHash": "e60b7ed86dac7e455342911f84023a5ce09412782e50b93949c975f1601b4579"
+    },
+    "implement-idea": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "implement-idea/SKILL.md",
+      "computedHash": "20f08c7dea31e31e6f2f09b7bd7ec464d9a5a74aee4556403809ece031a0d3cc"
+    },
+    "implement-issue": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "implement-issue/SKILL.md",
+      "computedHash": "fbfbc3306457755414172d584f2cbfdc37a2917664e556a84197ccc7d7a263f1"
+    },
+    "native-nostalgia-stack": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "native-nostalgia-stack/SKILL.md",
+      "computedHash": "54e1c167e2073e52ef6594ad34318988a976bdabba5b679e252a71aded9c8dff"
+    },
+    "project-structure": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "project-structure/SKILL.md",
+      "computedHash": "c5ac932f0c4c03eef0b6dfb03ca41bf954dd0a6a584d9352e844c68ae29d7a78"
+    },
+    "roadmap-review": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "roadmap-review/SKILL.md",
+      "computedHash": "acc7d410e4fd899442583e8c86ab642ecf60169ae2afb6c8566ff40c76b6143b"
+    },
+    "software-engineering-excellence": {
+      "source": "frostney/known-good-route",
+      "sourceType": "github",
+      "skillPath": "software-engineering-excellence/SKILL.md",
+      "computedHash": "a2cb17221b16becdc33475d05f9e54697f7e7ec444823c44ecb560baffcd0f8b"
+    }
+  }
+}
