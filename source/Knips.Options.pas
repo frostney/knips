@@ -734,6 +734,15 @@ function ParseTrimRange(const AText: string;
 function ValidateExportOptions(var AOptions: TExportOptions;
   out AError: string): Boolean;
 
+// Bytes on disk, or 0 when the file cannot be opened. SysUtils has no
+// path-taking FileSize, so every writer that wanted to report what it
+// had produced grew its own open-seek-close — five of them, byte for
+// byte the same. Here because every layer already reaches this unit and
+// this unit reaches nothing: a size is arithmetic about a path, not a
+// framework call, and the recovery pass wants it on a host with no
+// frameworks at all.
+function FileSizeOf(const APath: string): Int64;
+
 // What a writer says when StopRequested cut it short. One sentence for
 // every face and every writer, so a Ctrl-C reads the same whether it
 // landed in a render, an export or a trim — and says the thing that
@@ -1048,6 +1057,25 @@ begin
     Exit;
   end;
   Result := True;
+end;
+
+function FileSizeOf(const APath: string): Int64;
+var
+  Handle: THandle;
+begin
+  Result := 0;
+  Handle := FileOpen(APath, fmOpenRead or fmShareDenyNone);
+  if Handle = THandle(-1) then
+    Exit;
+  try
+    Result := FileSeek(Handle, Int64(0), fsFromEnd);
+    // A seek that failed answers -1, which is not a size; a caller
+    // formatting it would print a negative number of bytes.
+    if Result < 0 then
+      Result := 0;
+  finally
+    FileClose(Handle);
+  end;
 end;
 
 function ExportCancelledMessage: string;

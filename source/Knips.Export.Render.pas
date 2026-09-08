@@ -1060,10 +1060,6 @@ begin
           Exit;
         end;
 
-        Crop := Default(TZoomCrop);
-        Crop.Width := SourceWidth;
-        Crop.Height := SourceHeight;
-        Crop.Identity := True;
         // The whole frame shows the rectangle the capture was READING at
         // this instant, which on a panned take is not the base one. The
         // zoom crops inside it — the live effect's own composition, base
@@ -1087,14 +1083,9 @@ begin
         // does with position, and the same answer the GIF and APNG
         // pipeline reaches by leaving its crop off.
         FramingKnown := FramingAt(ASeconds, Framing);
-        Source := Framing;
-        if FReport.ZoomApplied and FramingKnown then
-        begin
-          FWalker := ZoomWalkerAdvance(FWalker, FClicks, ASeconds);
-          Source := ZoomWalkerSourceRectIn(FWalker, Framing);
-          Crop := ZoomFrameCrop(SourceWidth, SourceHeight, Framing,
-            Source);
-        end;
+        Crop := ZoomCropAt(FWalker, FClicks, FReport.ZoomApplied,
+          FramingKnown, Framing, SourceWidth, SourceHeight, ASeconds,
+          Source);
         // Counted whether or not a zoom was asked for. A frame that
         // could not be placed is a frame that could not be placed, and
         // under the app's own defaults — pointer on, zoom off — this was
@@ -1222,18 +1213,9 @@ var
   FramingKnown: Boolean;
 begin
   Result := Default(TRenderedFrameShape);
-  Crop := Default(TZoomCrop);
-  Crop.Width := ASourceWidth;
-  Crop.Height := ASourceHeight;
-  Crop.Identity := True;
   FramingKnown := FramingAt(ASeconds, Framing);
-  Source := Framing;
-  if FReport.ZoomApplied and FramingKnown then
-  begin
-    FWalker := ZoomWalkerAdvance(FWalker, FClicks, ASeconds);
-    Source := ZoomWalkerSourceRectIn(FWalker, Framing);
-    Crop := ZoomFrameCrop(ASourceWidth, ASourceHeight, Framing, Source);
-  end;
+  Crop := ZoomCropAt(FWalker, FClicks, FReport.ZoomApplied, FramingKnown,
+    Framing, ASourceWidth, ASourceHeight, ASeconds, Source);
   Result.CropX := Crop.X;
   Result.CropY := Crop.Y;
   Result.CropWidth := Crop.Width;
@@ -1246,24 +1228,13 @@ begin
       Source.Width, Source.Height, Result.CursorX, Result.CursorY);
 end;
 
+// The neutral rule (Knips.Export.ZoomTrack), asked with this session's
+// own take: the GIF and APNG pipeline asks the same question of the same
+// track and the two must not be able to answer it differently.
 function TRenderSession.FramingAt(ASeconds: Double;
   out ARect: TLiveRect): Boolean;
-var
-  Stale: Boolean;
 begin
-  ARect := FBase;
-  // A take whose framing never moved shows the base rectangle for the
-  // whole file, which the header states outright — there is no track to
-  // run past and nothing to go stale.
-  if not FFramingPanned then
-    Exit(True);
-  ARect := FramingRectAt(FLog, ASeconds, Stale);
-  if (ARect.Width <= 0) or (ARect.Height <= 0) then
-  begin
-    ARect := FBase;
-    Exit(False);
-  end;
-  Result := not Stale;
+  Result := FramingAtInstant(FLog, FFramingPanned, FBase, ASeconds, ARect);
 end;
 
 procedure TRenderSession.ReleaseHeldFrame;
@@ -1639,14 +1610,8 @@ begin
 end;
 
 procedure TRenderSession.MeasureOutput;
-var
-  Handle: THandle;
 begin
-  Handle := FileOpen(FOutputPath, fmOpenRead or fmShareDenyNone);
-  if Handle = THandle(-1) then
-    Exit;
-  FReport.OutputBytes := FileSeek(Handle, Int64(0), fsFromEnd);
-  FileClose(Handle);
+  FReport.OutputBytes := FileSizeOf(FOutputPath);
 end;
 
 function TRenderSession.Run(out AError: string): Boolean;

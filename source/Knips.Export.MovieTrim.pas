@@ -152,7 +152,6 @@ var
   Status: NSInteger;
   ErrorObject: NSError;
   WaitCount: Integer;
-  Handle: THandle;
   TempPath: string;
   Cancelled: Boolean;
 begin
@@ -311,12 +310,7 @@ begin
   if not CommitTemporary(TempPath, FOptions.OutputPath, AError) then
     Exit;
   SweepTemporary(TempPath);
-  Handle := FileOpen(FOptions.OutputPath, fmOpenRead or fmShareDenyNone);
-  if Handle <> THandle(-1) then
-  begin
-    FReport.OutputBytes := FileSeek(Handle, Int64(0), fsFromEnd);
-    FileClose(Handle);
-  end;
+  FReport.OutputBytes := FileSizeOf(FOptions.OutputPath);
   Result := True;
 end;
 

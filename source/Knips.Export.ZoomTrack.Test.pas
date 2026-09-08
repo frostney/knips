@@ -101,6 +101,23 @@ type
     procedure TestACropNeverLeavesTheFrame;
   end;
 
+  // The two questions every render pass asks per frame, which the MP4
+  // render and the GIF/APNG pipeline used to answer with a copy of the
+  // arithmetic each. They are checked here, once, on the properties both
+  // faces depend on: what the framing is when the track can say and when
+  // it cannot, and that a frame nothing is zooming is left whole.
+  TFrameShapeTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestThePannedFramingIsTheTrack;
+    procedure TestPastTheTrackTheFramingIsNotKnown;
+    procedure TestAnUnpannedTakeIsTheBaseForever;
+    procedure TestAnUnreadableTrackFallsBackToTheBase;
+    procedure TestNoZoomIsTheWholeFrame;
+    procedure TestAnUnknownFramingIsTheWholeFrame;
+    procedure TestAZoomCropsInsideThePannedFraming;
+  end;
+
 { ---------------------------------------------------------------- helpers }
 
 const
@@ -890,6 +907,177 @@ begin
   ExpectTrue(Crop.Y + Crop.Height <= 800, 'the crop ends on the frame');
 end;
 
+{ TFrameShapeTests }
+
+procedure TFrameShapeTests.SetupTests;
+begin
+  Test('a panned take is framed by its sample track',
+    TestThePannedFramingIsTheTrack);
+  Test('past the end of the track the framing is not known',
+    TestPastTheTrackTheFramingIsNotKnown);
+  Test('a take that never panned is the base rectangle for the whole '
+    + 'file', TestAnUnpannedTakeIsTheBaseForever);
+  Test('a track that cannot be read falls back to the base and says so',
+    TestAnUnreadableTrackFallsBackToTheBase);
+  Test('a frame nothing is zooming is left whole',
+    TestNoZoomIsTheWholeFrame);
+  Test('a frame whose framing is unknown is left whole',
+    TestAnUnknownFramingIsTheWholeFrame);
+  Test('a zoom crops inside the framing, not the base',
+    TestAZoomCropsInsideThePannedFraming);
+end;
+
+procedure TFrameShapeTests.TestThePannedFramingIsTheTrack;
+var
+  Log: TSidecarLog;
+  Rect: TLiveRect;
+  Error: string;
+begin
+  Log := TSidecarLog.Create;
+  try
+    Log.LoadFromText(PannedLogText, Error);
+    ExpectTrue(FramingAtInstant(Log, True, TestBase, 1.0, Rect),
+      'a time inside the track is known');
+    ExpectNear(Rect.X, PanX, RectEpsilon, 'x');
+    ExpectNear(Rect.Y, PanY, RectEpsilon, 'y');
+    ExpectNear(Rect.Width, BaseWidth, RectEpsilon, 'width');
+  finally
+    Log.Free;
+  end;
+end;
+
+// The important half. False means "I do not know what this frame was
+// showing", and both callers turn that into "leave the frame whole and
+// place the pointer against the last rectangle the track holds" — so a
+// wrong answer here is a mis-cropped movie reported as plain success.
+procedure TFrameShapeTests.TestPastTheTrackTheFramingIsNotKnown;
+var
+  Log: TSidecarLog;
+  Rect: TLiveRect;
+  Error: string;
+begin
+  Log := TSidecarLog.Create;
+  try
+    Log.LoadFromText(PannedLogText, Error);
+    ExpectTrue(not FramingAtInstant(Log, True, TestBase, 3.8, Rect),
+      'well past the last sample is not known');
+    // A rectangle is still named, so a caller has something to hold —
+    // but it is the base one, which is not what those frames show.
+    ExpectNear(Rect.X, BaseX, RectEpsilon, 'x falls back to the base');
+    ExpectNear(Rect.Width, BaseWidth, RectEpsilon, 'width');
+  finally
+    Log.Free;
+  end;
+end;
+
+procedure TFrameShapeTests.TestAnUnpannedTakeIsTheBaseForever;
+var
+  Log: TSidecarLog;
+  Rect: TLiveRect;
+  Error: string;
+begin
+  Log := TSidecarLog.Create;
+  try
+    Log.LoadFromText(PannedLogText, Error);
+    // The same log, asked as a take whose header says the framing never
+    // moved: the track is not consulted at all, so there is nothing to
+    // run past and the answer stands for the whole file.
+    ExpectTrue(FramingAtInstant(Log, False, TestBase, 3.8, Rect),
+      'an unpanned take is known at any time');
+    ExpectNear(Rect.X, BaseX, RectEpsilon, 'x');
+    ExpectNear(Rect.Y, BaseY, RectEpsilon, 'y');
+    ExpectNear(Rect.Width, BaseWidth, RectEpsilon, 'width');
+    ExpectNear(Rect.Height, BaseHeight, RectEpsilon, 'height');
+  finally
+    Log.Free;
+  end;
+end;
+
+procedure TFrameShapeTests.TestAnUnreadableTrackFallsBackToTheBase;
+var
+  Rect: TLiveRect;
+begin
+  // No log at all — a panned take whose sidecar would not load. The
+  // rectangle is the base and the verdict is "not known", which is the
+  // pair that keeps the render from cropping against a guess.
+  ExpectTrue(not FramingAtInstant(nil, True, TestBase, 1.0, Rect),
+    'no track means the framing is not known');
+  ExpectNear(Rect.X, BaseX, RectEpsilon, 'x');
+  ExpectNear(Rect.Width, BaseWidth, RectEpsilon, 'width');
+end;
+
+procedure TFrameShapeTests.TestNoZoomIsTheWholeFrame;
+var
+  Walker: TZoomWalker;
+  Crop: TZoomCrop;
+  Source: TLiveRect;
+begin
+  Walker := ZoomWalkerStart(TestBase, 0, 0);
+  Crop := ZoomCropAt(Walker, OneClick(0.5, PanX + 40, PanY + 40), False,
+    True, PannedWindow, 1280, 800, 1.0, Source);
+  ExpectTrue(Crop.Identity, 'the crop is the whole frame');
+  ExpectTrue(not Crop.Applied, 'no zoom was applied to it');
+  Expect<Integer>(Crop.X).ToBe(0);
+  Expect<Integer>(Crop.Y).ToBe(0);
+  Expect<Integer>(Crop.Width).ToBe(1280);
+  Expect<Integer>(Crop.Height).ToBe(800);
+  // The rectangle the frame shows is the framing itself, which is what a
+  // pointer is placed against when nothing is zooming.
+  ExpectNear(Source.X, PanX, RectEpsilon, 'the source is the framing');
+  // And the walk was not advanced by a question about an effect that is
+  // not running.
+  ExpectNear(Walker.Seconds, 0, RectEpsilon, 'the walk stayed put');
+end;
+
+procedure TFrameShapeTests.TestAnUnknownFramingIsTheWholeFrame;
+var
+  Walker: TZoomWalker;
+  Crop: TZoomCrop;
+  Source: TLiveRect;
+begin
+  // Zoom asked for, framing unknown: the frame is passed through whole
+  // rather than cropped against a rectangle nothing was rendered from.
+  Walker := ZoomWalkerStart(TestBase, 0, 0);
+  Crop := ZoomCropAt(Walker, OneClick(0.5, PanX + 40, PanY + 40), True,
+    False, PannedWindow, 1280, 800, 1.0, Source);
+  ExpectTrue(Crop.Identity, 'the crop is the whole frame');
+  ExpectTrue(not Crop.Applied, 'no zoom was applied to it');
+  ExpectNear(Walker.Seconds, 0, RectEpsilon, 'the walk stayed put');
+end;
+
+procedure TFrameShapeTests.TestAZoomCropsInsideThePannedFraming;
+var
+  Walker: TZoomWalker;
+  Crop: TZoomCrop;
+  Source: TLiveRect;
+  Clicks: TZoomClickArray;
+  ClickX, ClickY: Double;
+begin
+  ClickX := PanX + BaseWidth / 2;
+  ClickY := PanY + BaseHeight / 2;
+  Clicks := OneClick(1.0, ClickX, ClickY);
+  Walker := ZoomWalkerStart(TestBase, 0, 0);
+  // Past the ease-in, so the zoom has reached the live factor: half the
+  // framing, centred on the click, which in the frame's own pixels is
+  // the middle quarter of a 1280x800 frame.
+  Crop := ZoomCropAt(Walker, Clicks, True, True, PannedWindow, 1280, 800,
+    1.0 + LiveZoomInSeconds, Source);
+  ExpectTrue(Crop.Applied, 'the zoom was applied');
+  ExpectNear(Source.X + Source.Width / 2, ClickX, RectEpsilon,
+    'centre x');
+  ExpectNear(Source.Y + Source.Height / 2, ClickY, RectEpsilon,
+    'centre y');
+  ExpectNear(Source.Width, BaseWidth / LiveClickZoom, RectEpsilon,
+    'width');
+  ExpectTrue(not Crop.Identity, 'the frame is cropped');
+  Expect<Integer>(Crop.Width).ToBe(1280 div Round(LiveClickZoom));
+  Expect<Integer>(Crop.Height).ToBe(800 div Round(LiveClickZoom));
+  // The walk really was advanced, which is what makes a second ask for
+  // the same instant free rather than a second replay.
+  ExpectNear(Walker.Seconds, 1.0 + LiveZoomInSeconds, RectEpsilon,
+    'the walk reached the instant');
+end;
+
 begin
   TestRunnerProgram.AddSuite(TQuietTests.Create('a take with no clicks'));
   TestRunnerProgram.AddSuite(TShapeTests.Create('the shape of one zoom'));
@@ -899,6 +1087,8 @@ begin
   TestRunnerProgram.AddSuite(TCompositionTests.Create(
     'zoom composed inside a panned framing'));
   TestRunnerProgram.AddSuite(TFrameCropTests.Create('the frame crop'));
+  TestRunnerProgram.AddSuite(TFrameShapeTests.Create(
+    'the shape one frame comes to'));
   TestRunnerProgram.Run;
   ExitCode := TestResultToExitCode;
 end.

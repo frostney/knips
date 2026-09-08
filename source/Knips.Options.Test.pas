@@ -3,6 +3,7 @@ program Knips.Options.Test;
 {$I Knips.inc}
 
 uses
+  Classes,
   SysUtils,
 
   Knips.Options,
@@ -225,6 +226,14 @@ type
     procedure TestTheSandboxShadow;
     procedure TestAnOrdinaryFileIsNotOurs;
     procedure TestTheDerivedPaths;
+  end;
+
+  TFileSizeTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestAFileOfKnownSize;
+    procedure TestAnEmptyFile;
+    procedure TestAMissingPath;
   end;
 
 { TRegionTests }
@@ -2208,6 +2217,68 @@ begin
     = rtkTemporary).ToBe(True);
 end;
 
+{ TFileSizeTests }
+
+procedure TFileSizeTests.SetupTests;
+begin
+  Test('a file of known size', TestAFileOfKnownSize);
+  Test('an empty file', TestAnEmptyFile);
+  Test('a path with no file at it', TestAMissingPath);
+end;
+
+// A file of a size nothing else would produce by accident, so a wrong
+// answer cannot look like a right one.
+procedure TFileSizeTests.TestAFileOfKnownSize;
+var
+  Path: string;
+  Stream: TFileStream;
+  Payload: array[0..2559] of Byte;
+begin
+  // Pid-qualified, like every other suite's fixture: two runs at once —
+  // a `lwpt test` in each of two worktrees — would otherwise write and
+  // truncate one file between each other's write and read.
+  Path := GetTempDir + 'knips-filesize-' + IntToStr(GetProcessID) + '.bin';
+  FillChar(Payload, SizeOf(Payload), 7);
+  Stream := TFileStream.Create(Path, fmCreate);
+  try
+    Stream.WriteBuffer(Payload, SizeOf(Payload));
+  finally
+    Stream.Free;
+  end;
+  try
+    Expect<Int64>(FileSizeOf(Path)).ToBe(2560);
+  finally
+    DeleteFile(Path);
+  end;
+end;
+
+procedure TFileSizeTests.TestAnEmptyFile;
+var
+  Path: string;
+  Stream: TFileStream;
+begin
+  Path := GetTempDir + 'knips-filesize-empty-' + IntToStr(GetProcessID)
+    + '.bin';
+  Stream := TFileStream.Create(Path, fmCreate);
+  Stream.Free;
+  try
+    Expect<Int64>(FileSizeOf(Path)).ToBe(0);
+  finally
+    DeleteFile(Path);
+  end;
+end;
+
+// The answer a caller reports when there is nothing to report: zero
+// rather than a failure, because every caller of this asks after the
+// fact and none of them has anything to do with a refusal.
+procedure TFileSizeTests.TestAMissingPath;
+begin
+  Expect<Int64>(FileSizeOf(GetTempDir + 'knips-filesize-nothing-here-'
+    + IntToStr(GetProcessID) + '.bin'))
+    .ToBe(0);
+  Expect<Int64>(FileSizeOf('')).ToBe(0);
+end;
+
 begin
   TestRunnerProgram.AddSuite(TRegionTests.Create('ParseCaptureRegion'));
   TestRunnerProgram.AddSuite(TContainerTests.Create('ContainerForPath'));
@@ -2230,6 +2301,8 @@ begin
     'the two spellings of one pointer setting'));
   TestRunnerProgram.AddSuite(TTemporaryNameTests.Create(
     'what a render temporary is called'));
+  TestRunnerProgram.AddSuite(TFileSizeTests.Create(
+    'the bytes on disk at a path'));
   TestRunnerProgram.Run;
   ExitCode := TestResultToExitCode;
 end.
