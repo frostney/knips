@@ -93,6 +93,11 @@
 - Everything platform-neutral (option model, type encodings, both image
   encoders, the delay planner, the live-effect and big-cursor maths) is a
   unit with a co-located test that runs on Linux too.
+- The numbers quoted here are the ones that justify the design as it
+  stands. The proof runs behind them, the calibration sets the constants
+  were fitted over, and the figures that were true of an earlier Knips are
+  in [measurements.md](measurements.md), one section per topic, linked
+  from the section it came from and linking back.
 
 ## Process shape
 
@@ -164,7 +169,7 @@ looking for an argument its schema never declared.) `Knips.Mcp` then
 runs the same `TRecordingSession`, `TExportSession`, `TRenderSession`
 and `TMovieTrimSession` the other two front ends do — `render` included,
 so an MCP tool and a subcommand are one implementation. The neutral half has a
-co-located suite and runs on Linux CI; the Darwin half compiles
+co-located suite and runs on Linux; the Darwin half compiles
 everywhere and refuses in-band off macOS, so the tool list an agent
 discovers is the same list on every host.
 
@@ -335,13 +340,12 @@ because each is a decision:
   take's own.
 - **Frames the capture never made are filled in where an effect is
   animating.** ScreenCaptureKit delivers a frame when the content changes
-  and not otherwise, and a raw take has no pointer in its pixels — so
-  moving the mouse over a still window produces no frames at all.
-  Measured on a real 8.10 s take: 152 frames, **18.8 a second** against a
-  nominal 30, gaps up to 567 ms, and **one** frame inside the 0.30 s the
-  zoom takes to ease in. A doubling eased across one frame is a
-  jump-cut, and that is what a janky zoom and a teleporting drawn pointer
-  are.
+  and not otherwise, and a raw take has no pointer in its pixels — so moving
+  the mouse over a still window produces no frames at all. A take that
+  sparse puts a single frame inside the 0.30 s a zoom takes to ease in, and
+  a doubling eased across one frame is a jump-cut — which is what a janky
+  zoom and a teleporting drawn pointer are. The figures are in
+  [measurements.md](measurements.md#frame-synthesis-before-the-idle-heartbeat).
 
   So the render interleaves. Between two source frames it re-presents the
   earlier one — the same pixels, which is honest, because nothing on
@@ -357,32 +361,13 @@ because each is a decision:
   costs nothing; a still stretch with nothing animating over it stays
   exactly as sparse as it was captured.
 
-  Measured on that take, same binary, synthesis off and on: 152 → 209
-  frames, one → **seven** frames inside the ease-in, 6.31 MB → 7.56 MB
-  (**+19.8 %**), 2.31 s → 2.88 s of work for an 8.33 s take (0.28× →
-  0.35× realtime). The largest remaining gaps in the output are exactly
-  the stretches where the pointer is motionless and the zoom is not
-  animating. The GIF and APNG pipeline fills the same gaps on its own
-  decimation grid, for the same reason — the delay planner faithfully
-  preserved the sparsity as long delays — and the same take at 20 fps
-  went 108 → 146 frames, 2.44 MB → 3.25 MB.
-
-  **Every number in this section was measured before the capture-side
-  idle heartbeat, which has since landed.** That heartbeat re-presents the
-  last frame while ScreenCaptureKit is idle, which makes takes dense at
-  the source, and it moves both of the limits this section used to carry.
-  The figures above are kept as the historical record of what the render
-  alone was worth; what the two do *together* is measured below.
-
-  **This fills only gaps BETWEEN captured frames**, and that used to be a
-  hard limit rather than a shape. A take whose screen went static lost its
-  tail at capture time — there was no later frame to interleave towards.
-  Measured on a real take: 17.54 s of recording, 88 frames, a movie
-  **4.26 s** long, three of its four clicks past the end of the file; and
-  a controlled repro of a wholly static 5.67 s recording produced **one
-  frame and a movie spanning 0.000 s**. Nothing in the render could invent
-  those pixels. The heartbeat now supplies them, so the fill always has a
-  frame on both sides of any gap it is asked about.
+  **This fills only gaps BETWEEN captured frames.** A take whose screen went
+  static once lost its tail at capture time, because there was no later
+  frame to interleave towards; the capture-side idle heartbeat supplies
+  those frames now, so the fill always has a frame on both sides of any gap
+  it is asked about. What the render's synthesis was worth on its own,
+  before the heartbeat landed, is in
+  [measurements.md](measurements.md#frame-synthesis-before-the-idle-heartbeat).
 
   **Composed, measured on the merged build.** A still 11.66 s raw take at
   600×400: 145 frames, 13 of them heartbeats, no gap over **0.535 s**, and
@@ -489,41 +474,37 @@ take moves the way the movie beside it moves. `knips render` and
 is what the playback window's Effects control writes into
 `KnipsEffectZoom` and `KnipsEffectCursor`.
 
-**The zoom composes with the framing the capture recorded.** The crop
-used to be taken against the recording's *base* rectangle, which is only
-what the frames show when the capture never moved its own `sourceRect` —
-so a Follow Mouse take, or a composited window recording's poll, rendered
-against a rectangle its pixels were not showing (measured: 36 silently
-mis-cropped frames). The zoom was then refused for those takes, and the
-refusal was right for the arithmetic that existed.
+**The zoom composes with the framing the capture recorded**, rather than
+with the recording's *base* rectangle — which is only what the frames show
+when the capture never moved its own `sourceRect`, so a Follow Mouse take,
+or a composited window recording's poll, rendered against a rectangle its
+pixels were not showing
+([measurements.md](measurements.md#the-post-hoc-zoom-and-the-base-rectangle)).
 
-It is the arithmetic that changed. Every sample records the rectangle the
-capture was reading at that instant, so the crop is taken **inside** that
-rectangle — `ZoomWalkerSourceRectIn`, fed by `FramingRectAt` — which is
-exactly where the live composition puts it: base, then window (the pan),
-then source (the zoom). At zoom 1 the composition is the identity on
+Every sample records the rectangle the capture was reading at that
+instant, so the crop is taken **inside** that rectangle —
+`ZoomWalkerSourceRectIn`, fed by `FramingRectAt` — which is exactly where
+the live composition puts it: base, then window (the pan), then source
+(the zoom). At zoom 1 the composition is the identity on
 whatever window it is given, so an unzoomed stretch of a panned take is
 still a plain copy of its frames. A focus point the pan has drifted away
 from is **clamped** to the framing's edge rather than refused: the crop
 can never reach for pixels the movie does not hold.
 
-Proved at pixel level on a real Follow Mouse take (region 868×550 at
-(732, 268), framing panned to (627, 281) by the time of the probe): the
-rendered frame half a second after a click matched the predicted crop of
-the raw frame at **SSIM 0.9965**, against **0.8636** for the same frame
-cropped against the base rectangle. On a composited window take with a
-click outside the base rectangle and inside the panned one: **0.9925**
-against **0.6325**.
+Proved at pixel level on a real Follow Mouse take and on a composited window
+take: the rendered frames matched the predicted crop at **SSIM 0.9965** and
+**0.9925**, against 0.8636 and 0.6325 for the same frames cropped against
+the base rectangle
+([measurements.md](measurements.md#the-post-hoc-zoom-and-the-base-rectangle)).
 
 **Where the track stops, the crop stops.** The framing is only as good as
 the sample that names it, and a movie can run past its own sidecar:
 pointer samples are flushed about a second behind, and crash recovery
 re-muxes a dead take's movie without trimming it to the track's extent.
 Carrying the last framing forward then crops every one of those frames
-against a rectangle the capture had already left — measured on the same
-Follow Mouse take with its sidecar truncated at 3.4 s, the framing it
-really had 0.8 s later was **317 output pixels** away, and the render
-reported plain success. So `FramingRectAt` reports staleness past the
+against a rectangle the capture had already left — measured, **317 output
+pixels** away 0.8 s past a truncated track, with the render reporting
+plain success. So `FramingRectAt` reports staleness past the
 last sample, on the same boundary this format refuses to interpolate a
 pointer across (`TSidecarLog.MaxInterpolatedGap` — fifteen sample
 intervals, floored at half a second), and a frame it cannot place is
@@ -652,24 +633,16 @@ Five decisions carry most of the weight:
   this, and that two-kernel split stays deferred and documented: an MP4
   and a GIF of the same take are scaled by different code.)
 
-  When the box pass lands *on* the target size there is no second pass
-  at all — the export is one integer average and stops. That is not a
-  rare case: it is what the app's one-click GIF arranges deliberately,
-  by asking for the recording's point size (see
-  `Knips.App.State.AppGifWidth`). On a 2x display a 1800×1000 pixel
-  recording exports at 900×500, an exact halving. Measured on a real
-  6.1 s 1800×1000 region recording, PSNR against the source frame after
-  putting each result back at capture size:
-
-  | app default | canvas | GIF | PSNR |
-  | --- | --- | --- | --- |
-  | old: 800 px cap, box + bilinear | 800×444 | 374 kB | 24.58 dB |
-  | 800 px cap, box + bicubic | 800×444 | — | 25.48 dB |
-  | new: point size, exact box 2:1 | 900×500 | 418 kB | 27.63 dB |
-
-  The wider canvas costs 12% more bytes for 27% more pixels: an exact
-  box reduce leaves longer runs of identical colour than a fractional
-  resample does, and LZW is paid in runs.
+  When the box pass lands *on* the target size there is no second pass at
+  all — the export is one integer average and stops. That is not a rare
+  case: it is what the app's one-click GIF arranges deliberately, by asking
+  for the recording's point size (see `Knips.App.State.AppGifWidth`). On a
+  2x display a 1800×1000 pixel recording exports at 900×500, an exact
+  halving — worth **3.05 dB** of PSNR over the 800 px cap and bilinear pass
+  it replaced, for 12% more bytes and 27% more pixels, because an exact box
+  reduce leaves longer runs of identical colour than a fractional resample
+  does and LZW is paid in runs
+  ([measurements.md](measurements.md#the-gif-scaler-and-the-app-default)).
 
 - **One global palette, two passes.** An `AVAssetReader` cannot seek
   backwards, so the palette pass and the encoding pass are two readers
@@ -688,40 +661,25 @@ Five decisions carry most of the weight:
   of it, and every palette entry is the count-weighted mean of the real
   colours in its box.
 
-  Measured on a 14 s, 800×520 ScreenCaptureKit recording, 281 frames,
-  PSNR against the same source that every encoder read, with ffmpeg's
-  `palettegen` + `paletteuse` as the reference point:
-
-  | encoder | dithered | size | PSNR |
-  | --- | --- | --- | --- |
-  | knips, 6-bit histogram | Floyd–Steinberg | 14.4 MB | 38.17 dB |
-  | knips, exact histogram + error-based cut | Floyd–Steinberg | 1.79 MB | 41.48 dB |
-  | ffmpeg palettegen/paletteuse | Floyd–Steinberg | 1.30 MB | 42.50 dB |
-  | knips, 6-bit histogram | none | 0.87 MB | 37.47 dB |
-  | knips, exact histogram + error-based cut | none | 1.09 MB | 42.58 dB |
-  | ffmpeg palettegen/paletteuse | none | 1.11 MB | 43.97 dB |
-
-  The dithered row is the one that matters, because dithering is the
-  default. It collapsed by 8.1× — not because the encoder got cleverer
-  about bytes, but because a palette that is 3.3 dB closer leaves far
-  smaller errors for Floyd–Steinberg to diffuse, and diffused error is
-  what was destroying the frame-to-frame coherence the changed rectangle
-  and the transparency trial both depend on. Encoding time did not move
-  (13.19 s before, 13.20 s after, same machine, same file).
-
-  Undithered, knips is now marginally *smaller* than ffmpeg at 1.4 dB
-  less; dithered it is 37% larger at 1.0 dB less. The remaining gap is
-  median cut against ffmpeg's own cut, not the histogram.
-- **Nearest-colour lookups are exact and memoised.** Mapping a pixel to
-  a palette index used to be answered per 6-bit *cell*, for the colour
-  the cell's corner expands to rather than for the pixel — a floor of a
-  couple of units per channel under every mapped pixel. Now the memo is
-  a direct-mapped table keyed by the colour itself (2^20 slots, 6 MB), so
-  a collision costs a search and never an answer; the search walks the
-  palette outwards from the entry nearest in green and stops when the
-  green difference alone exceeds the best distance so far, which gives
-  the same answer as scanning all 255 entries for a fraction of the
-  comparisons.
+  Measured against ffmpeg's `palettegen` + `paletteuse` on a 14 s, 800×520
+  recording: undithered, knips is marginally *smaller* at 1.4 dB less;
+  dithered — which is the default — it is 37% larger at 1.0 dB less, and the
+  remaining gap is median cut against ffmpeg's own cut, not the histogram.
+  Against the 6-bit histogram this replaced, the dithered file collapsed by
+  **8.1×** at 3.3 dB better for no encoding time at all: a palette that is
+  closer leaves far smaller errors for Floyd–Steinberg to diffuse, and
+  diffused error is what was destroying the frame-to-frame coherence the
+  changed rectangle and the transparency trial both depend on
+  ([measurements.md](measurements.md#the-gif-palette)).
+- **Nearest-colour lookups are exact and memoised.** A pixel is mapped to a
+  palette index by its own colour and never by the 6-bit cell it falls in,
+  which is what the memo answered before
+  ([measurements.md](measurements.md#the-gif-palette)). The memo is a
+  direct-mapped table keyed by the colour itself (2^20 slots, 6 MB), so a
+  collision costs a search and never an answer; the search walks the palette
+  outwards from the entry nearest in green and stops when the green
+  difference alone exceeds the best distance so far, which gives the same
+  answer as scanning all 255 entries for a fraction of the comparisons.
 - **Decimation counts grid slots, not deadlines.** Each frame's stamp is
   turned into a slot number, `floor((pts - first) * fps)`, and a frame is
   emitted when its slot is past the last one emitted. The obvious
@@ -824,11 +782,10 @@ The obvious bound — the range times the requested rate, which is the
 number of grid slots the decimator can fill — is far too loose for the
 input this program actually has. ScreenCaptureKit emits a frame when the
 screen *changes*, so a recording with any idle stretch in it holds
-nothing like its length times any rate it was asked for: on a 220 s
-capture asked for at 20 fps that bound says 4412 frames and the movie
-holds 1723. As the encode pass's total it gave a bar that crawled at a
-third of its true rate and then stopped at 54%; as the palette's stride
-it did worse, and that is the next section.
+nothing like its length times any rate it was asked for. Used as the
+encode pass's total it gave a bar that crawled and then stopped at 54%;
+as the palette's stride it did worse, and that is the next section
+([measurements.md](measurements.md#the-palette-sample-schedule)).
 
 The second bound is the movie's own frame count.
 `AVAssetTrack.nominalFrameRate` is the average a variable-rate track
@@ -890,48 +847,28 @@ is deliberate — a bounded cost on long honest movies buys surviving an
 estimate that lies high, which the old scheme answered with a
 one-frame palette.
 
-Before this the stride was computed once and never revisited, and the
-error had a *direction* that mattered: too small a stride overran the
-quantiser's global sampled-pixel budget (`GifMaxSampledPixels`, 8 M —
-precisely 32 frames' worth), past which `SampleFrame` returned without
-doing anything at all, so the tail of the movie was left out of the
-palette entirely, silently. Both halves of that are gone. The
-budget existed only to keep 32-bit channel sums from wrapping; the
-counters are 64-bit now and there is no budget, so the estimate is a seed
-and a progress denominator rather than a correctness invariant. What it
-still buys is samples spread at the right density on the first try, which
-is why it is still built to run high and never low. The verbose note when
-the movie holds more frames than its header promised is observability
-now: it says the header lied and how many sample frames the schedule
-ended up taking, not that anything was lost.
-
-Measured against the same clip exported as an APNG, which quantises
-nothing and so is exactly the pixels the scaler produced — a measurement
-of the *bound* change (loose slot count → honest two-bound minimum),
-taken under the previous single-stride scheme:
-
-| recording | sample frames | PSNR |
-| --- | --- | --- |
-| 220 s 1428×616 → 714 px, 20 fps | 13 → 23 | 39.40 → 39.70 dB |
-| 32 s 1160×860 → 800 px, 30 fps | 23 → 31 | 30.83 → 30.88 dB |
-| 32 s 1160×860, 20 fps | 24 → 24 | 36.42 dB, byte-identical |
-
-The third row is the point as much as the first two: where the slot
-count was already the tighter bound, nothing changes at all. On the
-first row's clip the shipped sampler seeds at the 64 cap (the estimate,
-2 428, is past 2 048) and schedules 27 sample frames — denser than
-either column, so the table's PSNR floor still holds.
+Before this the stride was computed once and never revisited, and too small
+a stride silently truncated the palette: it overran a global sampled-pixel
+budget past which the sampler returned without doing anything at all, so the
+tail of the movie was left out. Both halves of that are gone. The budget
+existed only to keep 32-bit channel sums from wrapping; the counters are
+64-bit now and there is no budget, so the estimate is a seed and a progress
+denominator rather than a correctness invariant
+([measurements.md](measurements.md#the-palette-sample-schedule)). What it
+still buys is samples spread at the right density on the first try, which is
+why it is still built to run high and never low. The verbose note when the
+movie holds more frames than its header promised is observability now: it
+says the header lied and how many sample frames the schedule ended up
+taking, not that anything was lost.
 
 The other half of an honest bar is the *weight* of the two passes. The
-palette pass reads every frame but resamples only every Nth, so it is
-much the cheaper of the two, and the more so the larger the canvas — the
-encode pass is per-pixel work and the palette pass is not. Measured
-shares of the export's wall time: 1.9% (69 s, 1200×800), 2.6% (32 s,
-1160×860), 5.8% (220 s, 1428×616). `PaletteProgressPercent` in
-`Knips.App.State` is 5 for that reason. It was 25, which is what used to
-make the export look like it stalled a quarter of the way in: the bar
-sprinted through the palette pass in the first few percent of the time
-and then crawled for the rest.
+palette pass reads every frame but resamples only every Nth, so it is much
+the cheaper of the two, and the more so the larger the canvas — the encode
+pass is per-pixel work and the palette pass is not. Measured shares of the
+export's wall time: 1.9% (69 s, 1200×800), 2.6% (32 s, 1160×860), 5.8% (220
+s, 1428×616). `PaletteProgressPercent` in `Knips.App.State` is 5 for that
+reason; it was 25, and the export looked as though it stalled a quarter of
+the way in ([measurements.md](measurements.md#the-palette-sample-schedule)).
 
 `export` prints one line of advice to **stderr** when the result is going
 to be awkward to hand around — a canvas at or past 1280×720, or a file
@@ -947,9 +884,9 @@ stderr where a pipeline will not eat it.
 `--out=x.apng` writes an animated PNG instead, and its whole reason for
 existing is that it does **not** quantise: 8-bit truecolour, so the file
 holds exactly the pixels the scaler produced. On the same 14 s 800×520
-recording as the table above it comes out at 29.1 MB and 45.20 dB —
-which is the ceiling the YUV→RGB conversion itself imposes, 3.7 dB above
-the best a 256-colour palette managed, for 16× the bytes. It is the right
+recording the GIF path was measured on, it comes out at 29.1 MB and
+45.20 dB — which is the ceiling the YUV→RGB conversion itself imposes,
+3.7 dB above the best a 256-colour palette managed, for 16× the bytes. It is the right
 choice for a UI clip that has to look right and the wrong one for a chat
 window.
 
@@ -1207,8 +1144,7 @@ submenu. A separate delegate class would carry no extra state, and the
 target is already the object every menu item points at. What that
 delegate is allowed to do inside menu tracking is spelled out under
 **Deferrals** later in [Menu bar app](#menu-bar-app) — a bold paragraph
-rather than a heading, which is why the anchor this line used to carry
-(`#deferrals-1`) resolved to nothing at all.
+rather than a heading, so there is no anchor of its own to link to.
 
 **Which windows the submenu offers.** On screen, layer 0, at least 32
 points each way, titled, and **not owned by this process** — decided by
@@ -1309,19 +1245,14 @@ otherwise land in ScreenCaptureKit's `sourceRect` unexamined.
 
 **Each toggle writes its own key, and only its own.** The checkbox fields
 are read once, at `Setup`, and never read again, so a procedure that wrote
-`KnipsZoomOnClick` and `KnipsFollowMouse` together — as one did, back when
-both were menu items — wrote one value the user had just chosen and one
-that was however old the process was. Anything that had changed the other key meanwhile
-was silently reverted by the next toggle of its neighbour: the
-`defaults write` the paragraph above already treats as a public
-interface, or a second Knips, which is not exotic at all — the installed
-bundle and a development build both answer to `org.knips.app`. Measured at the
-time: with the paired write, an external `KnipsFollowMouse=1` was back to
-`0` one *Zoom on Click* click later; with the two writers separate, it
-survived. (Zoom on Click has since become an effect and its writer is
-`StoreEffectZoom`; the rule it produced governs all five keys.) What that looked like from
-outside was a preference that would not stay switched on — and, because
-Follow Mouse then really was off, a region recording that did not pan.
+two keys together would write one value the user had just chosen and one
+that was however old the process was — silently reverting anything that had
+changed the other key meanwhile. That is not hypothetical: the `defaults
+write` the paragraph above already treats as a public interface is one
+writer, and a second Knips is another, which is not exotic at all — the
+installed bundle and a development build both answer to `org.knips.app`. The
+rule came out of a measured regression, and it governs all five keys
+([measurements.md](measurements.md#the-paired-preference-write)).
 
 Note what is *not* covered by this, because it is the one setting that
 still needs a clean exit: the camera window's position (below, under
@@ -1368,7 +1299,7 @@ nothing.
 
 **One key each, and a one-way migration.** `KnipsAudioSystem` and
 `KnipsAudioMicrophone` — separate keys written by separate procedures,
-which is the rule the cross-write incident below established and not a
+which is the rule the cross-write incident above established and not a
 stylistic choice. `objectForKey:` separates *never written* from a
 legitimate `False`, and only a never-written `KnipsAudioSystem` consults
 the Boolean this replaced: `KnipsRecordSystemAudio` true starts the app
@@ -1668,31 +1599,18 @@ slices left and right. A presenter sitting off to one side of the frame
 is inside the 4:3 rectangle and outside the square, which looks like the
 picture moved and is the sides being lost.
 
-Measured on device rather than argued. The camera window was captured by
-window id in both shapes (`screencapture -l`), giving a 480×360 pixel
-rectangle and a 360×360 circle. Sliding a 240×240 patch of the rectangle
-across and scoring SSIM against the middle of the circle peaks **exactly
-at x = 60 px** — which is `(480 − 360) / 2`, the perfectly centred crop —
-and falls away on both sides:
-
-| crop x-offset (px) | 0 | 40 | 56 | 59 | **60** | 61 | 64 | 80 | 120 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| SSIM | .613 | .659 | .729 | .805 | **.832** | .800 | .706 | .608 | .560 |
-
-The peak is one device pixel wide — half a point — so the crop is
-centred to the limit of the measurement. (It is .832 rather than 1.0
-because the two captures are different live frames of a person who
-moved.) There is nothing off-centre to fix; what the switch costs is 25 %
-of the width from each side.
+Measured on device rather than argued: an SSIM sweep of the rectangular
+capture against the circular one peaks **exactly at the perfectly centred
+crop**, and the peak is one device pixel wide
+([measurements.md](measurements.md#the-circular-camera)). There is nothing
+off-centre to fix; what the switch costs is 25% of the width from each side.
 
 **What the switch does move, by up to a few points, is the window** —
 and only against a screen edge. `SetShape` re-centres and then clamps
 back onto the screen, and a 240-wide rectangle re-centred from a
 180-wide circle sitting `CameraWindowMargin` from the right edge does
-not fit. Measured: a circle at x = 1596 on an 1800-point screen becomes
-a rectangle at x = 1560 rather than the centred 1566, so the visual
-centre shifts 6 points left and the round trip back to a circle lands at
-1590 rather than 1596. Staying on screen is worth more than six points
+not fit, so the visual centre shifts inwards — measured at six points on
+an 1800-point screen. Staying on screen is worth more than six points
 of centre, and the alternative — snapping to the nearest corner instead
 — would move it further. Applied live: the window resizes about its
 own centre, clamped back onto the screen, and the layer's frame and radius
@@ -1848,32 +1766,22 @@ are computed from the dock's own anchor (`CameraRideAnchorFor` and
 `CameraRideOrigin` in `Knips.App.State`, tested) rather than accumulated
 tick by tick, so ten minutes at thirty hertz drift by nothing.
 
-**The anchor is a corner, and it used to be an origin.** That is the one
-substantive change to the ride since it was measured, and it is a fix
-rather than a refinement. Following the rectangle's *origin* alone is
-right for a rectangle that only moves and wrong for one that also
-resizes — and a recorded window resizes. In AppKit's bottom-left space,
-dragging a window's bottom edge down moves its origin while its top edge
-stands still: a camera docked into the top-right corner was dragged down
-with an origin it had nothing to do with. Dragging the top edge *down*
-moves no origin at all, so `IsCameraRideMovement` saw nothing to do and
-left the same camera hanging out of the top of the rectangle, straddling
-an edge it is supposed to be inside. Anchoring to the corner the dock
-chose — which edge on each axis, and how far in — answers both, and
-`CameraRideOrigin` then pins an axis on which the camera no longer *fits*
-to that axis's near edge, so a window resized smaller than the camera
-leaves the picture at the rectangle's corner rather than half out of two
-edges at once. It does **not** clamp a camera that fits: the ride
-translates, it does not place. Placement is `NearestCameraCorner`'s and
-the corner snap's, and a picture the user deliberately left outside the
-rectangle would otherwise be teleported inside a thirtieth of a second
-later — the exact move the re-anchor exists to prevent. `IsCameraRideMovement` now compares size as well as origin, because a
+**The anchor is a corner, not an origin**, because a recorded window resizes
+as well as moves and an origin only answers for the second: in AppKit's
+bottom-left space, dragging a window's bottom edge down moves its origin
+while its top edge stands still, and dragging the top edge down moves no
+origin at all ([measurements.md](measurements.md#the-camera-ride)).
+Anchoring to the corner the dock chose — which edge on each axis, and how
+far in — answers both, and `CameraRideOrigin` then pins an axis on which the
+camera no longer *fits* to that axis's near edge, so a window resized
+smaller than the camera leaves the picture at the rectangle's corner rather
+than half out of two edges at once. It does **not** clamp a camera that
+fits: the ride translates, it does not place. Placement is
+`NearestCameraCorner`'s and the corner snap's, and a picture the user
+deliberately left outside the rectangle would otherwise be teleported inside
+a thirtieth of a second later — the exact move the re-anchor exists to
+prevent. `IsCameraRideMovement` compares size as well as origin, because a
 resize by the top or right edge changes nothing else.
-
-For a rectangle that only **translates** the corner anchor is
-arithmetically identical to the old displacement — both edges move by the
-same amount — so every region-pan row in the table below still holds
-unchanged.
 
 **Two clocks, because two different things move the two rectangles.**
 
@@ -1894,27 +1802,12 @@ unchanged.
   rectangle that no longer exists, leaving the camera where it last was.
   Not an error: closing a window mid-take is the user's business.
 
-Both rides were measured on device by driving the app under `lldb` (no
-input synthesised — the actions are the app's own selectors, and the
-recorded window is one created in-process and moved with `setFrame…`):
-
-| what moved | window moved by | camera moved by |
-| --- | --- | --- |
-| recorded window | +200, +150 | +200, +150 |
-| recorded window | −320, −90 | −320, −90 |
-| recorded window | 0, 0 | 0, 0 (the epsilon) |
-| panned region | border −182, +298 | camera −182, +298 |
-| panned region | border +10, +7 | camera +10, +7 |
-| panned region | border +554, −192 | camera +554, −192 |
-| panned region | border −477, 0 | camera −477, 0 |
-
-The region rows are the point of the shared tick: the camera's
-displacement equals the *frame's* at every sample, because both are moved
-in the turn that moved the capture. The dock itself lands where the maths
-says — a camera whose home is (1596, 926) docking into a window at
-(300, 300, 900, 628) goes to (996, 724), the top-right corner inside it
-inset by `CameraWindowMargin`. And the stop restores it to (1596, 926)
-exactly.
+Both rides were measured on device by driving the app under `lldb`, with no
+input synthesised: the camera's displacement equals the recorded window's on
+every sample, and for a panned region it equals the *border's*, because both
+are moved in the turn that moved the capture. The dock lands where the maths
+says and the stop restores the pre-recording position exactly
+([measurements.md](measurements.md#the-camera-ride)).
 
 **The followers are positioned from the animator's INTENT, and that is
 measured to be right — a plausible-sounding alternative was tried and
@@ -1923,18 +1816,10 @@ fire-and-forget and coalescing, so the rectangle the animator intends
 must run ahead of the rectangle the capture is reading from, and a camera
 placed from the intent would then be displaced in the *file* by that
 difference, every frame — a picture-in-picture visibly swimming around
-its corner. The fix would be to move the followers on the rectangle whose
-`updateConfiguration:` completion had landed, so window and content share
-one clock.
-
-It was built and measured, and it is wrong. Recording a region ride over
-a flat backdrop makes the camera window's left edge the only structure in
-the picture, so a threshold crossing tracks it to a fraction of a pixel:
-
-| followers positioned from | camera edge deviation in the file |
-| --- | --- |
-| the animator's intent (shipped) | **max 1.4 px = 0.7 pt**, mean 0.11 px |
-| the last *completed* update | **max 162 px = 81 pt**, 104 frames >8 px off |
+its corner. Moving the followers on the rectangle whose
+`updateConfiguration:` completion had landed was built as the fix, and
+made it a hundredfold worse: 162 px of deviation in the file against
+1.4 px ([measurements.md](measurements.md#the-camera-ride)).
 
 `updateConfiguration:` takes effect when it is **issued**; its completion
 handler is a later acknowledgement, not the moment the compositor
@@ -1942,13 +1827,7 @@ switches. So the window server's `setFrame:` and ScreenCaptureKit's
 reconfiguration, both issued from the same tick, already land together —
 and deliberately delaying the window by one completion *introduces* a
 displacement of one tick's worth of pan, which at the start of a fast
-pan is the better part of a hundred points. The instrument that caught
-this also caught an earlier version of itself being wrong: an
-"applied rectangle" poll that waited for nothing to be in flight fired
-twice a second instead of thirty times, and reported a 626 pt lag that
-did not exist. Logging ScreenCaptureKit's own sent/completed counters
-alongside — they advance every tick, with zero refusals — is what showed
-the framework was never the slow part.
+pan is the better part of a hundred points.
 
 What that investigation *did* find worth changing is in
 `TCameraPreview.ApplyFrame`: it used to hand the preview layer a new
@@ -2109,30 +1988,13 @@ composited frame is shown at 480×360: every source pixel of blur arrives
 on screen as 0.75 of a backing pixel. 28 is a twenty-third of the frame
 width and about 10.5 points once that scaling is done.
 
-Measured on a real 640×480 frame through this exact chain, as the mean
-absolute luma difference between pixels 1, 4 and 16 apart — the last of
-which is the scale at which a room's objects read as objects — expressed
-as a share of the unblurred source's own:
-
-| radius | 1 px | 4 px | 16 px | |
-| --- | --- | --- | --- | --- |
-| 12 | 4.74 % | 11.15 % | 31.74 % | the old value |
-| 24 | 3.10 % | 7.28 % | 21.14 % | |
-| **28** | **2.81 %** | **6.60 %** | **19.21 %** | shipped |
-| 40 | 2.33 % | 5.46 % | 16.02 % | |
-
-So the kernel is 2.33× wider than it was and takes out two fifths of the
-mid-scale structure 12 left behind.
-
-**It costs nothing measurable, and the way to see that is the spread
-rather than the means.** `knips probe`, three runs at each radius on an
-idle machine: **9.1 / 9.4 / 9.8 ms** a frame at radius 28 against
-**7.6 / 9.3 / 9.8 ms** at radius 12. The ranges overlap almost entirely,
-and Vision is ~78 % of each — the radius is not what the frame costs. The
-figure moves with what else the machine is doing far more than with the
-radius: the same probe on a loaded machine reports 15–19 ms at *both*
-radii. Quote a range and the machine's state, never a single number; the
-only claim worth making is that both are far under the 33 ms budget.
+28 was chosen against a measured sweep of how much mid-scale structure each
+of 12, 24, 28 and 40 removes, and **it costs nothing measurable**: `knips
+probe` reports 9.1–9.8 ms a frame at radius 28 on an idle machine, of which
+Vision is ~78%, against 7.6–9.8 ms at the 12 it replaced, and 15–19 ms at
+*both* radii on a loaded one. Quote a range and the machine's state, never a
+single number; the only claim worth making is that both are far under the 33
+ms budget ([measurements.md](measurements.md#background-blur)).
 
 Past about 40 the curve flattens and more radius stops buying softness
 and starts buying halo, because the background is blurred from the
@@ -2212,33 +2074,19 @@ layer would fight the corner radius and the mask. One
 `CGAffineTransform(-1, 0, 0, 1, width, 0)` on the composited image is
 free by comparison — CoreImage folds it into the pass it was already
 running — and what reaches the layer is a mirrored bitmap, which is what
-makes it checkable from a file. Measured by putting a 1280×960 screen
+makes it checkable from a file — and was checked, by putting a screen
 capture through the shipped pipeline and reading the rendered layer
-contents back out: the output's column-brightness profile correlates
-**+0.905** with the *reversed* source and **−0.814** with the source as
-it stands, and the mean absolute horizontal gradient collapses from
-**8.31 to 0.29** — 28× less high-frequency energy, which is the blur.
+contents back out ([measurements.md](measurements.md#background-blur)).
 
-**The budget, measured on this M-series Mac.** 120 frames of 640×480
-BGRA through the real `TCameraBlur`, model load and kernel compile
-excluded:
-
-| quality | Vision every | ms/frame | fps ceiling | Vision alone | CPU |
-| --- | --- | --- | --- | --- | --- |
-| **fast** | **every frame** | **11.0** | **91** | **8.7 ms** | **45 %** |
-| fast | every 2nd | 6.4 | 156 | 8.6 ms | 52 % |
-| balanced | every frame | 24.1 | 42 | 21.6 ms | 40 % |
-| balanced | every 2nd | 13.4 | 75 | 22.4 ms | 43 % |
-| accurate | every frame | 59.9 | 17 | 57.4 ms | 28 % |
-
-Fast every frame is what ships. It holds the camera window's 30 Hz with a
-threefold margin — 11 ms against a 33 ms budget — for under half a core,
-because the segmentation runs on the neural engine and the composite on
-the GPU. Balanced clears 30 Hz too, but with a 27 % margin it would be
-competing with a recording for the same machine; accurate cannot clear it
-at all, and its header describes it as a matting refinement over
-balanced. The CPU column falls as the frames get slower for the same
-reason: more of the wall time is spent waiting for the ANE.
+**Fast quality, every frame, is what ships**, and the budget was measured
+across all three quality levels and both segmentation strides
+([measurements.md](measurements.md#background-blur)). Fast holds the camera
+window's 30 Hz with a threefold margin — 11 ms against a 33 ms budget — for
+under half a core, because the segmentation runs on the neural engine and
+the composite on the GPU. Balanced clears 30 Hz too, but with a 27% margin
+it would be competing with a recording for the same machine; accurate cannot
+clear it at all, and its header describes it as a matting refinement over
+balanced.
 
 `knips probe` prints the same measurement for the machine it is run on
 (`camera background blur cost: … ms/frame …, N fps sustainable`) and says
@@ -2253,7 +2101,7 @@ queue that cannot keep up is handed fewer frames rather than falling
 behind — nothing ever queues. Beyond that, `SegmentationStride` runs
 Vision on every Nth frame and reuses the last mask for the others: the
 mask is the expensive half and a person does not move far in 33 ms. The
-table above is what decided the shipped stride of 1; the measured
+sweep is what decided the shipped stride of 1; the measured
 statistics are read back rather than the frame rate being asserted.
 
 The layer's `contentsScale` is pinned at `Show`. Dragging the window
@@ -2340,32 +2188,19 @@ Three things about that are not obvious:
 - **No new runtime-built class.** The menu items either target
   `KnipsAppTarget`, which already exists, or nothing at all.
 
-Nothing else changes across the switch. Measured on device with the
-playback window driven from an instrumented build:
+Nothing else changes across the switch: the status item keeps its window,
+its title and its attached menu throughout, and the main menu stays
+installed after the demotion
+([measurements.md](measurements.md#the-dock-promotion)).
 
-| | before | window open | after close |
-| --- | --- | --- | --- |
-| `NSApp.activationPolicy` | 1 (accessory) | 0 (regular) | 1 (accessory) |
-| `lsappinfo` ApplicationType | UIElement | Foreground | UIElement |
-| `lsappinfo front` | — | knips | — |
-| `NSApp.mainMenu` items | none | 2 | 2 (kept) |
-| status item has a window | yes | yes | yes |
-| status item title / menu | `◉` / attached | `◉` / attached | `◉` / attached |
+**Three things the promotion must not break**, all three measured in one
+instrumented run:
 
-**Three things the promotion must not break**, all three measured in the
-same instrumented run:
-
-- **⌘W during an export is refused, not survived.** `performClose:` was
-  sent to the window 1.5 s into a 16.8 s export, from the run loop,
-  exactly as the key equivalent does. `windowShouldClose:` answered NO,
-  the window stayed up, and the export finished — a `.gif` byte-for-byte
-  the same size as one produced with nothing interfering. Before
-  `windowShouldClose:` existed this path was *permitted*: the window went,
-  the export carried on writing through nil-checks, and the demotion
-  fired from inside `windowWillClose:` with the export still holding the
-  main thread. It worked, and it was one nil-guard away from not
-  working. The veto makes the guard `CommandClose` already applies
-  authoritative for the closes the user can ask for.
+- **⌘W during an export is refused, not survived.**
+  `windowShouldClose:` answers NO, the window stays up, and the export
+  finishes byte-for-byte as it would have with nothing interfering. The
+  veto makes the guard `CommandClose` already applies authoritative for
+  the closes the user can ask for.
 - **⌘Q during an export leaves the status menu detached.** `quitKnips:`
   fired at +3.0 s, `CommandQuit` refused with *"a GIF export is running;
   quit once it has finished"*, and the `RefreshStatusItem` that follows
@@ -2382,9 +2217,7 @@ same instrumented run:
   accepted and before anything else. `-close` posts `windowWillClose:`
   synchronously, so the window, the tile and the menu bar are all gone by
   the time the command returns — a full run-loop turn before
-  `startPending:` builds the content filter. Measured: policy 0 and a
-  visible window before `CommandRecordDisplay`, policy 1 and no window
-  after it and before the deferred start. Without this, recording with a
+  `startPending:` builds the content filter. Without this, recording with a
   playback window open would put the app's own Dock tile and menu bar in
   the file, which is the exact thing the Accessory policy exists to
   prevent.
@@ -2529,31 +2362,24 @@ going to zoom needs a source rectangle it would not otherwise have, so
 covering the display; the CLI never sets it.
 
 **The border, and the one place rule 1 gives way.** The frame around a
-region is kept out of the file two ways ([above](#menu-bar-app)): rule 1,
-it is stroked *outside* the recorded rectangle; rule 2, its window id is
-excluded from the content filter. Zooming needs neither — the capture
-area on screen has not moved, so the frame stays where it is. Panning
-does: the frame moves with the region (`TRecordingBorder.MoveTo`, one
+region is kept out of the file two ways ([above](#menu-bar-app)): rule 1, it
+is stroked *outside* the recorded rectangle; rule 2, its window id is
+excluded from the content filter. Zooming needs neither — the capture area
+on screen has not moved, so the frame stays where it is. Panning does: the
+frame moves with the region (`TRecordingBorder.MoveTo`, one
 `setFrame:display:`, so the window id and therefore the exclusion are
-unchanged). But the window server and ScreenCaptureKit apply their
-changes on their own schedules, so for a frame or two around a pan the
-two disagree and part of the border really is inside the rectangle being
-captured. **Rule 1 does not hold during a pan; rule 2 does, and is not
-timing-dependent.** Proven on device by recording a 200-point pan twice,
-with 138 border moves in lockstep with 41 source-rectangle updates:
-with the exclusion, **0** border-red pixels in all 141 frames; with the
-exclusion deliberately switched off, **665 792** red pixels across the
-run and 2 560 in the worst single frame. Re-measured since, on the app's
-own paths and counting *lines* rather than pixels — a border edge in the
-file is a full-width or full-height red run four pixels deep at 2x, which
-screen content never is: with the exclusion, 0 such lines in the first 30
-frames of a heavily panning region recording (drag path and Record Last
-Region both); with the exclusion off and Follow Mouse forced on anyway,
-22 of the first 30 frames carry them. With the exclusion off and the pan
-refused as it normally is, 0 again — a *still* frame never leaks, which
-is rule 1 doing its job. That is why Follow Mouse is *refused* for a
-recording whose border did not reach the content filter — the app says so
-on the `Last error: …` line and records with a fixed region rather than a
+unchanged). But the window server and ScreenCaptureKit apply their changes
+on their own schedules, so for a frame or two around a pan the two disagree
+and part of the border really is inside the rectangle being captured. **Rule
+1 does not hold during a pan; rule 2 does, and is not timing-dependent.**
+Proven on device twice over, once counting pixels and once counting whole
+border lines: with the exclusion, zero border pixels in every frame of a
+panning recording; without it, hundreds of thousands
+([measurements.md](measurements.md#live-effects)). With the exclusion off
+and the pan refused as it normally is, zero again — a *still* frame never
+leaks, which is rule 1 doing its job. That is why Follow Mouse is *refused*
+for a recording whose border did not reach the content filter — the app says
+so on the `Last error: …` line and records with a fixed region rather than a
 frame that keeps sliding into shot.
 
 **Getting the border into the content filter is therefore load-bearing,
@@ -2623,36 +2449,14 @@ the obvious thing to do and is the wrong one, because it lands as an
 instantaneous jump in the last frames of the clip. The animation is a
 valid framing at every instant, so the file ends where it was.
 
-**What was measured, and what was not.** The mechanism is proven on
-device against a lattice of known pitch — black bars 8 points wide at a
-pitch of 32, so at capture scale 2 the output pitch is 64 px at zoom 1
-and 64·Z px at zoom Z:
-
-| | measured |
-| --- | --- |
-| base rectangle | pitch 64.00 px on both axes |
-| zoom 2 | pitch **128.00** px on both axes, output still 1024×768 |
-| the ramp between | 64 → 73 → 82 → 104 → 113 → 127 → 128, the smoothstep shape |
-| back to base | pitch 64.00, phase back to its starting value |
-| a 200-point pan | phase moved 48 px; 200 pt × scale 2 = 400 px, and 400 mod 64 = 400 − 384, so −400 ≡ 48 (mod 64) |
-| through `TLiveAnimator` itself | the window panned 341.00 → 0.00 points, matching the tested maths' own fixpoint to the hundredth; content phase moved 42 px, and 341 × 2 = 682 ≡ 42 (mod 64) |
-| the writer | 1024×768 for every frame of every run; 0 dropped, 0 failed appends; 28/28, 41/41, 40/40, 25/25, 13/13 and 14/14 updates completed, none refused |
-
-The three answers above were checked against a framework that really does
-refuse. A source rectangle at an origin of 10⁹ points comes back as
-`-3812`, `SCStreamErrorInvalidParameter`, which makes the whole failure
-path reachable on demand:
-
-| | measured |
-| --- | --- |
-| accepted rectangle, then the same **+ 0.1 pt** | second one **deduped** — the epsilon still works when nothing went wrong |
-| refused rectangle, then the same **+ 0.1 pt** | second one **sent** — the heal, twice over, at the same 0.1 pt delta the control deduped |
-| five refusals in a row | live updates switched **off** at the sixth call, `live zoom/pan disabled: ScreenCaptureKit refused 5 source-rect updates in a row (last error -3812)`; every later call refused without sending |
-| the recording, through all of it | 12 sent, 3 completed, 9 refused, and still 174 frames, 0 dropped, 0 failed appends, 1024×768 |
-
-The two rows at the top are the same experiment with one variable
-changed: identical delta, identical epsilon, opposite outcome, and the
-only difference is whether the previous rectangle was refused.
+**What was measured, and what was not.** The mechanism is proven on device
+against a lattice of known pitch, which turns a zoom factor and a pan
+distance into a pixel measurement; and the three answers above were
+exercised against a framework that really does refuse, because a source
+rectangle at an origin of 10⁹ points comes back as `-3812`,
+`SCStreamErrorInvalidParameter`, which makes the whole failure path
+reachable on demand. Both sets of runs are in
+[measurements.md](measurements.md#live-effects).
 
 The pointer cannot be moved by test tooling — this project does not
 inject input — so Follow Mouse was proven by moving the *region* instead
@@ -2774,15 +2578,12 @@ constant in the neutral unit.
 The floor is the part that is easy to get wrong, and was. A heartbeat's
 stamp is normally the clock's own reading, with a floor under it of one
 frame at the configured rate so two stamps are never closer together than
-the rest of the file is. But at `--fps=1` a frame is a whole second and
-the interval is half of one, so that floor overshot: each beat landed at
-the last stamp plus a second for half a second of wall time, and the movie
-ran **ahead** of the clock — measured, an 11.6 s take reported 0.384 s
-long, which is the opposite of what the heartbeat is for.
-`HeartbeatMinimumStep` caps the floor at the interval, which makes the
-stamp exactly the caller's moment whenever a beat is due. Monotonicity
-never depended on the floor: the writer's one-tick clamp is the real
-guard.
+the rest of the file is — and at `--fps=1`, where a frame is longer than the
+heartbeat interval, that floor overshot and made the movie run **ahead** of
+the clock ([measurements.md](measurements.md#the-idle-heartbeat)).
+`HeartbeatMinimumStep` caps the floor at the interval, which makes the stamp
+exactly the caller's moment whenever a beat is due. Monotonicity never
+depended on the floor: the writer's one-tick clamp is the real guard.
 
 **What it reports, and where.** Three counters travel with every
 recording: how many of the appended frames were heartbeats, how many
@@ -2898,17 +2699,13 @@ last fragment and nothing else. See [Never lose a take](#never-lose-a-take).
 **What a repeat carries with it.** A heartbeat frame is the last
 delivered frame's own pixels, and that includes anything the capture
 queue composited into them. [Big Cursor](#big-cursor) is the one thing
-that does: it draws its sprite into a frame as that frame arrives, so a
-repeat carries an enlarged pointer standing exactly where it stood when
-that frame was captured. Record a still screen with `--big-cursor` and
-the drawn pointer is frozen for the whole idle stretch while the sidecar
-beside the movie records it moving. Measured: a 7.6 s take, 16 frames, 15
-of them heartbeats, and the sprite composited into none of those 15. The
+that does, so on a still screen the drawn pointer is frozen for the whole
+idle stretch while the sidecar beside the movie records it moving. The
 file is correct and nothing failed, so `BigCursorIdleWarning` says so as
-a note — and points at the raw-take route, where the pointer is drawn at
-render time from a track that never goes idle. The full account, and why
-re-blitting the sprite onto heartbeat frames was not done, is under
-[Big Cursor](#big-cursor).
+a note, and points at the raw-take route, where the pointer is drawn at
+render time from a track that never goes idle. The full account, the
+measurement, and why re-blitting the sprite onto heartbeat frames was not
+done, are under [Big Cursor](#big-cursor).
 
 **Audio.** System audio keeps flowing while the video is still, so before
 the change a still take produced a file whose audio track ran 11.3 s
@@ -3031,27 +2828,24 @@ cross-thread value in this program.
 | --- | --- |
 | `arrowCursor`, not `currentSystemCursor` | Both bind in FPC 3.2.2 and both answer on device (checked). The sprite is rendered *once*, so whatever shape is under the pointer when the recording starts is frozen for the whole file — and `knips record --big-cursor` from a terminal would freeze an I-beam over a five-minute screencast. Following the live shape needs a main-thread re-render on shape change, which is separate work |
 | Fixed size in output pixels | The sprite does not grow with a live zoom. Scaling it per frame means resampling on the capture queue, and a Big Cursor is an artificial pointer to begin with, so one that keeps its size while the content zooms reads as deliberate |
-| In place, not copied | Measured. The alternative is a full-frame memcpy plus a pool allocation per frame — about 20 MB at 2880×1800, 600 MB/s at 30 fps. The specific risk is stale sprites, since SCK recycles surfaces and recomposites only what changed; see the table below |
+| In place, not copied | Measured. The alternative is a full-frame memcpy plus a pool allocation per frame — about 20 MB at 2880×1800, 600 MB/s at 30 fps. The specific risk is stale sprites, since SCK recycles surfaces and recomposites only what changed, and the ghost case below is what settles it |
 | Display targets only | A window's frames have no fixed relationship to the screen the pointer is measured against, and the window moves under us with no way to find out from the capture queue. `ResolveBigCursor` refuses it, `ValidateRecordingOptions` rejects the flag combination, and the app resolves before it asks so a ticked checkbox never fails a recording |
 
-**What was measured**, on an M-series Mac, macOS 26, 1512×982 points at
-two pixels per point. The pointer was never moved by tooling — this
-project does not inject input — so it was read where it sat and the
-*sprite* was made to move by panning the live `sourceRect` instead.
+**What was measured**, on an M-series Mac running macOS 26: the sprite's own
+size and magnification, its placement against the predicted frame pixel at
+rest and under a live pan, and a pathological case in which the `sourceRect`
+flipped between two positions 780 px apart every tick — where every frame
+carried the arrow at exactly one of the two, with **no ghosting**. The blit
+costs 300 µs a frame, 0.9% of a 30 fps frame's budget, and no run dropped a
+frame, failed an append or refused a blit
+([measurements.md](measurements.md#big-cursor)). The pointer was never moved
+by tooling — this project does not inject input — so it was read where it
+sat and the *sprite* was made to move by panning the live `sourceRect`
+instead.
 
-| | measured |
-| --- | --- |
-| sprite | 140×200 px, hot spot 25,25; the arrow's opaque box inside it 53×92 at (19, 17) — 2.52× and 2.49× the system pointer's own 21×37, which is the 2.5 magnification |
-| whole-display recording, pointer at global (946.59, 201.28) | predicted arrow box (1887, 395)–(1939, 486); found white body (1889, 396)–(1939, 485) — the two-pixel inset is the black outline, which is not white |
-| the same recording with Big Cursor off | 90 white pixels in the *system* pointer's own predicted 21×37 box at (1891, 400), found (1891, 400)–(1909, 432) |
-| live pan, four plateaus 130 points apart | the sprite at each plateau's predicted pixel, within 2 px, and **nothing at the previous plateau's** |
-| the pathological ghost case: the sourceRect flipped between two positions 780 px apart every tick, 54 frames | every frame carried the arrow at exactly one of the two positions (≈700–850 white px there, ≈35–110 at the other, which is background and H.264 ringing). No ghosting |
-| cost per frame | 2.05 µs for the pointer read, 300 µs for a 140×200 blit — 0.9 % of a 30 fps frame's budget, dev build, unoptimised |
-| frame counts under an identical drive, 8 s | 107 frames with the sprite, 108 and 107 without; 0 dropped, 0 failed appends, 0 refused blits in every run |
-
-The ghost row is the one that settles the in-place decision. If SCK ever
-does start handing back a surface it has not recomposited, the symptom is
-a trail of pointers standing still in the video, and the fix is to
+That ghost case is what settles the in-place decision. If SCK ever does
+start handing back a surface it has not recomposited, the symptom is a
+trail of pointers standing still in the video, and the fix is to
 composite into a copy.
 
 **The toggle is gone; the sprite is not.** Big Cursor was a menu checkbox
@@ -3145,12 +2939,9 @@ to leave a file of **zero bytes**; it now leaves 483 kB that `ffprobe`
 decodes as 117 frames of 4.0 s. The most a crash costs is the fragment in
 flight.
 
-That last sentence became true only with the idle heartbeat behind it. A
-fragment can only hold what was appended into it, so a still screen used
-to lose its whole idle stretch as well: measured, a take killed after four
-seconds of motion and eight of stillness recovered as **2.0 s**. With the
-heartbeat filling those eight seconds the same take recovered as **10.5 s**
-— the loss really is the unfinished fragment now. See
+That last sentence became true only with the idle heartbeat behind it: a
+fragment can only hold what was appended into it, so before the heartbeat
+a still screen lost its whole idle stretch as well. See
 [The idle heartbeat](#the-idle-heartbeat).
 
 The price is `shouldOptimizeForNetworkUse`, which is now **off**. With it
@@ -3240,8 +3031,9 @@ movie rather than the events.
 `knips export` says what the animation is likely to weigh before it writes
 a byte, and then replaces that guess with a projection from what the
 encoder has actually produced. The arithmetic is
-`Knips.Export.SizeEstimate`, which is platform-neutral and tested; this is
-where the numbers behind its constants live.
+`Knips.Export.SizeEstimate`, which is platform-neutral and tested; the
+calibration sets its constants were fitted over are in
+[measurements.md](measurements.md#export-size-estimates).
 
 The estimate is
 
@@ -3254,93 +3046,38 @@ where `sourceBytesPerPixelFrame` is the source movie's own size divided by
 its frames and its pixels — H.264's verdict on how busy the content is,
 and free to read. Nothing extra is decoded for it.
 
-**Calibration, sixteen GIF exports over seven takes at four output
-widths.** The column is the ratio the fit is over: GIF bytes per output
-pixel, divided by the source's bytes per source pixel-frame.
-
-| take | native | 1512 px | 600 px | 400 px | 300 px |
-| --- | --- | --- | --- | --- | --- |
-| busy region | 27.6 | | 27.7 | | 28.0 |
-| whole display | | 21.9 | 23.6 | | 23.6 |
-| quiet region | 15.3 | | 17.6 | | 20.1 |
-| fragmented take | | | 9.5 | | |
-| small region | 8.8 | | 9.1 | | 9.1 |
-| cursorless region | 8.7 | | | 10.2 | |
-| take with audio | | | | 6.8 | |
-
-`K` is the geometric mean of those, **14.9**. Two things are worth reading
-off the table.
+`K` is **14.9** for a GIF, the geometric mean of sixteen exports over
+seven takes at four output widths, and **33** for an APNG, refitted over
+twenty-eight exports of fourteen takes. `--no-dither` lands at 0.61 of the
+dithered size.
 
 **There is deliberately no downscale term.** The obvious worry is that
 downscaling concentrates detail into fewer output pixels, so a heavily
-reduced GIF ought to cost more per output pixel than the source density
-predicts. Along each row it barely moves — at most +31 % across a fourfold
-linear reduction, and flat to within 2 % for three of the seven takes —
-while down the column it spans 6.8 to 28.0. Fitting
-`(sourcePixels/outputPixels)^a` gives `a = 0`, and forcing a positive
-exponent makes the fit strictly worse: worst-case error 2.19x at `a = 0`,
-2.62x at `a = 0.2`, 3.70x at `a = 0.4`. Over the fourfold range measured,
-content dominates the residual and the per-row trend (+8 % to +31 %,
-rising with the reduction) was not worth a term; a second independent
-sweep reaching 6.4x and 8x reductions found the same trend continuing to
-grow at the far end, still second-order against a content offset. Beyond
-fourfold the model is extrapolating.
+reduced export ought to cost more per output pixel than the source density
+predicts. It does, and the effect is second-order: across the GIF set the
+ratio moves by at most +31% over a fourfold linear reduction while it
+spans a factor of four *between* takes, and fitting an exponent on the
+reduction gives zero — forcing a positive one makes the fit strictly
+worse. On the APNG set the best exponent buys a tenth of the error for a
+term nobody can check by eye. Content dominates the residual in both.
+Beyond fourfold the model is extrapolating.
 
-**The band is a measured spread, not a bound.** The worst GIF residual
-across those sixteen is 2.19x. The reported band is **3x** — wider than
-the calibration set, because a band that only just contains its own sample
-is a band fitted to it. The previous 2x band, set from five exports that
-were all halvings, was exceeded the first time somebody exported content
-unlike those five. Sixteen exports of one person's screen is still not the
-space of screen content, so the wording in the output says "roughly" and
-the in-flight projection replaces the whole guess inside the first hundred
-frames.
+**The bands are measured spreads, not bounds** — **3x** for a GIF against
+a worst residual of 2.19x, **8x** for an APNG against 12.7x, each chosen
+wider than the sample it was fitted to, because a band that only just
+contains its own calibration set is a band fitted to it. Sixteen exports
+of one person's screen is still not the space of screen content, so the
+wording in the output says "roughly" and the in-flight projection replaces
+the whole guess inside the first hundred frames. APNG's spread is the
+wider for a reason that is content at both ends: a nearly blank screen
+costs H.264 a keyframe and a fragment header every couple of seconds while
+zlib gets the same picture almost free, and a Retina whole-display take
+reduced threefold is the opposite.
 
-`--no-dither` lands at 0.61 of the dithered size (0.525 and 0.694 on two
-takes).
-
-**APNG needed its own constant and its own band.** It used to share the
-GIF's 3x band with a `K` of 59 and a claim that "six exports over five
-takes fit within 1.5x" — which was a property of those six exports rather
-than of APNG. Refitted over **twenty-eight** exports of fourteen real
-takes (Retina UI, near-blank screens, region and whole-display captures,
-each at its own width capped at 1200 px and again at 600 px):
-
-| | ratio |
-| --- | --- |
-| geometric mean (the new `K`) | **33** |
-| range across the 28 | 2.6 to 302 — a factor of **117** |
-| worst residual against `K` | **12.7x** |
-| the old constant's worst residual | 22.8x |
-
-Both ends are content and both are real. A nearly blank screen (three
-takes, 2.6 to 5.5) costs H.264 a keyframe and a fragment header every
-couple of seconds while zlib gets the same picture almost free, so the
-*movie* is large relative to the APNG. A Retina whole-display take reduced
-threefold (220 to 302) is the opposite: H.264 is extremely efficient per
-pixel-frame at 3600×2338, and the reduction concentrates all of that
-detail into a quarter of the pixels.
-
-A downscale term was fitted for this too, and is not here for the same
-reason it is not on the GIF path: over the same twenty-eight exports
-`(sourcePixels/outputPixels)^a` bottoms out at `a = 0.3` and moves the
-worst residual from 12.8x to 11.7x. It buys a tenth of the error for a
-term nobody can check by eye. The effect itself is real and small —
-exporting the same take at 600 px rather than at its own width raises the
-ratio by 25 % to 56 %, consistently, on every one of the fourteen takes.
-
-The reported APNG band is **8x**, which covers 23 of the 28. Six covers
-21 and thirteen covers all 28; thirteen is not chosen precisely because it
-would cover all 28, and the five it misses at eight are the two named
-content extremes rather than a scatter. It is a measured spread, not a
-bound, and that sentence applies harder here than it does to the GIF.
-
-The flat prior for a source whose size is not known was refitted with the
-same set: APNG's own bytes per output pixel-frame have a geometric mean of
-**0.085**, against the 0.45 that constant used to hold. It is a far worse
-model than the content-aware one either way — worst residual 84x against
-12.7x — which is why `DescribeEstimate` says so out loud whenever that
-path is taken.
+**The flat prior** for a source whose size is not known is **0.085** bytes
+per output pixel-frame. It is a far worse model than the content-aware one
+— worst residual 84x against 12.7x — which is why `DescribeEstimate` says
+so out loud whenever that path is taken.
 
 ## Was there actually any sound?
 

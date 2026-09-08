@@ -65,6 +65,7 @@ else. Knips never listens on a port and never injects input.
 ## Related documents
 
 - [Architecture](docs/architecture.md)
+- [Measurements and their history](docs/measurements.md)
 - [ADRs](docs/adr/)
 - [CONTEXT.md](CONTEXT.md) — ubiquitous language
 - [AGENTS.md](AGENTS.md) — hard constraints

@@ -10,8 +10,10 @@
 - The bundle is ad-hoc signed with an identifier-only designated
   requirement, so TCC grants survive rebuilds locally; distribution
   still wants a Developer ID (see Signing and permissions).
-- No CI workflow yet; the PR gate is manual (`format --check`, `build`,
-  `test` on Linux or macOS; `probe` + a recording on macOS).
+- There is no CI service. `lefthook`'s pre-push hook is the automatic
+  gate (`format --check`, `build`, `test`, `agents --check`) and
+  `tools/release-gate.sh` adds the release build and `knips probe` on a
+  Mac ([tooling.md](tooling.md), DEFINITION_OF_DONE.md).
 
 ## Build
 
@@ -74,11 +76,31 @@ required for a non-sandboxed app.
 
 ## Release flow
 
-1. Bump `version` in `lwpt.toml` and `KnipsVersion` in
-   `Knips.Options`.
-2. `git-cliff -o CHANGELOG.md`.
-3. Tag `X.Y.Z`; attach `build/knips` from a release build on Apple
-   silicon.
+1. Bump `version` in `lwpt.toml` and `KnipsVersion` in `Knips.Options`
+   to `X.Y.Z` — both, and **before the gate runs**, because the release
+   build in step 3 is what compiles `KnipsVersion` into the binary that
+   ships. Three surfaces report it and none can be corrected afterwards:
+   `knips --version` (`source/knips.pas`), the header of every sidecar
+   `record` and `render` write (`Knips.Recording`,
+   `Knips.Export.Render`), and the MCP server's own identity
+   (`Knips.Mcp`). `make-app.sh` is the secondary consumer — it reads the
+   same constant out of `Knips.Options.pas` for the bundle's
+   `CFBundleShortVersionString` and `CFBundleVersion`, and would happily
+   pick up a late bump the binary inside the bundle had missed.
+2. Close `CHANGELOG.md`'s `## [Unreleased]` section by hand: read what
+   is under it, edit it into the release's story, and rename the heading
+   to `## [X.Y.Z] - YYYY-MM-DD` — a hyphen, as
+   [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) writes its
+   own `## [1.0.0] - 2017-06-20` — leaving a fresh, empty
+   `## [Unreleased]` above it. Nothing generates this file
+   — there was a `cliff.toml` here, carried in from lantaarn, which
+   named that project and was configured to overwrite the curated prose
+   from commit subjects; it has been deleted.
+3. `tools/release-gate.sh` on an Apple-silicon Mac with Screen Recording
+   permission — the Definition of Done's six gates in order. It must
+   exit zero, and it leaves `build/knips` a release binary: that is the
+   one that ships.
+4. Tag `X.Y.Z`; attach the `build/knips` step 3 left behind.
 
 Rollback is re-downloading the previous tag's binary; Knips keeps no
 state.
