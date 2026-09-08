@@ -96,7 +96,7 @@ lefthook install                         # once per clone: pre-commit + pre-push
 | `source/Knips.Recording.Recovery.pas` | Finishes off a take whose process died: an unfinished sidecar plus a dead pid, then a passthrough re-mux; also the pid-gated sweep of the scratch a killed render left (tested) |
 | `source/Knips.Export.CursorEffect.pas` | The pointer drawn back into a rendered MP4, a GIF or an APNG from the sidecar's smoothed track |
 | `source/Knips.Export.ZoomTrack.pas` | Platform-neutral post-recording Zoom on Click: the live effect's own easing replayed from the sidecar's click track, composed inside the framing each sample records, and the frame crop it comes to — including the framing lookup and the per-frame crop the MP4 render and the GIF/APNG pipeline both ask for (tested) |
-| `source/Knips.Export.Cadence.pas` | Platform-neutral frame synthesis: where a render may put a frame the capture never made, whether that frame would be a different picture from the one before it, and how much one gap may ever cost (tested) |
+| `source/Knips.Export.Cadence.pas` | Platform-neutral frame synthesis: where a render may put a frame the capture never made, whether that frame would be a different picture from the one before it, how much one gap may ever cost, and — for the GIF/APNG pipeline, which decimates onto a slot grid rather than asking for instants — the whole walk of a movie onto that grid as one record, so the palette pass and the encode pass cannot emit different frames (tested) |
 | `source/Knips.Export.Render.pas` | The render pass: raw take + sidecar → deliverable MP4. Video re-encoded through an `AVAssetWriterInputPixelBufferAdaptor`, audio copied sample-for-sample, every source frame's presentation stamp passed through unchanged, extra frames interleaved where an effect is animating |
 | `source/Knips.Export.SizeEstimate.pas` | Pre-export size estimate from the source movie's own density, and the in-flight projection (tested) |
 | `source/Knips.Recording.CursorMath.pas` | Platform-neutral Big Cursor arithmetic: screen point → frame pixel under a live sourceRect, clipped sprite placement, the premultiplied BGRA blit, sprite metrics (tested) |
@@ -149,7 +149,12 @@ sits with `Knips.Recording.LiveMath`, whose arithmetic it replays, plus
 `Knips.Recording.Sidecar`, whose click track and framing track it reads.
 `Knips.Export.Cadence` is neutral and depends on nothing at all; both
 `Knips.Export.Render` and `Knips.Export.Pipeline` consume it, so an MP4
-and a GIF fill the same gaps the same way.
+and a GIF fill the same gaps the same way. The GIF walks its movie
+twice, so its half of that lives in the unit as a record
+(`TCadenceWalk`) rather than as advice a loop follows: both passes are
+one implementation, started from settings that are all settled before
+either runs, and neither can differ from the other by depending on
+something the first pass happened to warm up.
 `Knips.App.Hotkey` sits beside the other `Knips.App.*` units and depends
 only on `Knips.App.State` and MacOSAll.
 `Knips.App.CameraRide` sits beside `Knips.App.Live` and depends on the

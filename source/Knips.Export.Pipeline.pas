@@ -60,9 +60,6 @@ const
   // autoreleases temporaries per decoded frame and this program has no
   // run loop to drain them.
   PoolDrainEveryFrames = 128;
-  // Slack on the decimation grid, in slots: enough to absorb the last
-  // bits of a presentation stamp, nowhere near a real frame interval.
-  GridEpsilon = 1E-6;
 
 type
   // Which of the export's passes over the movie is reporting. APNG makes
@@ -263,14 +260,15 @@ type
     FSourceDensity: Double;
     FStartSeconds: Double;
     FRangeSeconds: Double;
-    // The decimation grid, in whole slots of 1/fps counted from the
-    // first emitted frame. Accumulating a floating-point deadline
-    // instead loses frames when the source rate equals the target one:
-    // a stamp that should land exactly on the grid lands a few parts in
-    // 10^16 below it and the frame is skipped.
-    FBaseSeconds: Double;
-    FLastSlot: Int64;
-    FEmitted: Int64;
+    // Where this pass's walk of the movie has got to: the decimation
+    // grid — whole slots of 1/fps counted from the first emitted frame,
+    // rather than an accumulated floating-point deadline, which loses
+    // frames when the source rate equals the target one — the gap being
+    // filled, and the last emitted frame's shape. All of it lives in
+    // Knips.Export.Cadence, so that the palette pass and the encode pass
+    // drive one implementation rather than two runs of a loop with
+    // differently-warmed state around them.
+    FWalk: TCadenceWalk;
     // The frame synthesis. FHeld is the last emitted frame's pixels,
     // retained past the reader's own lifetime for it; FPendingSource is
     // the next frame that passed the grid, read but not yet handed out,
@@ -278,16 +276,6 @@ type
     FHeld: CVPixelBufferRef;
     FPendingSource: TMovieReaderFrame;
     FHasPendingSource: Boolean;
-    FPendingSlot: Int64;
-    FFillSlot: Int64;
-    // One past the last slot this gap may be filled to. The bound is
-    // Knips.Export.Cadence's own (MaxCadenceStepsPerGap), applied here
-    // because this pass walks the decimation grid it already counts in
-    // rather than calling CadenceTimes — the two must not be allowed to
-    // disagree about how much one gap may cost.
-    FFillLimit: Int64;
-    FLastShape: TRenderedFrameShape;
-    FHasLastShape: Boolean;
     // What the palette pass counted. Zero until it has run, and it never
     // runs for APNG.
     FMeasuredFrames: Int64;
@@ -558,15 +546,14 @@ end;
 
 procedure TExportSession.BeginPass;
 begin
-  FEmitted := 0;
-  FBaseSeconds := 0;
-  FLastSlot := 0;
+  // Both of the walk's settings are decided before any pass starts —
+  // EnsureTargetSize runs from Run, off the size the reader already
+  // measured — so the second pass starts from exactly the first's
+  // premises rather than from whatever the first left warmed up.
+  FWalk := CadenceWalkStart(FOptions.FramesPerSecond,
+    FSynthesisKnown and FSynthesisPossible);
   ReleaseHeldFrame;
   FHasPendingSource := False;
-  FPendingSlot := 0;
-  FFillSlot := 0;
-  FFillLimit := 0;
-  FHasLastShape := False;
   FReport.SynthesizedFrames := 0;
   // A GIF walks the movie twice and the walker only goes forwards, so
   // the second pass starts the zoom over. Without this the encode pass
@@ -600,7 +587,6 @@ function TExportSession.NextEmittedFrame(
 var
   Frame: TMovieReaderFrame;
   Shape: TRenderedFrameShape;
-  Slot: Int64;
   FillSeconds: Double;
 begin
   Result := False;
@@ -609,19 +595,16 @@ begin
     if FHasPendingSource then
     begin
       // The slots between the last emitted frame and the one waiting,
-      // up to the shared per-gap bound.
-      if (FHeld <> nil) and (FFillSlot < FFillLimit)
-        and (FReport.PixelWidth > 0) then
+      // up to the shared per-gap bound — and none at all on a take
+      // nothing is animating over.
+      if (FHeld <> nil) and CadenceWalkNextFill(FWalk, FillSeconds) then
       begin
-        FillSeconds := FBaseSeconds
-          + FFillSlot / FOptions.FramesPerSecond;
-        Inc(FFillSlot);
         Shape := EmittedFrameShape(Integer(CVPixelBufferGetWidth(FHeld)),
           Integer(CVPixelBufferGetHeight(FHeld)), FillSeconds);
-        if FHasLastShape and not FrameShapesDiffer(Shape, FLastShape) then
+        if not CadenceWalkWantsFill(FWalk, Shape) then
           Continue;
-        FLastShape := Shape;
-        FHasLastShape := True;
+        CadenceWalkEmitFill(FWalk, Shape);
+        FReport.SynthesizedFrames := FWalk.Filled;
         AFrame.PixelBuffer := FHeld;
         AFrame.Seconds := FillSeconds;
         // No CMTime. This pipeline writes a GIF or an APNG, whose frame
@@ -630,60 +613,29 @@ begin
         // synthesised frame has no source stamp to carry anyway. (The MP4
         // render is the one that needs a stamp, and it builds its own on
         // the SOURCE's timescale rather than on a trim's.)
-        Inc(FEmitted);
-        Inc(FReport.SynthesizedFrames);
         Exit(True);
       end;
-      // Nothing left to fill: the frame that was waiting is next.
+      // Nothing left to fill: the frame that was waiting is next. Its
+      // shape is recorded whatever else is true, which is what the next
+      // gap compares against.
       FHasPendingSource := False;
-      FLastSlot := FPendingSlot;
-      Inc(FEmitted);
       AFrame := FPendingSource;
       HoldFrame(AFrame);
-      if FReport.PixelWidth > 0 then
-      begin
-        FLastShape := EmittedFrameShape(
-          Integer(CVPixelBufferGetWidth(AFrame.PixelBuffer)),
-          Integer(CVPixelBufferGetHeight(AFrame.PixelBuffer)),
-          AFrame.Seconds);
-        FHasLastShape := True;
-      end;
+      CadenceWalkEmitSource(FWalk, EmittedFrameShape(
+        Integer(CVPixelBufferGetWidth(AFrame.PixelBuffer)),
+        Integer(CVPixelBufferGetHeight(AFrame.PixelBuffer)),
+        AFrame.Seconds));
       Exit(True);
     end;
 
     if not FReader.NextFrame(Frame) then
       Exit(False);
     Inc(FReport.FramesRead);
-    if FEmitted = 0 then
-    begin
-      FBaseSeconds := Frame.Seconds;
-      FLastSlot := 0;
-      Slot := 0;
-    end
-    else
-    begin
-      // Which slot of the grid this stamp falls in. GridEpsilon is far
-      // larger than the rounding of a presentation stamp and far
-      // smaller than any real gap, so a frame sitting on a slot
-      // boundary always counts as having reached it. Advancing by slot
-      // number also means a source slower than the target rate never
-      // builds up a backlog of frames that are "due".
-      // Qualified: MacOSAll carries a Floor of its own that returns a
-      // float, and it wins the uses clause.
-      Slot := Math.Floor((Frame.Seconds - FBaseSeconds)
-        * FOptions.FramesPerSecond + GridEpsilon);
-      if Slot <= FLastSlot then
-        Continue;
-    end;
+    // The decimation and the gap it opens, both in one neutral place.
+    if not CadenceWalkAcceptsSource(FWalk, Frame.Seconds) then
+      Continue;
     FPendingSource := Frame;
-    FPendingSlot := Slot;
     FHasPendingSource := True;
-    FFillSlot := FLastSlot + 1;
-    // The shared bound, so a damaged movie with an hour between two
-    // stamps cannot ask this export for a hundred thousand frames — and
-    // so this path and the MP4 render's cannot disagree about what one
-    // gap may cost.
-    FFillLimit := CadenceFillLimit(FFillSlot, FPendingSlot);
   until False;
 end;
 
@@ -1198,10 +1150,6 @@ begin
         end;
         if Sampler.TakeFrame(Index) then
         begin
-          if not EnsureTargetSize(
-            Integer(CVPixelBufferGetWidth(Frame.PixelBuffer)),
-            Integer(CVPixelBufferGetHeight(Frame.PixelBuffer)), AError) then
-            Exit;
           if not ScaleFrame(Frame, FScaled, AError) then
             Exit;
           Quantizer.SampleFrame(@FScaled.Pixels[0], FScaled.BytesPerRow,
@@ -1231,40 +1179,53 @@ begin
       Exit;
     end;
     FReport.ExactPalette := Quantizer.IsExactHistogram;
-    // Observability only. The seed is the grid-slot count and the pass
-    // emits at most one frame a slot, so this is now close to
-    // unreachable — which is the point of saying it at all: an overrun
-    // means the bound was wrong, and the bound is arithmetic rather than
-    // a claim about the movie.
+    // Observability only, and worth being exact about what it can mean,
+    // because it has meant two different things and once meant a bug.
     //
-    // It used to read "the movie held more frames than its header
-    // promised", because the seed was the lesser of the slot count and
-    // the movie's own frame count, and an overrun really did mean a
-    // header under-reporting its average rate. That stopped being the
-    // only reading when this pass learned to fill: knips' OWN filled
-    // frames tripped it, and the note then blamed the file for something
-    // the exporter had done. The fill count is printed beside the total
-    // so the two can never be confused again.
+    // On a take that can synthesise, the seed is the grid-slot count and
+    // the pass emits at most one frame a slot, so an overrun is down to
+    // the arithmetic at the edges — a range the container could not
+    // report, or a last frame landing exactly on the closing slot. On a
+    // take that cannot, the seed is the lesser of the slot count and the
+    // movie's duration times the container's own nominal rate — a claim
+    // rather than a
+    // measurement, and a header under-reporting its average rate is the
+    // ordinary way to trip this. That second reading is the original
+    // one: the note used to say "the movie held more frames than its
+    // header promised" outright.
+    //
+    // It stopped being the only reading when this pass learned to fill,
+    // and then it stopped being honest at all: knips' OWN filled frames
+    // tripped it, and the note blamed the file for something the
+    // exporter had done. That was measured on the plainest input there
+    // is — an 11-frame deliverable with the pointer already in its
+    // pixels and no zoom, which can synthesise NOTHING — where this pass
+    // emitted 12 frames against 11 and the encode pass wrote 11. The
+    // walk is one implementation now (TCadenceWalk) and it is told
+    // before it starts that this take cannot be filled in, so the fill
+    // that produced the twelfth frame has nowhere left to happen. The
+    // count is still printed beside the total, so if the two ever part
+    // again it says which of them moved.
     //
     // The schedule absorbs an overrun either way, by doubling its stride
     // as it goes, so the palette still spans the whole movie — it just
     // took more samples than the target to get there. Not worth failing
     // over.
-    if FVerbose and (FEmitted > EstimatedBeforePass)
+    if FVerbose and (FWalk.Emitted > EstimatedBeforePass)
       and (EstimatedBeforePass > 0) then
     begin
       WriteLn(Format('  note: the pass emitted more frames than its own '
         + 'bound allowed for (%d against %d, of which %d were filled '
         + 'in); the palette schedule thinned itself to span them '
         + '(%d sample frames)',
-        [FEmitted, EstimatedBeforePass, FReport.SynthesizedFrames,
+        [FWalk.Emitted, EstimatedBeforePass, FReport.SynthesizedFrames,
         FReport.SampledFrames]));
       Flush(Output);
     end;
     // Only now, after the pass has finished and its own progress has
     // been reported against the estimate: changing the total mid-pass
     // would walk the bar backwards.
-    FMeasuredFrames := FEmitted;
+    FMeasuredFrames := FWalk.Emitted;
     // One index of the 256 is reserved for "unchanged since the last
     // frame", so the palette is built one colour short of the maximum.
     APalette := Quantizer.BuildPalette(GifMaxOpaqueColors);
@@ -1314,10 +1275,6 @@ begin
           AError := ExportCancelledMessage;
           Exit;
         end;
-        if not EnsureTargetSize(
-          Integer(CVPixelBufferGetWidth(Frame.PixelBuffer)),
-          Integer(CVPixelBufferGetHeight(Frame.PixelBuffer)), AError) then
-          Exit;
         if not ScaleFrame(Frame, FScaled, AError) then
           Exit;
         if HasPending then
@@ -1350,7 +1307,7 @@ begin
             ASink.FrameCount, FReport.EstimatedFrames))]));
           Flush(Output);
         end;
-        if FEmitted mod PoolDrainEveryFrames = 0 then
+        if FWalk.Emitted mod PoolDrainEveryFrames = 0 then
         begin
           Pool.release;
           Pool := NSAutoreleasePool(NSAutoreleasePool.alloc.init);
@@ -1448,19 +1405,32 @@ begin
     Exit;
   MeasureSourceDensity;
 
+  // Before any pass, from the picture the reader already decoded one
+  // frame to measure — so it costs nothing here, and on a movie whose
+  // picture size does not change it is the same number the first frame
+  // of either pass would have supplied.
+  //
+  // It is settled first because everything a pass depends on comes out
+  // of it: the canvases, the sidecar, both effects, and through
+  // DecideSynthesis the answer to whether this take can be filled in at
+  // all. A GIF walks the movie twice, and when this ran *inside* the
+  // first walk the two walks did not start from the same premises: the
+  // palette pass's first frame recorded no shape, its first gap was
+  // filled unconditionally, and it sampled a frame the encode pass never
+  // wrote. (An absurd canvas is also refused before a decode pass rather
+  // than partway through one, which is the same refusal a byte earlier.)
+  if not EnsureTargetSize(FReader.PixelWidth, FReader.PixelHeight,
+    AError) then
+    Exit;
+
   Palette := Default(TGifPalette);
+  // APNG quantises nothing, so there is nothing a first pass could learn.
   if FOptions.Format = efGif then
   begin
     BeginPass;
     if not CollectPalette(Palette, AError) then
       Exit;
-  end
-  else
-    // APNG quantises nothing, so there is nothing to learn from a first
-    // pass; the size comes from the track the reader already opened.
-    if not EnsureTargetSize(FReader.PixelWidth, FReader.PixelHeight,
-      AError) then
-      Exit;
+  end;
 
   if FVerbose then
   begin

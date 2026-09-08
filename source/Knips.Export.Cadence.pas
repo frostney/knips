@@ -40,7 +40,7 @@ unit Knips.Export.Cadence;
 // makes sure the movie reaches the end of the recording. Neither
 // replaces the other.
 //
-// **What this unit is.** The two decisions that must not live inside a
+// **What this unit is.** The decisions that must not live inside a
 // framework loop:
 //
 //   - `CadenceTimes` — where a synthesised frame may go, on a grid of
@@ -51,7 +51,12 @@ unit Knips.Export.Cadence;
 //     come out identical is skipped, so a still stretch with nothing
 //     animating over it stays exactly as sparse as it was captured, a
 //     zoom's *hold* (a constant crop) costs nothing, and only the
-//     stretches where something is genuinely moving are filled in.
+//     stretches where something is genuinely moving are filled in;
+//   - `TCadenceWalk` — the whole of that bookkeeping for a caller that
+//     decimates onto a slot grid rather than asking `CadenceTimes` for
+//     instants, which is the GIF and APNG pipeline. It is a record
+//     rather than advice because that pipeline walks the same movie
+//     TWICE, and the two walks have to emit the same frames.
 //
 // That second test is what bounds the growth. It is deliberately made of
 // integers — the crop in whole source pixels, the sprite's landing place
@@ -81,6 +86,11 @@ const
   // far past anything real, and a bound on what a nonsense stamp in a
   // damaged movie can ask a render to encode.
   MaxCadenceStepsPerGap = 1800;
+  // Slack on the slot grid TCadenceWalk decimates onto, in slots:
+  // enough to absorb the last bits of a presentation stamp, nowhere
+  // near a real frame interval, so a frame sitting on a slot boundary
+  // always counts as having reached it.
+  CadenceGridEpsilon = 1E-6;
   // How close to the next *source* frame a synthesised one may land, as
   // a share of the interval. Below this the two would be adjacent
   // frames a fortieth of a second apart, which buys nothing and makes
@@ -111,6 +121,56 @@ type
     HasCursor: Boolean;
     CursorX: Integer;
     CursorY: Integer;
+  end;
+
+  // Where one walk of a movie's frames onto the output's own slot grid
+  // has got to: which slot the last emitted frame sat in, which slot the
+  // source frame waiting to be handed out belongs in, how far the gap
+  // between the two may be filled, and what the last emitted frame came
+  // out looking like.
+  //
+  // Every input to "what does this walk emit next?" is in here, and that
+  // is the point of the record. A GIF walks the movie TWICE — once to
+  // build a palette from the frames that will be written, once to write
+  // them — and the two walks have to agree exactly, or the palette is
+  // built from an animation the file does not hold. They used not to:
+  // the shape of an emitted frame was recorded only once the export's
+  // target size was known, the palette pass learned that size from its
+  // own first frame, and so the first frame of the FIRST pass recorded
+  // no shape at all. The next gap then had nothing to compare against
+  // and was filled unconditionally — one frame the palette saw, the
+  // encode pass never wrote, and both passes' counts disagreed about.
+  //
+  // Held state rather than a fresh answer per frame, so a walk cannot
+  // depend on anything a pass happened to set up along the way.
+  TCadenceWalk = record
+    // The output rate the grid is in slots of. Never below 1.
+    FramesPerSecond: Integer;
+    // Whether anything in this take could make one instant a different
+    // picture from the one before it — a crop that moves or a drawn
+    // pointer that moves; see the caller's own SynthesisPossible. False
+    // means no gap is ever filled, which is not an optimisation: a walk
+    // that cannot synthesise emits exactly one frame per accepted source
+    // frame, and that is the bound its caller's progress and palette
+    // seed are computed from.
+    SynthesisPossible: Boolean;
+    // The first accepted frame's stamp, which anchors the grid, and
+    // whether one has been seen.
+    BaseSeconds: Double;
+    HasBase: Boolean;
+    // How many frames this walk has handed out, and how many of those it
+    // made rather than read.
+    Emitted: Int64;
+    Filled: Int64;
+    LastSlot: Int64;
+    PendingSlot: Int64;
+    FillSlot: Int64;
+    // One past the last slot the open gap may be filled to — the shared
+    // bound (CadenceFillLimit), so this path and the MP4 render's cannot
+    // disagree about what one gap may cost.
+    FillLimit: Int64;
+    LastShape: TRenderedFrameShape;
+    HasLastShape: Boolean;
   end;
 
 // Seconds per frame at AFramesPerSecond, clamped into what a screen
@@ -146,7 +206,50 @@ function FrameShapesDiffer(const ALeft, ARight: TRenderedFrameShape):
 // stills.
 function CadenceFillLimit(AFirstEmptySlot, ANextFrameSlot: Int64): Int64;
 
+// A walk of a movie at AFramesPerSecond, told once whether this take can
+// synthesise anything at all. Both are settled before a pass starts and
+// neither moves during it.
+function CadenceWalkStart(AFramesPerSecond: Integer;
+  ASynthesisPossible: Boolean): TCadenceWalk;
+
+// Whether a source frame at ASeconds is kept. The first frame seen is
+// always kept and anchors the grid; after that a frame is kept only if
+// it reaches a slot later than the one already emitted from, so a source
+// faster than the output rate is decimated and one slower than it never
+// builds up a backlog of frames that are "due".
+//
+// A frame that is kept opens the gap in front of it: the slots between
+// the last emitted frame and this one are what CadenceWalkNextFill will
+// offer, up to the shared bound.
+function CadenceWalkAcceptsSource(var AWalk: TCadenceWalk;
+  ASeconds: Double): Boolean;
+
+// The next instant in the open gap that may carry a synthesised frame.
+// False when the gap is exhausted, and false at once on a take that
+// cannot synthesise.
+function CadenceWalkNextFill(var AWalk: TCadenceWalk;
+  out ASeconds: Double): Boolean;
+
+// Whether a synthesised frame that would come out AShape is worth
+// emitting, which is FrameShapesDiffer against the last frame emitted.
+function CadenceWalkWantsFill(const AWalk: TCadenceWalk;
+  const AShape: TRenderedFrameShape): Boolean;
+
+// Records that the walk handed out a synthesised frame of AShape.
+procedure CadenceWalkEmitFill(var AWalk: TCadenceWalk;
+  const AShape: TRenderedFrameShape);
+
+// Records that the walk handed out the source frame that was waiting,
+// which came out AShape. Unconditional, because a walk that skips this
+// for its first frame is exactly the bug TCadenceWalk exists to make
+// unrepresentable.
+procedure CadenceWalkEmitSource(var AWalk: TCadenceWalk;
+  const AShape: TRenderedFrameShape);
+
 implementation
+
+uses
+  Math;
 
 function CadenceInterval(AFramesPerSecond: Integer): Double;
 var
@@ -211,6 +314,90 @@ begin
   // A gap with nothing missing from it is not a gap.
   if Result < AFirstEmptySlot then
     Result := AFirstEmptySlot;
+end;
+
+function CadenceWalkStart(AFramesPerSecond: Integer;
+  ASynthesisPossible: Boolean): TCadenceWalk;
+begin
+  Result := Default(TCadenceWalk);
+  Result.FramesPerSecond := AFramesPerSecond;
+  if Result.FramesPerSecond < 1 then
+    Result.FramesPerSecond := DefaultCadenceFramesPerSecond;
+  Result.SynthesisPossible := ASynthesisPossible;
+end;
+
+function CadenceWalkAcceptsSource(var AWalk: TCadenceWalk;
+  ASeconds: Double): Boolean;
+var
+  Slot: Int64;
+begin
+  if not AWalk.HasBase then
+  begin
+    AWalk.HasBase := True;
+    AWalk.BaseSeconds := ASeconds;
+    AWalk.LastSlot := 0;
+    Slot := 0;
+  end
+  else
+  begin
+    Slot := Math.Floor((ASeconds - AWalk.BaseSeconds)
+      * AWalk.FramesPerSecond + CadenceGridEpsilon);
+    if Slot <= AWalk.LastSlot then
+      Exit(False);
+  end;
+  AWalk.PendingSlot := Slot;
+  AWalk.FillSlot := AWalk.LastSlot + 1;
+  AWalk.FillLimit := CadenceFillLimit(AWalk.FillSlot, Slot);
+  Result := True;
+end;
+
+function CadenceWalkNextFill(var AWalk: TCadenceWalk;
+  out ASeconds: Double): Boolean;
+begin
+  ASeconds := 0;
+  // Asked before the gap rather than after it, so a take with nothing
+  // animating over it never enters the fill at all. It used to be asked
+  // only of the SHAPE the fill would come out, which is the same answer
+  // whenever a shape to compare against exists — and on the one frame
+  // where none did, it was no answer at all.
+  if not AWalk.SynthesisPossible then
+    Exit(False);
+  if AWalk.FillSlot >= AWalk.FillLimit then
+    Exit(False);
+  ASeconds := AWalk.BaseSeconds + AWalk.FillSlot / AWalk.FramesPerSecond;
+  Inc(AWalk.FillSlot);
+  Result := True;
+end;
+
+function CadenceWalkWantsFill(const AWalk: TCadenceWalk;
+  const AShape: TRenderedFrameShape): Boolean;
+begin
+  // No recorded shape means nothing to compare against, and the answer
+  // to that is no fill: this is exactly the arm that produced a phantom
+  // frame when the first frame's shape went unrecorded, so a walk driven
+  // wrongly must come out sparse rather than padded. Unreachable while
+  // the walk is driven as documented — a gap only opens in front of an
+  // emitted frame, and emitting one records its shape.
+  Result := AWalk.HasLastShape
+    and FrameShapesDiffer(AShape, AWalk.LastShape);
+end;
+
+procedure CadenceWalkEmitFill(var AWalk: TCadenceWalk;
+  const AShape: TRenderedFrameShape);
+begin
+  AWalk.LastShape := AShape;
+  AWalk.HasLastShape := True;
+  Inc(AWalk.Emitted);
+  Inc(AWalk.Filled);
+end;
+
+procedure CadenceWalkEmitSource(var AWalk: TCadenceWalk;
+  const AShape: TRenderedFrameShape);
+begin
+  AWalk.LastSlot := AWalk.PendingSlot;
+  AWalk.LastShape := AShape;
+  AWalk.HasLastShape := True;
+  Inc(AWalk.Emitted);
 end;
 
 function FrameShapesDiffer(const ALeft, ARight: TRenderedFrameShape):

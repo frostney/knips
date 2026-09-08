@@ -18,7 +18,15 @@ program Knips.Export.Cadence.Test;
 //   - two frames made from the same pixels count as different exactly
 //     when the crop or the drawn pointer moved by a whole pixel, which
 //     is what keeps a still stretch as sparse as it was captured and a
-//     zoom's hold free.
+//     zoom's hold free;
+//   - and the walk that puts all of that together for the GIF and APNG
+//     pipeline: a take nothing could animate over is never filled in at
+//     all, a still take is not filled in either, a moving one is, and
+//     two walks over the same stamps emit the same frames. That last
+//     pair is what a GIF depends on and cannot check for itself — it
+//     walks the movie once to build a palette and once to encode, and a
+//     palette built from frames the encoder never writes is a palette
+//     for a different animation.
 
 {$I Knips.inc}
 
@@ -47,6 +55,16 @@ type
     procedure TestAGapIsBounded;
     procedure TestASlotGapIsBoundedByTheSameNumber;
     procedure TestBackwardsAndDegenerateGapsAreEmpty;
+  end;
+
+  TWalkTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestATakeThatCannotSynthesiseIsNeverFilled;
+    procedure TestAStillTakeIsNotFilledEither;
+    procedure TestAMovingTakeIsFilled;
+    procedure TestTwoWalksOverTheSameStampsAgree;
+    procedure TestAFastSourceIsDecimatedWithoutABacklog;
   end;
 
   TShapeTests = class(TTestSuite)
@@ -100,6 +118,87 @@ begin
   Result.HasCursor := AHasCursor;
   Result.CursorX := ACursorX;
   Result.CursorY := ACursorY;
+end;
+
+// The take CA-2 was found on, to the frame: an 11-frame, 3.0 s rendered
+// deliverable — the plainest input there is, sparse and irregular the way
+// ScreenCaptureKit leaves one.
+const
+  PlainTake: array[0..10] of Double = (0.000, 0.033, 0.520, 0.867, 1.010,
+    1.400, 1.933, 2.100, 2.480, 2.700, 2.990);
+  // The frames of PlainTake that reach a slot of their own at 20 fps.
+  PlainTakeKept = 10;
+
+// What one output frame would come out as, standing in for the crop and
+// the pointer placement the pipeline computes from a real frame: constant
+// when nothing animates over the take, sliding a pixel per hundredth of a
+// second when something does.
+function ProbeShape(ASeconds: Double; AMoves: Boolean):
+  TRenderedFrameShape;
+begin
+  Result := Default(TRenderedFrameShape);
+  Result.CropWidth := 640;
+  Result.CropHeight := 360;
+  if AMoves then
+  begin
+    Result.HasCursor := True;
+    Result.CursorX := Trunc(ASeconds * 100);
+    Result.CursorY := 12;
+  end;
+end;
+
+// The loop Knips.Export.Pipeline.NextEmittedFrame runs, with the parts
+// that need a Mac — a decoder, a pixel buffer, an effect — replaced by a
+// list of stamps and ProbeShape. Answers with the instants the walk
+// handed out, so two walks can be compared frame for frame and not
+// merely by their totals.
+function WalkStamps(const AStamps: array of Double;
+  AFramesPerSecond: Integer; ASynthesisPossible, AShapeMoves: Boolean;
+  out AFilled: Int64): TCadenceTimes;
+var
+  Walk: TCadenceWalk;
+  Shape: TRenderedFrameShape;
+  FillSeconds: Double;
+  Held: Boolean;
+  Count, I: Integer;
+
+  procedure Keep(ASeconds: Double);
+  begin
+    if Count >= Length(Result) then
+      SetLength(Result, Count + 16);
+    Result[Count] := ASeconds;
+    Inc(Count);
+  end;
+
+begin
+  Result := nil;
+  Count := 0;
+  Held := False;
+  Walk := CadenceWalkStart(AFramesPerSecond, ASynthesisPossible);
+  for I := 0 to High(AStamps) do
+  begin
+    if not CadenceWalkAcceptsSource(Walk, AStamps[I]) then
+      Continue;
+    // The gap in front of the frame that was just accepted, drained
+    // before that frame is handed out — there is nothing to re-present
+    // until one frame has been.
+    if Held then
+      while CadenceWalkNextFill(Walk, FillSeconds) do
+      begin
+        Shape := ProbeShape(FillSeconds, AShapeMoves);
+        if not CadenceWalkWantsFill(Walk, Shape) then
+          Continue;
+        CadenceWalkEmitFill(Walk, Shape);
+        Keep(FillSeconds);
+      end;
+    CadenceWalkEmitSource(Walk, ProbeShape(AStamps[I], AShapeMoves));
+    Keep(AStamps[I]);
+    Held := True;
+  end;
+  SetLength(Result, Count);
+  AFilled := Walk.Filled;
+  ExpectTrue(Walk.Emitted = Count,
+    'the walk counted every frame it handed out');
 end;
 
 { TIntervalTests }
@@ -252,6 +351,106 @@ begin
   ExpectCount(CadenceTimes(0.0, 5.0, -1), 0, 'a negative interval');
 end;
 
+{ TWalkTests }
+
+procedure TWalkTests.SetupTests;
+begin
+  Test('a take nothing could animate over is never filled in',
+    TestATakeThatCannotSynthesiseIsNeverFilled);
+  Test('a take that could be filled in but never moves is not either',
+    TestAStillTakeIsNotFilledEither);
+  Test('a take something moves over has its gaps filled in',
+    TestAMovingTakeIsFilled);
+  Test('two walks over the same stamps emit the same frames',
+    TestTwoWalksOverTheSameStampsAgree);
+  Test('a source faster than the output rate is decimated, not queued',
+    TestAFastSourceIsDecimatedWithoutABacklog);
+end;
+
+// The finding this suite was written for, first half. On a deliverable
+// whose pointer is already in its pixels and whose zoom was never asked
+// for, nothing can be re-presented as a different picture, and the walk
+// is told so before it starts. It used to be asked one frame too late —
+// only of a SHAPE, and the first frame of the palette pass had recorded
+// none — so the first gap was filled unconditionally and the pass
+// emitted a frame the file never held.
+procedure TWalkTests.TestATakeThatCannotSynthesiseIsNeverFilled;
+var
+  Filled: Int64;
+  Emitted: TCadenceTimes;
+begin
+  Emitted := WalkStamps(PlainTake, 20, False, True, Filled);
+  ExpectCount(Emitted, PlainTakeKept, 'frames emitted');
+  ExpectTrue(Filled = 0, 'frames filled in');
+end;
+
+// The other half, and the one that pins the shape bookkeeping itself: a
+// take that COULD be filled in, over which nothing actually moves, is
+// still left alone — including in its very first gap, which is only true
+// if the very first frame recorded what it looked like.
+procedure TWalkTests.TestAStillTakeIsNotFilledEither;
+var
+  Filled: Int64;
+  Emitted: TCadenceTimes;
+begin
+  Emitted := WalkStamps(PlainTake, 20, True, False, Filled);
+  ExpectCount(Emitted, PlainTakeKept, 'frames emitted');
+  ExpectTrue(Filled = 0, 'frames filled in');
+end;
+
+procedure TWalkTests.TestAMovingTakeIsFilled;
+var
+  Filled: Int64;
+  Emitted: TCadenceTimes;
+  I: Integer;
+begin
+  Emitted := WalkStamps(PlainTake, 20, True, True, Filled);
+  ExpectTrue(Filled > 0, 'a moving take is filled in at all');
+  ExpectTrue(Length(Emitted) = PlainTakeKept + Filled,
+    'every emitted frame is a source frame or a filled one');
+  // The whole run is one animation, so it has to run forwards.
+  for I := 1 to High(Emitted) do
+    ExpectTrue(Emitted[I] > Emitted[I - 1],
+      Format('frame %d comes after frame %d', [I, I - 1]));
+end;
+
+// What a GIF depends on: the palette pass and the encode pass walk the
+// same movie and must hand out the same frames at the same instants.
+procedure TWalkTests.TestTwoWalksOverTheSameStampsAgree;
+var
+  PaletteFilled, EncodeFilled: Int64;
+  Palette, Encode: TCadenceTimes;
+  I: Integer;
+begin
+  Palette := WalkStamps(PlainTake, 20, True, True, PaletteFilled);
+  Encode := WalkStamps(PlainTake, 20, True, True, EncodeFilled);
+  ExpectCount(Encode, Length(Palette), 'the encode pass emits as many');
+  ExpectTrue(PaletteFilled = EncodeFilled, 'both filled in as many');
+  for I := 0 to High(Palette) do
+    ExpectNear(Encode[I], Palette[I], Epsilon,
+      Format('frame %d of both passes', [I]));
+end;
+
+// A 30 fps source asked for at 10: one frame in three is kept, and the
+// two that were dropped do not come back as a backlog of frames that are
+// "due" at the next slot.
+procedure TWalkTests.TestAFastSourceIsDecimatedWithoutABacklog;
+var
+  Stamps: array[0..29] of Double;
+  Filled: Int64;
+  Emitted: TCadenceTimes;
+  I: Integer;
+begin
+  for I := 0 to High(Stamps) do
+    Stamps[I] := I / 30;
+  Emitted := WalkStamps(Stamps, 10, False, False, Filled);
+  ExpectCount(Emitted, 10, 'frames emitted at a third of the rate');
+  ExpectTrue(Filled = 0, 'frames filled in');
+  for I := 0 to High(Emitted) do
+    ExpectNear(Emitted[I], I / 10, Epsilon,
+      Format('frame %d lands on its own slot', [I]));
+end;
+
 { TShapeTests }
 
 procedure TShapeTests.SetupTests;
@@ -315,6 +514,8 @@ begin
     'where a synthesised frame goes'));
   TestRunnerProgram.AddSuite(TShapeTests.Create(
     'whether it is worth making'));
+  TestRunnerProgram.AddSuite(TWalkTests.Create(
+    'one walk of a movie onto the output grid'));
   TestRunnerProgram.Run;
   ExitCode := TestResultToExitCode;
 end.
