@@ -89,4 +89,4 @@ bindings are vendored from lantaarn
 ## References
 
 - [Agent instructions](AGENTS.md)
-- Private candidate project — not open-source licensed.
+- [MIT License](LICENSE)
