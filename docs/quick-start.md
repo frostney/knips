@@ -109,7 +109,7 @@ A `◉` appears in the menu bar. Clicking it opens:
 | Stop Recording | Enabled only while recording, and shows **⌘⇧2** — the system-wide shortcut below. |
 | Cancel selection | Enabled only while selecting. The overlay covers the menu bar, so this only matters if the overlay failed to open. |
 | Camera ▸ | Three checkboxes about the picture-in-picture window, all available in every state, recording included. **Show Camera** puts it on screen. **Circular Camera** makes it a circle instead of a rounded rectangle. **Blur Background** blurs the room behind you and leaves you sharp. All three apply straight away and are remembered between launches. |
-| Follow Mouse (region) | The one effect that has to be chosen before a recording, because it decides which pixels are read off the screen at all: a **region** recording pans to keep the pointer inside the middle third of the frame, and the red frame moves with it. Whole-display and window recordings ignore it, since a display has nowhere to pan. Not changeable mid-recording; remembered between launches. Zoom on Click, Smooth Cursor and Big Cursor used to sit beside it and are now in the playback window's **Effects** control, where they can be chosen — and changed — after the take exists. |
+| Follow Mouse (region) | The one effect that has to be chosen before a recording ([why](architecture.md#live-effects-zoom-on-click-and-follow-mouse)): a **region** recording pans to keep the pointer inside the middle third of the frame, and the red frame moves with it. Whole-display and window recordings ignore it, since a display has nowhere to pan. Not changeable mid-recording; remembered between launches. The other three — Zoom on Click, Smooth Cursor, Big Cursor — live in the playback window's **Effects** control instead, choosable and changeable once the take exists. |
 | Audio ▸ | Two independent checkboxes, **System Audio** and **Microphone**. Tick either, both, or neither: each ticked source becomes its own AAC track in the file. Remembered between launches; not changeable mid-recording. |
 | Recordings folder | Opens `~/Movies/knips/` in Finder. |
 | Last error: … | Only visible after a failure, and after anything that switched a recording setting off for one recording; the full text is in `~/Library/Logs/Knips.log`. |
@@ -180,15 +180,15 @@ frame.
 **Zoom on Click and Follow Mouse.** Both change what the *file* shows and
 neither changes anything on screen or the size of the finished movie —
 they move the rectangle the deliverable is taken from, not the video's
-dimensions. They are no longer the same kind of setting, though, and the
-difference is worth knowing:
+dimensions. What differs is *when* you choose them
+([why](architecture.md#the-render-pass)):
 
-**Follow Mouse** has to be chosen *before* you start, because a pan
-decides which pixels are read off the screen at all and nothing
-afterwards can recover what was never captured. It is greyed out while a
-recording runs. It only works for a region: a full-display capture
-already contains everywhere the pointer can go, and a window recording
-follows the window rather than the pointer.
+**Follow Mouse** has to be chosen *before* you start: a pan changes what
+the recorder reads, and nothing afterwards can recover what was never
+captured. It is greyed out while a recording runs. It only works for a
+region: a full-display capture already contains everywhere the pointer
+can go, and a window recording follows the window rather than the
+pointer.
 
 **Zoom on Click** is decided *after* the take exists, in the playback
 window's **Effects** control, because a crop is taken from pixels that
@@ -308,10 +308,10 @@ Settings › Privacy & Security › Screen Recording and click again.
 
 **Camera ▸ Show Camera** puts a small rounded window with your camera in
 it at the bottom right of the main screen; the item carries a checkmark
-while it is up. Knips does no compositing — the camera is simply a window, and
-ScreenCaptureKit records it like any other. It floats above ordinary
-windows, follows you across Spaces, and stays up across recordings until
-you switch it off or quit.
+while it is up. The recorder picks it up because it is on screen, with no
+compositing step in between ([why](architecture.md#menu-bar-app)). It
+floats above ordinary windows, follows you across Spaces, and stays up
+across recordings until you switch it off or quit.
 
 **It is mirrored**, the way every camera preview you have ever used is:
 you raise your left hand and the picture's left hand goes up. Because the
@@ -357,16 +357,17 @@ rectangle sitting exactly on the window and following it as you drag it.
 The camera really is in the file.
 
 That same switch is what makes **the effects work on a window
-recording**. A plain window capture is a picture of something that moves
-under the recorder with no way to find out, so no pointer can be drawn
-back into it and no zoom can be computed for it — which is why a window
-take used to come out with the system pointer baked in and every effect
-greyed out. Captured from the display, it is a raw take like any other:
-Smooth Cursor, Big Cursor and Zoom on Click all apply, and can be changed
-afterwards in the playback window.
+recording**. A plain window capture is desktop-independent: nothing can
+work out afterwards where the window was, so no effect can be placed in
+it, which is why *Record Window* used to bake the system pointer in and
+grey the whole Effects control out
+([why](architecture.md#the-composited-window-recording)). Captured from
+the display, it is a raw take like any other: Smooth Cursor, Big Cursor
+and Zoom on Click all apply, and can be changed afterwards in the
+playback window.
 
-The price is that anything else in front of the window — a notification, a
-menu pulled down over it, another app dragged across — is in the file too.
+The price is that whatever sits on top of the window lands in the file
+too — a dropped-down menu, a notification, another app dragged across.
 Knips pays it only where it buys something: with the camera off *and* the
 pointer switched off in the Effects control *and* Zoom on Click off, a
 window recording goes back to capturing the window alone, because there
@@ -475,10 +476,12 @@ snapped to the requested rate, so an idle stretch stays idle instead of
 being padded out, and a steady one gets a steady cadence instead of
 alternating delays.
 
-A big export prints one line of advice to stderr — a canvas at or past
-1280×720, or a file past 20 MB. It suggests `--width=800` or `--fps=15`
-when those would help, and a shorter `--trim` when you are already at
-both. The file is still written and the exit code is still 0.
+A big export — a canvas of 1280×720 pixels or more, or 20 MB or over —
+prints one line of advice to stderr
+([why](architecture.md#the-export-pipeline)): it suggests `--width=800`
+or `--fps=15` when those would help, and a shorter
+`--trim` when you are already at both. The file is still written and the
+exit code is still 0.
 
 A source whose video track carries a rotation or mirroring matrix — a
 phone recording held sideways, say — is refused rather than exported the
@@ -589,8 +592,9 @@ refused by name unless `"overwrite": true` is passed. That includes
 `render`, whose CLI half deliberately does replace: a re-render with the
 wrong `in` would otherwise quietly destroy a deliverable already handed
 to somebody. The check runs *before* the render, so a refused call costs
-nothing, and an accepted one is still atomic — the movie is built as
-`<out>.knips-render-tmp` and renamed into place.
+nothing, and an accepted one is still atomic: a `.knips-render-tmp` file
+is renamed onto the deliverable only once it is whole
+([why](architecture.md#the-render-pass)).
 
 **No tool silently ignores an argument it cannot honour.** The SDK
 deliberately drops properties a schema does not declare, so an agent
@@ -619,24 +623,22 @@ A recording made with `"smooth_cursor": true` is a **raw take**: no
 pointer in its pixels, and an [event sidecar](event-sidecar.md) beside it
 holding the pointer track and the clicks. `render` turns one into a
 deliverable — the pointer drawn back, a zoom driven by the clicks, the
-audio copied rather than re-encoded — and leaves the take on disk, so the
-same recording can be rendered again with different effects for as long
-as it is kept. A take recorded *without* `smooth_cursor` has the pointer
-in its pixels for good.
+audio copied rather than re-encoded — and leaves the take on disk, so you
+can render it again later with a different set of effects
+([why](architecture.md#the-render-pass)). A take recorded *without*
+`smooth_cursor` has the pointer in its pixels for good.
 
 Two files per rendered take, then, and two sidecars:
 `knips-…-raw.mp4` + `knips-…-raw.knips.jsonl` from `record_stop`, and
 `knips-….mp4` + `knips-….knips.jsonl` from `render`. Nothing is ever
 deleted; the raw take is what makes the effects changeable.
 
-**`record_stop` does not render.** The menu-bar app renders on every stop
-because a person clicked once and wants a file; an agent is a different
-caller. A render is seconds of work with no progress a stdio client can
-see, it needs a second output path, and *which effects* is a decision the
-stop has no arguments for. So the stop stays cheap and predictable and
-hands back everything `render` needs — the take, its sidecar, the samples
-that arrived, and `render_output_path`. Call `render` when you want the
-deliverable.
+**`record_stop` does not render.** That is a decision rather than an
+omission — an agent is not the person who clicked the menu bar
+([why](architecture.md#the-mcp-server)). The stop stays cheap and
+predictable and hands back everything `render` needs: the take, its
+sidecar, the samples that arrived, and `render_output_path`. Call
+`render` when you want the deliverable.
 
 `render_output_path` is a **name, not a promise**: it says where a
 `render` with no `out` would write, and it is filled in even for a take
@@ -698,14 +700,14 @@ render in identical words.
 **The pointer track of an MCP recording is only as dense as your
 polling.** The stdio transport is a blocking read-handle-write loop, so
 nothing in this server runs between tool calls: the pointer is sampled
-once at the start, once per `record_status`, and once at the stop. A take
-polled twice has a three-sample track, and a smooth cursor drawn from
-three samples is a straight line. `record_start` says so in its `note`
-whenever `smooth_cursor` is on — there is no handshake in which a client
-could promise to poll, so the warning is unconditional rather than
-never-fired. Poll about once a second during a raw take. `record_stop`
-reports the `pointer_samples` that actually arrived, and `take_info`
-reports `max_sample_gap_seconds` beside `interpolation_limit_seconds`:
+once at the start, once per `record_status`, and once at the stop. Poll
+about once a second during a raw take, or the pointer in the rendered
+file will be a straight line — a pointer drawn from three samples is
+one too ([why](architecture.md#the-mcp-server)). `record_start` puts that in its
+`note` whenever `smooth_cursor` is on, unconditionally — nothing a client
+promises about polling can be checked. `record_stop` reports the
+`pointer_samples` that actually arrived, and `take_info` reports
+`max_sample_gap_seconds` beside `interpolation_limit_seconds`:
 the first above the second means some stretch of the rendered take will
 show a pointer standing still, because the reader holds the last known
 position across a silence rather than drawing a line through it.

@@ -1061,7 +1061,7 @@ end;
 
 // The Boolean rather than the pipeline's own stage enumeration: this unit
 // sits below the Darwin line and must not reach up into
-// Knips.Export.GifPipeline for a type.
+// Knips.Export.Pipeline for a type.
 function ExportPercent(AIsPalettePass: Boolean; AFramesDone,
   AFramesTotal: Int64): Integer;
 var
