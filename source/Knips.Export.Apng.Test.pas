@@ -206,6 +206,9 @@ var
   X, Y, Stride, Source, Row: Integer;
   FilterType, Left, Above, AboveLeft, Predicted: Integer;
 begin
+  // A managed result is not initialised on entry; SetLength on it is a
+  // read of whatever the caller's variable held.
+  Result := nil;
   Stride := AWidth * ApngBytesPerPixel;
   SetLength(Result, Stride * AHeight);
   Source := 0;
@@ -771,7 +774,12 @@ begin
 end;
 
 begin
-  GScratchDirectory := GetTempDir;
+  // Pid-qualified, like Knips.Recording.Recovery.Test's directory: two
+  // runs of this suite at once otherwise write the same fixture paths
+  // and read each other's half-written files.
+  GScratchDirectory := IncludeTrailingPathDelimiter(GetTempDir)
+    + 'knips-apng-test-' + IntToStr(GetProcessID);
+  ForceDirectories(GScratchDirectory);
   TestRunnerProgram.AddSuite(TApngStructureTests.Create('APNG structure'));
   TestRunnerProgram.AddSuite(TApngPixelTests.Create('APNG pixels'));
   TestRunnerProgram.Run;

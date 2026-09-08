@@ -2,12 +2,57 @@
 
 All notable changes to this project are documented here. Hand-maintained:
 entries are written for someone deciding whether they want the change,
-not transcribed from commit subjects. (`cliff.toml` is kept for the
-release-tagging step; it does not produce the entries below.)
+not transcribed from commit subjects. Nothing generates it — there was a
+`cliff.toml` in this repository, carried in from lantaarn, which named
+that project and was configured to overwrite this file from commit
+subjects; it has been deleted.
+
+The section vocabulary is [Keep a
+Changelog](https://keepachangelog.com/en/1.1.0/)'s: **Added**,
+**Changed**, **Fixed**, in that order.
 
 ## [Unreleased]
 
-### Features
+### Added
+
+- **Every file knips replaces is now replaced atomically, and a Ctrl-C
+  cannot cost you the one you already had.** The MP4 render already
+  built into a neighbour and renamed it into place; the GIF and APNG
+  exports and the passthrough trim did not — the export opened its sink
+  on your output path (a GIF's second pass truncated a perfectly good
+  animation before it encoded a frame) and the trim deleted your movie
+  before asking AVFoundation for a new one. All four share one
+  implementation now, and `export`, `render` and `export --trim` install
+  the stop-signal handler `record` had, poll it between frames, and fail
+  cleanly: the scratch is swept, the previous file is byte-for-byte
+  where it was, and the exit code is non-zero.
+- **A symbolic link at `--out` is refused by name.** It used to mean two
+  different disasters depending on the writer: `export` opened the path
+  and destroyed whatever the link pointed at while reporting success
+  against the link's own name, and `render` renamed over the link and
+  replaced it. One policy for `record`, `render`, `export` and the trim,
+  on the command line and over MCP.
+- `tools/release-gate.sh` runs the Definition of Done's six gates in
+  order — the pre-push four plus the release build and its probe — and
+  `lefthook.yml` gained the pre-push hook that was described in three
+  documents and existed in none of them: `lwpt format --check`, `lwpt
+  build`, `lwpt test`, `lwpt agents --check`, about a minute. There is no
+  CI service behind this repository and the documentation no longer
+  implies there is. The gate says on its way out that it has left
+  `build/knips` a release binary.
+- **`take_info`, `render` and the two exports report
+  `sidecar_skipped_lines`**, and `knips render` / `knips export` print
+  the same sentence when it is not zero. The sidecar reader is
+  deliberately tolerant — a truncated tail, a number that is not finite,
+  a stamp that does not advance are all skipped rather than fatal — and
+  until now the count of what it threw away was reachable only from
+  inside the loader. A pointer track with holes in it still renders; it
+  renders thinner than the file looks, and that is now something a
+  person and an agent can both see.
+- `knips probe --blur-cost` measures the camera background blur, which
+  is no longer measured on every probe: it gates nothing and was a large
+  share of the probe's wall time. The measurement now reports the
+  ACHIEVED frame rate beside the arithmetic one.
 
 - **An agent can record a take it can still change its mind about.** The
   MCP server had been frozen at the era before raw takes: it could record
@@ -58,7 +103,114 @@ release-tagging step; it does not produce the entries below.)
   scaled render would have got a full-size movie and no hint. Each
   refusal names the tool that can do the thing.
 
+### Changed
+
+- GIF palettes are built from an **exact-colour** histogram (a bounded
+  hash table of packed 24-bit colours, with the old 6-bit histogram kept
+  as the fallback past 2^20 distinct colours), median cut now splits the
+  box holding the most squared error, and nearest-colour lookups are
+  exact and memoised on the colour itself rather than answered per 6-bit
+  cell. On a 14 s 800×520 screen recording the dithered GIF went from
+  14.4 MB / 38.17 dB to 1.79 MB / 41.48 dB at unchanged encoding time —
+  8.1× smaller and 3.3 dB closer, against 1.30 MB / 42.50 dB for
+  ffmpeg's `palettegen`.
+- Frame delays are snapped to the decimation grid before being rounded,
+  so a 30 fps source exported at 20 fps gets a steady `5,5,5,…` instead
+  of `7,3,7,3,…`, while the total playback length stays on the source's
+  own (`Knips.Export.Timing`, tested). An idle gap longer than a two-byte
+  delay field can express is emitted at the ceiling with the remainder
+  forgiven rather than owed, so the frames *after* a very long pause keep
+  their true delays instead of being held at the maximum one by one.
+- `displays`, `windows`, and `probe` subcommands.
+- Runtime-built Objective-C classes (`Knips.ObjC.Runtime`) keeping the
+  default build linker-flag-free.
+
 ### Fixed
+
+- **A sidecar line the reader dropped could silently reframe the rest of
+  a take.** `sx/sy/sw/sh` are delta-encoded — the writer emits them only
+  on the sample that moves the source rectangle — and the reader carried
+  the rectangle forward from the last sample it had ACCEPTED. So a
+  record that announced a new rectangle and was then dropped (a stamp
+  that does not advance) took its rectangle with it, and every later
+  sample reverted to the header's base rectangle. Two sidecars differing
+  by one duplicate timestamp rendered to different pictures, with
+  nothing but a skipped-line count to say so. The rectangle is carried
+  in the reader's own state now, folded in before the stamp rule runs.
+- **`export_gif` and `export_apng` emitted six fields their output
+  schema never declared** — `palette_colors` (the single biggest fact
+  about what a GIF looks like), `exact_palette`, `sampled_frames`,
+  `synthesized_frames`, `synthesis_fps`, `unframed_frames`. A client
+  validating `structuredContent` strictly rejected a perfectly good
+  export; one planning against the schema could not see them at all.
+  They are declared and required now, and every structured result the
+  server returns is checked against its own tool's schema on the way
+  out, so the next payload to outgrow its schema says so on the first
+  call rather than at the next audit.
+- **`knips render` swept a symlink planted at its temporary path before
+  the guard that would have refused it.** No data was lost — the link
+  was unlinked, not followed — but the unit promises not to touch a link
+  at a path it writes, and this was the one place it did.
+- **The menu-bar app's log rotation followed a symlink.** The log is
+  opened `O_NOFOLLOW`, and the branch that starts the file over once it
+  passes a megabyte reopened it with `FileCreate`, which does not.
+- **A movie whose decoder produced a bigger picture than its header
+  claimed skipped the canvas budget.** The budget was checked against
+  the container's numbers, and the measured picture then overwrote them
+  for everything downstream to size its buffers from. It is checked
+  again after the measurement, and once more where the render sizes its
+  pixel-buffer pool.
+
+- **An export sized its buffers from the movie's header and believed
+  it.** An MP4 whose `tkhd` and `avc1` claim 30000x30000 over 800x600
+  media is one hex edit from any recording; exporting one reached 6.4 GB
+  resident for an APNG and past 7 GB for a GIF, and an 8000x8000 claim
+  *succeeded*, writing an "8000x8000" animation out of an 800x600 take.
+  There is a canvas budget now, checked in Int64 before a byte is
+  reserved and again inside the allocator, and the reader decodes one
+  real frame at open rather than taking the header's word for the
+  picture. The hostile file is refused in under a tenth of a second with
+  a message naming its dimensions.
+- **The crash sweep deleted files that were not its business** — an
+  ordinary `notes.knips-render-tmp.txt`, and, worse, the temporary of a
+  render running in another process. It ran unconditionally at every
+  `knips record` and every app launch. It now matches only the three
+  shapes a temporary's family takes and leaves any whose owning process
+  still answers `kill(pid, 0)`.
+- **`knips mcp` leaked memory and file descriptors for the life of the
+  process.** No tool handler had an autorelease pool, so every
+  AVFoundation factory object each session made was never drained:
+  measured at +19.5 MB and exactly +3 open files per
+  record → render → export cycle, without bound. Over fifteen cycles the
+  server went from 340 MB and 23 open files to 2.3 GB and 65; it now
+  stays flat at 20 and does not trend.
+- **A pointer track whose timestamps did not advance made a render
+  quadratic** — over MCP, on a synchronous server, that is the server.
+  The smoothing is linear now and the reader drops a sample whose stamp
+  does not advance, as a skipped line. The measured before and after are
+  in [docs/event-sidecar.md](docs/event-sidecar.md), *Sampling*, which is
+  the one place they are stated.
+- **A sidecar was read three times over and parsed twice per render**,
+  and `knips export --trim` parsed an entire pointer track to read one
+  field of its first line. The reader streams the file, the render lends
+  its already-parsed log to the pointer effect, and a header-only load
+  exists: on a 63 MB sidecar the trim went from 13.2 s and 461 MB to
+  0.06 s and 25 MB.
+- **`knips render` on a take it could apply nothing to wrote a
+  byte-identical duplicate and reported success.** It asked what the
+  take could take in principle rather than what actually applied, so a
+  take with one unusable click passed. `--effects=none` (and its MCP
+  spelling) still copies, because that is a request.
+- A 6K recording at 120 fps was encoded at 1 Mbit/s: the automatic bit
+  rate multiplied three Integers before reaching a Double and wrapped
+  negative, straight through the low clamp.
+- `--display=-5` recorded the main display without a word; a window id
+  of 4294967295 was printed and echoed back as `-1`; an out-of-range MCP
+  integer came back as `Tool execution failed: Range check error`
+  instead of a refusal naming the argument.
+- The menu-bar app's log is opened `O_NOFOLLOW`, the probe writes into
+  `$TMPDIR` rather than `$TEMP`, and the GIF encoder sizes its frame
+  buffers after its bounds check rather than before it.
 
 - **`knips render --out=demo.gif` no longer writes an MP4 called
   demo.gif.** The render pass encodes H.264 into a QuickTime-family
@@ -345,7 +497,6 @@ release-tagging step; it does not produce the entries below.)
   (rather than dying) where there is no window server; `knips app` refuses
   there with a message instead of aborting.
 
-### Fixes
 
 - **A sidecar with no `sampleHz` field read as a sample rate of
   1.5×10⁻³²². The reader's fallback went through `TJSONFloat(30)`, and a
@@ -473,9 +624,10 @@ release-tagging step; it does not produce the entries below.)
   `--width`, `--fps` or `--trim` would actually help.
 - `mcp`: the recorder as a Model Context Protocol server on stdin/stdout,
   over [pascal-mcp-sdk](https://github.com/frostney/pascal-mcp-sdk).
-  Eight tools — `list_displays`, `list_windows`, `record_start` /
-  `record_stop` / `record_status`, `export_gif`, `export_apng`,
-  `export_trim` — each running the CLI's own session classes with JSON
+  Ten tools — `list_displays`, `list_windows`, `take_info`,
+  `record_start` / `record_stop` / `record_status`, `render`,
+  `export_gif`, `export_apng`, `export_trim` — each running the CLI's
+  own session classes with JSON
   arguments in place of flags, refused by the same `Knips.Options`
   validation (with the flag names rewritten to the argument names the
   tool schemas actually declare). Recording is non-blocking: the server
@@ -496,25 +648,3 @@ release-tagging step; it does not produce the entries below.)
   and a writer that dies mid-recording is reported by `record_status`,
   which stops the session and says whether the partial file was
   finalised.
-
-### Improvements
-
-- GIF palettes are built from an **exact-colour** histogram (a bounded
-  hash table of packed 24-bit colours, with the old 6-bit histogram kept
-  as the fallback past 2^20 distinct colours), median cut now splits the
-  box holding the most squared error, and nearest-colour lookups are
-  exact and memoised on the colour itself rather than answered per 6-bit
-  cell. On a 14 s 800×520 screen recording the dithered GIF went from
-  14.4 MB / 38.17 dB to 1.79 MB / 41.48 dB at unchanged encoding time —
-  8.1× smaller and 3.3 dB closer, against 1.30 MB / 42.50 dB for
-  ffmpeg's `palettegen`.
-- Frame delays are snapped to the decimation grid before being rounded,
-  so a 30 fps source exported at 20 fps gets a steady `5,5,5,…` instead
-  of `7,3,7,3,…`, while the total playback length stays on the source's
-  own (`Knips.Export.Timing`, tested). An idle gap longer than a two-byte
-  delay field can express is emitted at the ceiling with the remainder
-  forgiven rather than owed, so the frames *after* a very long pause keep
-  their true delays instead of being held at the maximum one by one.
-- `displays`, `windows`, and `probe` subcommands.
-- Runtime-built Objective-C classes (`Knips.ObjC.Runtime`) keeping the
-  default build linker-flag-free.

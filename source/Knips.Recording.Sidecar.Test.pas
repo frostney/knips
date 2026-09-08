@@ -55,6 +55,9 @@ type
     procedure TestAnUnchangedRectangleIsNotRewritten;
     procedure TestTheReaderCarriesTheRectangleForward;
     procedure TestTheFirstRectangleComesFromTheHeader;
+    procedure TestTheStampRuleIsANamedPredicate;
+    procedure TestANonAdvancingStampIsDropped;
+    procedure TestADroppedRecordStillMovesTheRectangle;
   end;
 
   TResilienceTests = class(TTestSuite)
@@ -151,8 +154,12 @@ end;
 
 function TempSidecarPath(const AStem: string): string;
 begin
+  // Pid-qualified, like Knips.Recording.Recovery.Test's directory: two
+  // runs of this suite at once — a `lwpt test` and an editor's, or two
+  // worktrees — otherwise write the same fixture path and read each
+  // other's half-written file.
   Result := IncludeTrailingPathDelimiter(GetTempDir) + 'knips-sidecar-test-'
-    + AStem + SidecarExtension;
+    + IntToStr(GetProcessID) + '-' + AStem + SidecarExtension;
 end;
 
 function SampleHeader: TSidecarHeader;
@@ -502,6 +509,12 @@ begin
     TestTheReaderCarriesTheRectangleForward);
   Test('the first rectangle is the header''s base rectangle',
     TestTheFirstRectangleComesFromTheHeader);
+  Test('a stamp advances only when it is strictly later',
+    TestTheStampRuleIsANamedPredicate);
+  Test('a sample whose stamp does not advance is skipped',
+    TestANonAdvancingStampIsDropped);
+  Test('a dropped record''s rectangle still reaches the next sample',
+    TestADroppedRecordStillMovesTheRectangle);
 end;
 
 procedure TSourceRectTests.TestAnUnchangedRectangleIsNotRewritten;
@@ -573,6 +586,93 @@ begin
     ExpectNear(Log.Sample(0).SourceHeight, 400, Epsilon, 'base sh');
   finally
     Log.Free;
+  end;
+end;
+
+procedure TSourceRectTests.TestTheStampRuleIsANamedPredicate;
+begin
+  // The rule the format states, asked of the function that states it
+  // rather than of a comparison buried in ReadObject. Strictly later,
+  // so an equal stamp is a contradiction and not a tie.
+  Expect<Boolean>(SidecarSampleTimeAdvances(100.0, 100.1)).ToBe(True);
+  Expect<Boolean>(SidecarSampleTimeAdvances(100.0, 100.0)).ToBe(False);
+  Expect<Boolean>(SidecarSampleTimeAdvances(100.1, 100.0)).ToBe(False);
+  // The smallest advance a Double can express still advances: the rule
+  // is about order, not about a minimum interval.
+  Expect<Boolean>(SidecarSampleTimeAdvances(100.0, 100.0 + 1E-9))
+    .ToBe(True);
+end;
+
+procedure TSourceRectTests.TestANonAdvancingStampIsDropped;
+var
+  Log: TSidecarLog;
+begin
+  // Kept, dropped, kept — and the drop is a skipped line, not an error.
+  Log := LoadText(FixtureHeader + LineEnding + FixtureAnchor + LineEnding
+    + '{"k":"cursor","t":100.0,"x":1,"y":2,"b":0}' + LineEnding
+    + '{"k":"cursor","t":100.0,"x":3,"y":4,"b":0}' + LineEnding
+    + '{"k":"cursor","t":99.9,"x":5,"y":6,"b":0}' + LineEnding
+    + '{"k":"cursor","t":100.1,"x":7,"y":8,"b":0}');
+  try
+    Expect<Integer>(Log.SampleCount).ToBe(2);
+    Expect<Integer>(Log.SkippedLines).ToBe(2);
+    ExpectNear(Log.Sample(0).X, 1, Epsilon, 'first kept');
+    ExpectNear(Log.Sample(1).X, 7, Epsilon, 'last kept');
+  finally
+    Log.Free;
+  end;
+end;
+
+procedure TSourceRectTests.TestADroppedRecordStillMovesTheRectangle;
+var
+  Clean, Duplicate: TSidecarLog;
+  I: Integer;
+begin
+  // Two sidecars identical but for one duplicate stamp, and the
+  // duplicate lands on the ONE record that carries a rectangle. sx/sy/
+  // sw/sh are delta-encoded, so that record is the only place the new
+  // framing is written down; drop it and take the carried rectangle off
+  // the last ACCEPTED sample and every later sample silently reverts to
+  // the header's base rectangle — two files a byte apart rendering to
+  // different pictures, with nothing but SkippedLines to say so.
+  Clean := LoadText(FixtureHeader + LineEnding + FixtureAnchor + LineEnding
+    + '{"k":"cursor","t":100.0,"x":1,"y":2,"b":0}' + LineEnding
+    + '{"k":"cursor","t":100.1,"x":3,"y":4,"b":0,'
+    + '"sx":50,"sy":60,"sw":320,"sh":200}' + LineEnding
+    + '{"k":"cursor","t":100.2,"x":5,"y":6,"b":0}' + LineEnding
+    + '{"k":"cursor","t":100.3,"x":7,"y":8,"b":0}');
+  Duplicate := LoadText(FixtureHeader + LineEnding + FixtureAnchor
+    + LineEnding + '{"k":"cursor","t":100.0,"x":1,"y":2,"b":0}' + LineEnding
+    + '{"k":"cursor","t":100.0,"x":3,"y":4,"b":0,'
+    + '"sx":50,"sy":60,"sw":320,"sh":200}' + LineEnding
+    + '{"k":"cursor","t":100.2,"x":5,"y":6,"b":0}' + LineEnding
+    + '{"k":"cursor","t":100.3,"x":7,"y":8,"b":0}');
+  try
+    Expect<Integer>(Clean.SampleCount).ToBe(4);
+    Expect<Integer>(Clean.SkippedLines).ToBe(0);
+    // One line fewer, and the count says exactly that.
+    Expect<Integer>(Duplicate.SampleCount).ToBe(3);
+    Expect<Integer>(Duplicate.SkippedLines).ToBe(1);
+    // The framing the two agree on: the last two samples of each are the
+    // same two positions and must be read through the same rectangle.
+    for I := 0 to 1 do
+    begin
+      ExpectNear(Duplicate.Sample(I + 1).SourceX,
+        Clean.Sample(I + 2).SourceX, Epsilon, 'same sx');
+      ExpectNear(Duplicate.Sample(I + 1).SourceY,
+        Clean.Sample(I + 2).SourceY, Epsilon, 'same sy');
+      ExpectNear(Duplicate.Sample(I + 1).SourceWidth,
+        Clean.Sample(I + 2).SourceWidth, Epsilon, 'same sw');
+      ExpectNear(Duplicate.Sample(I + 1).SourceHeight,
+        Clean.Sample(I + 2).SourceHeight, Epsilon, 'same sh');
+    end;
+    // …and it is the rectangle the dropped record announced, not the
+    // header's base one, which is what the bug produced.
+    ExpectNear(Duplicate.Sample(1).SourceX, 50, Epsilon, 'moved sx');
+    ExpectNear(Duplicate.Sample(1).SourceWidth, 320, Epsilon, 'moved sw');
+  finally
+    Clean.Free;
+    Duplicate.Free;
   end;
 end;
 
@@ -1373,6 +1473,9 @@ function Ramp(ACount: Integer; ASpikeIndex: Integer;
 var
   I: Integer;
 begin
+  // A managed result is not initialised on entry; SetLength on it is a
+  // read of whatever the caller's variable held.
+  Result := nil;
   SetLength(Result, ACount);
   for I := 0 to ACount - 1 do
   begin
@@ -1502,8 +1605,12 @@ var
 begin
   Log := LoadText(FixtureHeader + LineEnding + FixtureAnchor);
   try
-    // 30 Hz in the fixture's header: fifteen intervals is half a second,
-    // and the floor is the same, so the answer is the floor.
+    // 30 Hz in the fixture's header: fifteen intervals is half a
+    // second, and the floor is the same, so the answer is the floor.
+    // Both spellings, because comparing the floor with itself is a
+    // tautology that would survive the floor moving to anything at all.
+    ExpectNear(Log.MaxInterpolatedGap, 0.5, 1E-9,
+      'the limit at 30 Hz, in seconds');
     ExpectNear(Log.MaxInterpolatedGap, MinInterpolatedGapSeconds, 1E-9,
       'the limit at 30 Hz');
   finally

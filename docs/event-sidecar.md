@@ -90,6 +90,33 @@ none.
 These are knips' numbers, not requirements of the format. Another reader
 should pick its own — but it should pick some.
 
+### What a skipped line is reported as
+
+Tolerance is not silence. A skipped line leaves the pointer track
+thinner than the file looks — the deliverable is correct and some
+stretch of it was drawn from fewer samples than the file appeared to
+offer — so the count comes out with the answer:
+
+- `knips render` and `knips export` print one line on standard error
+  when it is not zero;
+- the MCP `take_info`, `render`, `export_gif` and `export_apng` payloads
+  carry `sidecar_skipped_lines`, and their text blocks say it in words;
+- the menu-bar app writes it to `~/Library/Logs/Knips.log`.
+
+All four say it in the same sentence, from
+`Knips.Options.SidecarSkippedLinesNote`.
+
+**Delta encoding and dropped records.** `sx/sy/sw/sh` are written only
+on the sample that MOVES the source rectangle, so a reader carries the
+last named rectangle forward. That state must be kept independently of
+which samples were accepted: a record can announce a new rectangle and
+still be dropped by the rule above, and the rectangle it announced is
+still what the capture was reading from that moment on. Knips' own
+reader got this wrong once — it carried the rectangle forward from the
+last accepted sample, so two files differing by one duplicate timestamp
+rendered to different pictures. An infinite rectangle is the one thing
+never carried: that record is dropped and the previous rectangle stands.
+
 ## The clock
 
 Every time in the file — `t` on a sample, `host` on the anchor — is
@@ -179,6 +206,31 @@ Nothing about the sidecar runs on ScreenCaptureKit's capture queue.
 - `sampleHz` in the header is the **target**, not a promise. The CLI's loop
   achieves about 27 Hz in practice (the run-loop slice plus the sampling
   work); a busy run loop achieves less.
+- **`t` strictly increases within a track, and a reader may rely on it.**
+  A `cursor` record whose `t` is not greater than the one before it is
+  not a later position, it is a contradiction, and knips' own reader
+  drops it as a skipped line. Writers must not emit one. This is not
+  pedantry: the reader binary-searches the track, walks it to
+  interpolate, and slides one window along it to smooth it, and a track
+  of identical stamps turned that last pass quadratic. **This is the one
+  place those numbers are written down**; the code comments and the
+  changelog point here rather than restating them, because two sets of
+  them in three files is how they came to disagree.
+
+  Measured on this machine at the time of the fix, rendering a movie
+  under four seconds long: 40,000 identical stamps took **24.5 s** before
+  and **3.3 s** after; a million took **865 s** (about fourteen minutes)
+  before and **17.1 s** after. An earlier audit measured the same
+  before-case at 68 s and 259 s on a differently loaded machine — the
+  same shape, a different constant, which is what a quadratic looks like
+  when the machine is doing something else. What matters is not the
+  constant: a track of 40,000 contradictory stamps is 22 minutes of
+  sampling at 30 Hz, so the pre-fix cost was superlinear in something a
+  file can simply assert.
+- **A sidecar knips will read is at most 64 MB.** A file is one short
+  line per sample, so an hour at 30 Hz is about 11 MB and the cap is six
+  hours of continuous sampling. Past it the file is refused with a
+  message rather than loaded, because loading is what costs the memory.
 - **Readers must use each sample's own `t` and never assume a spacing.**
   Interpolating between the two samples that bracket a time is the
   supported way to ask where the pointer was — **up to a point.** A gap
@@ -189,7 +241,12 @@ Nothing about the sidecar runs on ScreenCaptureKit's capture queue.
   **capped at two** (`TSidecarLog.MaxInterpolatedGap`) — the cap because
   `sampleHz` is a number in a file somebody else may have written, and a
   header declaring 0.05 Hz must not be able to buy itself a five-minute
-  licence to draw a straight line. It **holds the earlier sample's
+  licence to draw a straight line. There is a **third** guard, and it is
+  a floor on the rate rather than on the answer: a `sampleHz` below
+  `MinBelievableSampleHz` (0.01, one sample every hundred seconds) is
+  not a claim about sampling at all, so the division is not performed
+  and the floor stands. Dividing by a denormal overflows before the cap
+  above can see the answer — measured, on a rate of 1.5×10⁻³²². It **holds the earlier sample's
   position** until the track speaks again, then snaps. Holding claims
   only what the track actually says; the snap is the honest shape of
   "nobody was watching in between". A lerp instead draws a pointer
@@ -200,7 +257,14 @@ Nothing about the sidecar runs on ScreenCaptureKit's capture queue.
   deliberately.
 - An **MCP** recording is the sparse case: the stdio transport is a
   blocking read/handle/write loop, so between tool calls nothing runs on
-  the main thread at all. Those takes get a sample at the start, one per
+  the main thread at all. **This is a cost decision, not a threading
+  rule.** A GCD timer sampling into the session under the one mutex the
+  capture queue already takes would be perfectly legal here — nothing
+  about the no-`cthreads` build forbids it — but it means a dispatch
+  source, a second writer of the sample array and a reason to reason
+  about ordering, for a track a client can densify itself by polling.
+  Until somebody wants a dense MCP track more than they want the
+  simplicity, the server samples where it is already running. Those takes get a sample at the start, one per
   `record_status` call, and one at the stop. The times are still exact;
   there are simply fewer of them. That matters more than it used to:
   `record_start` takes `smooth_cursor`, so an agent can record a raw take
@@ -390,9 +454,13 @@ is not a click into it.
  "samples":1638,"recovered":false}
 ```
 
-`frames` is how many frames reached the movie, `duration` is the movie's
-own length in seconds (last frame PTS minus first), and `samples` is how
-many `cursor` records were written. `recovered` is `true` when this trailer
+`t` is on the same host clock every other record carries — the instant
+the recording was finalised, which is at or after the last `cursor`
+record's own `t` and is **not** the movie's end: the movie ends at its
+last frame, and finalising happens after it. `frames` is how many frames
+reached the movie, `duration` is the movie's own length in seconds (last
+frame PTS minus first), and `samples` is how many `cursor` records were
+written. `recovered` is `true` when this trailer
 was written by the recovery pass rather than by the recording itself — and
 on one of those `frames` is `0` rather than a count, for the reason under
 *Recovery*.
@@ -520,8 +588,10 @@ both matter to anything that runs the recovery test over a directory:
   It also means the deliverable's `frames` is a real count while the raw
   take's beside it is `0`.
 
-Everything else is carried across unchanged, and one thing deliberately is
-not:
+The `knips` field is rewritten too: the deliverable's sidecar names the
+version of knips that RENDERED it, which is not necessarily the one that
+recorded the take beside it. Everything else is carried across
+unchanged, and one thing deliberately is not:
 
 - **the anchor is still exact.** The render copies each *source* frame's
   presentation stamp verbatim (`CMTime`, not seconds — a stamp taken

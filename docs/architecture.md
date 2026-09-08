@@ -26,7 +26,6 @@
   for as long as it is open the process switches to the `Regular` policy
   — a Dock tile, a place in ⌘-Tab, and a menu bar with ⌘W and ⌘Q. See
   [Menu bar app](#menu-bar-app).
-  GIF export. See [Menu bar app](#menu-bar-app).
 - **A recording is raw pixels and open metadata; the deliverable is
   rendered.** The menu-bar app records a *raw take* — ScreenCaptureKit's
   pointer switched off, the framing left alone, everything the recorder
@@ -156,14 +155,15 @@ and the tested one was the obvious choice.
 
 `knips mcp` is a third front end onto the same machine, beside the CLI
 and the menu-bar app, and it is built the same way: `Knips.Mcp.Params`
-turns a `tools/call` arguments object into a `TRecordingOptions` or
-`TExportOptions` and hands it to `ValidateRecordingOptions` /
+turns a `tools/call` arguments object into a `TRecordingOptions`, a
+`TExportOptions` or a `TExportEffects` and hands it to `ValidateRecordingOptions` /
 `ValidateExportOptions`, so an agent and a shell user are refused for
 identical reasons. (The messages are rewritten once at that boundary —
 `--fps` becomes `fps` — because a refusal naming a flag sends an agent
 looking for an argument its schema never declared.) `Knips.Mcp` then
-runs the same `TRecordingSession`, `TExportSession`, and
-`TMovieTrimSession` the other two front ends do. The neutral half has a
+runs the same `TRecordingSession`, `TExportSession`, `TRenderSession`
+and `TMovieTrimSession` the other two front ends do — `render` included,
+so an MCP tool and a subcommand are one implementation. The neutral half has a
 co-located suite and runs on Linux CI; the Darwin half compiles
 everywhere and refuses in-band off macOS, so the tool list an agent
 discovers is the same list on every host.
@@ -246,6 +246,16 @@ promise it can never be given; `record_stop` then reports the samples
 that actually arrived, and `take_info` the largest gap between them
 beside the longest gap a reader will draw through. Warned up front,
 measured afterwards.
+
+Self-sampling — a GCD timer of the server's own, writing into the
+session under the mutex the capture queue already takes — is deferred on
+COST, not because the threading rules forbid it. They do not: the queue
+rules (no exceptions, no `WriteLn`, no managed writes outside a
+`TPThreadMutex`) are satisfiable by such a timer, and the recorder
+already runs one for the app. What it buys is a denser track for a
+client that could have polled for one; what it costs is a dispatch
+source, a second writer of the sample array, and an ordering question in
+a file format whose whole contract is that `t` increases.
 
 The protocol comes from
 [pascal-mcp-sdk](https://github.com/frostney/pascal-mcp-sdk) (FPC RTL +
@@ -626,6 +636,21 @@ Five decisions carry most of the weight:
   the same 1800×1000 → 800×444 frame, fixed point is 42 ms a frame
   against 68, and unlike the floating-point version it is bit-identical
   on every host, so the neutral suite can assert exact bytes.
+
+  **The box factor is latched once per export, from the uncropped
+  frame.** It used to be derived per call, from that frame's own source
+  dimensions — and a post-hoc Zoom on Click shrinks the source crop
+  while the target stays the size it is, so a zoom whose crop walked
+  past the 2x threshold switched kernels *in the middle of the
+  animation*: box-then-bicubic on one frame and bicubic alone on the
+  next, which is a visible change of sharpness in a sequence that should
+  only be getting closer. The latched factor is clamped per frame so the
+  box pass can never reduce below the destination, and a crop small
+  enough that even a factor of 2 would is one where a box pass is not
+  possible at all — a change of situation rather than an accident of
+  rounding. (The render's own scaler is vImage's Lanczos rather than
+  this, and that two-kernel split stays deferred and documented: an MP4
+  and a GIF of the same take are scaled by different code.)
 
   When the box pass lands *on* the target size there is no second pass
   at all — the export is one integer average and stops. That is not a
@@ -1181,7 +1206,9 @@ display.
 submenu. A separate delegate class would carry no extra state, and the
 target is already the object every menu item points at. What that
 delegate is allowed to do inside menu tracking is spelled out under
-[Deferrals](#deferrals-1) below.
+**Deferrals** later in [Menu bar app](#menu-bar-app) — a bold paragraph
+rather than a heading, which is why the anchor this line used to carry
+(`#deferrals-1`) resolved to nothing at all.
 
 **Which windows the submenu offers.** On screen, layer 0, at least 32
 points each way, titled, and **not owned by this process** — decided by

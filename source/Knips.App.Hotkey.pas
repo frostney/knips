@@ -124,6 +124,18 @@ function CheckStopHotKey(out ADetail: string; out AError: string): Boolean;
 
 implementation
 
+// The constants Knips.App.State declares against the headers this unit
+// includes, checked where a constant comparison belongs: at compile
+// time. Both sides are literal constants, so the old runtime `if` could
+// only ever be folded away — and was, into the unreachable-code warning
+// that was this project's only one.
+{$IF StopHotKeyVirtualCode <> kVK_ANSI_2}
+  {$ERROR StopHotKeyVirtualCode no longer matches kVK_ANSI_2}
+{$ENDIF}
+{$IF StopHotKeyCarbonModifiers <> (cmdKey or shiftKey)}
+  {$ERROR StopHotKeyCarbonModifiers no longer matches cmdKey or shiftKey}
+{$ENDIF}
+
 {$IFDEF DARWIN}
 
 const
@@ -300,18 +312,15 @@ begin
     // Read back rather than assumed: the constants are the half of this
     // that a toolchain change could quietly move, and a hotkey registered
     // on the wrong key code would look exactly like a hotkey that does
-    // not work.
+    // not work. The comparison itself is at the top of the
+    // implementation now, as a `{$IF}`: it was two constants compared at
+    // RUN time, which the compiler folded to a constant False and then
+    // warned about as unreachable code — the build's own warning that a
+    // check was not checking anything. A mismatch is a compile error, so
+    // it cannot reach a probe at all.
     ADetail := Format('%s registered and released (virtual key %d, '
       + 'modifiers %d = cmdKey %d + shiftKey %d)', [StopHotKeyDisplay,
       StopHotKeyVirtualCode, StopHotKeyCarbonModifiers, cmdKey, shiftKey]);
-    if (StopHotKeyVirtualCode <> kVK_ANSI_2)
-      or (StopHotKeyCarbonModifiers <> (cmdKey or shiftKey)) then
-    begin
-      AError := Format('the hotkey constants no longer match the headers: '
-        + 'kVK_ANSI_2 is %d and cmdKey or shiftKey is %d',
-        [kVK_ANSI_2, cmdKey or shiftKey]);
-      Exit;
-    end;
     Result := True;
   finally
     // Always: the probe must not leave the chord held by a process that

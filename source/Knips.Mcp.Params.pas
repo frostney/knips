@@ -23,6 +23,7 @@ uses
   SysUtils,
 
   fpjson,
+  jsonparser,
   Knips.App.State,
   Knips.Export.ZoomTrack,
   Knips.Options,
@@ -44,7 +45,6 @@ const
   // raw-take model exists to keep (and TRenderSession refuses in = out
   // outright anyway).
   RenderedFileSuffix = '-rendered';
-  ApngFileExtension = '.apng';
 
 type
   TKnipsMcpTool = (kmtListDisplays, kmtListWindows, kmtTakeInfo,
@@ -69,6 +69,41 @@ function KnipsMcpToolDescription(ATool: TKnipsMcpTool): string;
 // three different answers, and the notes are present only when there is
 // something to say.
 function KnipsMcpOutputSchema(ATool: TKnipsMcpTool): string;
+
+type
+  TMcpKeyArray = array of string;
+
+// The property names ATool's output schema declares, in the order the
+// schema declares them.
+function KnipsMcpSchemaProperties(ATool: TKnipsMcpTool): TMcpKeyArray;
+
+// The keys of APayload that ATool's output schema does NOT declare, as
+// one comma-separated list; '' when every key is declared, which is the
+// only acceptable answer.
+//
+// This is the check that closes a whole class of bug rather than one
+// instance of it. The schemas are hand-written JSON and the payloads are
+// hand-written TJSONObject.Create lists, and for as long as the only
+// thing tying the two together was a person reading both, they drifted:
+// export_gif and export_apng emitted six fields — the palette a GIF was
+// quantised to among them — that their schema never declared, so a
+// client validating in strict mode rejected a good export and one
+// planning against the schema could not see them at all.
+//
+// A hand-maintained table of "the keys this tool emits" would be a
+// SECOND list that can drift from the builder in exactly the way the
+// schema did. Checking the real payload against the real schema cannot:
+// there is nothing left to keep in step. Knips.Mcp routes every
+// structured result through it (KnipsStructuredResult), so the first
+// call to a tool whose payload has outgrown its schema is the call that
+// says so — and this unit's suite drives it directly, on every host,
+// over the payload builders that are neutral.
+//
+// Deliberately not fatal. A key the schema forgot is a mistake in this
+// program and never in the client's request; dropping a caller's numbers
+// to punish it would turn a documentation bug into data loss.
+function McpUndeclaredPayloadKeys(ATool: TKnipsMcpTool;
+  APayload: TJSONObject): string;
 
 // Optional scalar readers. Absent leaves AValue alone and returns True;
 // present-but-wrong-type returns False with a message naming the
@@ -172,11 +207,6 @@ function McpRecordingSummary(const APath: string; APixelWidth,
   APixelHeight: Integer; ADurationSeconds: Double; AFrames,
   ADropped, AFailed: Int64): string;
 
-// The one-line summary a finished GIF/APNG export reports back.
-function McpExportSummary(const APath: string; AFormat: TExportFormat;
-  APixelWidth, APixelHeight: Integer; AFrames: Int64;
-  ADurationSeconds: Double; AOutputBytes: Int64): string;
-
 // What record_start says about the pointer track it is about to write,
 // or '' when there is nothing to say.
 //
@@ -195,6 +225,19 @@ function McpExportSummary(const APath: string; AFormat: TExportFormat;
 // actually arrived and take_info the largest gap between them, so the
 // claim is measured as well as made.
 function McpSparseTrackNote(ASmoothCursor: Boolean): string;
+
+// What record_start says about the tidying up it did on the way in: a
+// take an earlier process left unfinished, and the scratch a killed
+// render left behind. '' when there was nothing to do, which is the
+// usual case — the note exists because a directory that keeps producing
+// either is telling the client something, and this face had no way to
+// say it at all.
+function McpRecoveryNote(ARecoveredTakes, ASweptTemporaries: Integer): string;
+
+// Whether these render arguments ask, in so many words, for a copy —
+// the MCP spelling of `--effects=none`: cursor "none", and zoom either
+// absent or false. See Knips.Export.Render's ExplicitCopy.
+function McpRequestsCopy(AArguments: TJSONObject): Boolean;
 
 // Arguments the render tool has no use for, refused rather than
 // dropped.
@@ -326,6 +369,7 @@ const
     + '"finished":{"type":"boolean"},"reason":{"type":"string"},'
     + '"cursor_reason":{"type":"string"},"zoom_reason":{"type":"string"},'
     + '"sidecar_error":{"type":"string"},'
+    + '"sidecar_skipped_lines":{"type":"integer"},'
     + '"render_output_path":{"type":"string"}},'
     + '"required":["path","bytes","sidecar_path","has_sidecar","raw",'
     + '"fully_renderable","can_draw_cursor","can_zoom_on_click",'
@@ -388,6 +432,7 @@ const
     + '"audio_passthrough":{"type":"boolean"},'
     + '"elapsed_seconds":{"type":"number"},'
     + '"realtime_factor":{"type":"number"},'
+    + '"sidecar_skipped_lines":{"type":"integer"},'
     + '"sidecar_path":{"type":"string"},"framing_note":{"type":"string"},'
     + '"cursor_note":{"type":"string"},"zoom_note":{"type":"string"}},'
     // Every key the handler emits on every successful path, which is the
@@ -401,7 +446,8 @@ const
     + '"zoom_applied","zoomed_frames","clicks","cursor_drawn",'
     + '"cursor_frames","cursor_off_frame_frames","synthesized_frames",'
     + '"synthesis_fps","unframed_frames","audio_tracks","audio_samples",'
-    + '"audio_passthrough","elapsed_seconds","realtime_factor"]}';
+    + '"audio_passthrough","elapsed_seconds","realtime_factor",'
+    + '"sidecar_skipped_lines"]}';
   ExportOutputSchema =
     '{"type":"object","properties":{"path":{"type":"string"},'
     + '"format":{"type":"string"},"width":{"type":"integer"},'
@@ -413,6 +459,20 @@ const
     + '"cursor_drawn":{"type":"boolean"},'
     + '"cursor_frames":{"type":"integer"},'
     + '"cursor_off_frame_frames":{"type":"integer"},'
+    // The six the handler had been emitting all along and this schema
+    // did not declare — the palette a GIF was quantised to, how much of
+    // the take was sampled for it, the frames synthesised and the
+    // cadence they were made at, and the frames the pointer track could
+    // not place. A client validating against this schema in strict mode
+    // rejected a perfectly good export; one reading it to plan against
+    // could not see the single biggest fact about a GIF.
+    + '"palette_colors":{"type":"integer"},'
+    + '"exact_palette":{"type":"boolean"},'
+    + '"sampled_frames":{"type":"integer"},'
+    + '"synthesized_frames":{"type":"integer"},'
+    + '"synthesis_fps":{"type":"integer"},'
+    + '"unframed_frames":{"type":"integer"},'
+    + '"sidecar_skipped_lines":{"type":"integer"},'
     + '"framing_note":{"type":"string"},"cursor_note":{"type":"string"},'
     + '"zoom_note":{"type":"string"},'
     // As RenderOutputSchema: everything the handler always emits.
@@ -421,7 +481,9 @@ const
     + '"advice":{"type":"string"}},"required":["path","format","width",'
     + '"height","frames","duration_seconds","bytes","zoom","cursor",'
     + '"zoom_applied","zoomed_frames","clicks","cursor_drawn",'
-    + '"cursor_frames","cursor_off_frame_frames"]}';
+    + '"cursor_frames","cursor_off_frame_frames","palette_colors",'
+    + '"exact_palette","sampled_frames","synthesized_frames",'
+    + '"synthesis_fps","unframed_frames","sidecar_skipped_lines"]}';
   TrimOutputSchema =
     '{"type":"object","properties":{"path":{"type":"string"},'
     + '"start_seconds":{"type":"number"},"end_seconds":{"type":"number"},'
@@ -448,6 +510,64 @@ end;
 function KnipsMcpOutputSchema(ATool: TKnipsMcpTool): string;
 begin
   Result := ToolOutputSchemas[ATool];
+end;
+
+function KnipsMcpSchemaProperties(ATool: TKnipsMcpTool): TMcpKeyArray;
+var
+  Schema: TJSONObject;
+  Properties: TJSONData;
+  I: Integer;
+begin
+  Result := nil;
+  // The schema is a constant in this unit and its suite parses every one
+  // of them, so a parse failure here cannot happen in a build that
+  // passes its tests. An empty list is still the safe answer to one:
+  // it makes the caller report every key rather than none.
+  Schema := nil;
+  try
+    Schema := GetJSON(ToolOutputSchemas[ATool]) as TJSONObject;
+  except
+    on EJSON do
+      Exit;
+  end;
+  try
+    Properties := Schema.Find('properties');
+    if (Properties = nil) or (Properties.JSONType <> jtObject) then
+      Exit;
+    SetLength(Result, TJSONObject(Properties).Count);
+    for I := 0 to TJSONObject(Properties).Count - 1 do
+      Result[I] := TJSONObject(Properties).Names[I];
+  finally
+    Schema.Free;
+  end;
+end;
+
+function McpUndeclaredPayloadKeys(ATool: TKnipsMcpTool;
+  APayload: TJSONObject): string;
+var
+  Declared: TMcpKeyArray;
+  I, J: Integer;
+  Found: Boolean;
+begin
+  Result := '';
+  if APayload = nil then
+    Exit;
+  Declared := KnipsMcpSchemaProperties(ATool);
+  for I := 0 to APayload.Count - 1 do
+  begin
+    Found := False;
+    for J := Low(Declared) to High(Declared) do
+      if Declared[J] = APayload.Names[I] then
+      begin
+        Found := True;
+        Break;
+      end;
+    if Found then
+      Continue;
+    if Result <> '' then
+      Result := Result + ', ';
+    Result := Result + APayload.Names[I];
+  end;
 end;
 
 function McpHasArgument(AArguments: TJSONObject;
@@ -483,6 +603,20 @@ begin
   begin
     AError := Format('"%s" must be a whole number, not %s',
       [AName, Data.AsString]);
+    Exit(False);
+  end;
+  // Bounds BEFORE the assignment, the way the sidecar's own
+  // ReadIntegerField does it. Without this, `{"width": 4294971392}`
+  // reached `AValue: Integer` as a truncating Int64 assignment and came
+  // back to the client as `Tool execution failed: Range check error` —
+  // a leaked implementation detail where a refusal naming the argument
+  // belonged. Every value this surface takes is a pixel count, a rate
+  // or an index, so a 32-bit signed range is the whole of the domain;
+  // the per-argument minimum and maximum are checked afterwards, by
+  // Knips.Options, which is where they live.
+  if (Data.AsFloat < Low(Integer)) or (Data.AsFloat > High(Integer)) then
+  begin
+    AError := Format('"%s" is out of range: %s', [AName, Data.AsString]);
     Exit(False);
   end;
   AValue := Data.AsInt64;
@@ -595,27 +729,30 @@ end;
 // actually use. Inside a path or a quoted extension, a flag-looking run
 // is preceded by '.', '/', or '"' and passes through untouched.
 const
-  RewriteCount = 29;
+  RewriteCount = 31;
   McpMessageRewrites: array[0..RewriteCount - 1, 0..1] of string = (
-    ('--scale must be 1, 2, or 0 for auto',
-      'scale must be "auto", "1", or "2"'),
-    // The three cursor refusals, as whole sentences. A token-for-token
+    // Built from Knips.Options's own constant, not retyped: it used to
+    // be a literal here while the producer composed it with Format, so
+    // a change to ScaleAuto would have broken the match silently.
+    (ScaleRefusal, 'scale must be "auto", "1", or "2"'),
+    // The three cursor refusals, as whole clauses. A token-for-token
     // rewrite of these produces "cursor and big_cursor are mutually
     // exclusive", which is true of the flags and useless as advice: the
     // JSON argument is a BOOLEAN, so the client has to be told which
     // value of which key to change, not which two words disagree.
+    //
+    // Only the naming half is rewritten now. The EXPLANATION that used
+    // to be added here is in Knips.Options's own message, where a
+    // person at the command line gets it too, and it passes through
+    // this rewrite untouched.
     ('--no-cursor and --big-cursor are mutually exclusive',
-      '"cursor": false and "big_cursor": true are mutually exclusive: '
-      + 'one asks for no pointer and the other for a bigger one. Pass '
-      + 'exactly one of them'),
+      '"cursor": false and "big_cursor": true are mutually exclusive'),
     ('--no-cursor and --smooth-cursor are mutually exclusive',
-      '"cursor": false and "smooth_cursor": true are mutually exclusive: '
-      + 'one asks for no pointer at all and the other leaves the movie '
-      + 'cursorless so that render can draw one back in'),
+      '"cursor": false and "smooth_cursor": true are mutually '
+      + 'exclusive'),
     ('--big-cursor and --smooth-cursor are mutually exclusive',
       '"big_cursor": true and "smooth_cursor": true are mutually '
-      + 'exclusive: one bakes an enlarged pointer into the movie and the '
-      + 'other leaves the movie cursorless for a later render'),
+      + 'exclusive'),
     ('--effects=none cannot be combined with another effect',
       'an empty effect list cannot be combined with another effect'),
     ('--window and --rect are mutually exclusive',
@@ -630,6 +767,14 @@ const
     ('--trim=1.5,3.5', 'trim_start=1.5 and trim_end=3.5'),
     ('--trim=0,3.5', 'trim_start=0 and trim_end=3.5'),
     ('--trim starts at', 'trim_start is at'),
+    // Whole sentences, each naming the ONE argument at fault. The bare
+    // '--trim' entry below rewrites to 'trim_start/trim_end', which on
+    // these two produced "trim_start/trim_end cannot start before
+    // zero" — a refusal that names both arguments and blames neither.
+    ('--trim cannot start before zero',
+      'trim_start cannot be negative'),
+    ('--trim must end after it starts',
+      'trim_end must be greater than trim_start'),
     ('--rect', 'a region of left/top/width/height'),
     ('--trim', 'trim_start/trim_end'),
     ('--no-dither', 'dither'),
@@ -666,7 +811,12 @@ function McpArgumentMessage(const AMessage: string): string;
   function BoundaryAfter(APosition: Integer): Boolean;
   begin
     Result := (APosition > Length(AMessage))
-      or (AMessage[APosition] in [' ', '=', ',', ')', ';']);
+      // ':' among them: a refusal that names the flags and then
+      // explains itself — '--no-cursor and --big-cursor are mutually
+      // exclusive: one asks for…' — has to match on the clause, or the
+      // two bare flag entries match instead and the sentence comes back
+      // as 'cursor and big_cursor are mutually exclusive: …'.
+      or (AMessage[APosition] in [' ', '=', ',', ')', ';', ':']);
   end;
 
 var
@@ -1019,13 +1169,40 @@ begin
     ADurationSeconds, AFrames, ADropped, AFailed]);
 end;
 
-function McpExportSummary(const APath: string; AFormat: TExportFormat;
-  APixelWidth, APixelHeight: Integer; AFrames: Int64;
-  ADurationSeconds: Double; AOutputBytes: Int64): string;
+function McpRequestsCopy(AArguments: TJSONObject): Boolean;
+var
+  Cursor: string;
+  Zoom: Boolean;
+  Error: string;
 begin
-  Result := Format('wrote %s: %s, %dx%d, %d frames, %.1fs, %d kB',
-    [APath, ExportFormatName(AFormat), APixelWidth, APixelHeight, AFrames,
-    ADurationSeconds, AOutputBytes div 1024]);
+  Result := False;
+  if not McpHasArgument(AArguments, 'cursor') then
+    Exit;
+  Cursor := '';
+  if not McpOptionalString(AArguments, 'cursor', Cursor, Error) then
+    Exit;
+  if LowerCase(Trim(Cursor)) <> 'none' then
+    Exit;
+  Zoom := False;
+  if not McpOptionalBoolean(AArguments, 'zoom', Zoom, Error) then
+    Exit;
+  Result := not Zoom;
+end;
+
+function McpRecoveryNote(ARecoveredTakes,
+  ASweptTemporaries: Integer): string;
+begin
+  Result := '';
+  if ARecoveredTakes > 0 then
+    Result := Format('%d earlier recording(s) had not been finished off '
+      + 'and were recovered', [ARecoveredTakes]);
+  if ASweptTemporaries > 0 then
+  begin
+    if Result <> '' then
+      Result := Result + '; ';
+    Result := Result + Format('%d leftover render scratch file(s) removed',
+      [ASweptTemporaries]);
+  end;
 end;
 
 function McpSparseTrackNote(ASmoothCursor: Boolean): string;
@@ -1186,6 +1363,12 @@ begin
   // A take with no trailer did not finish: the process died, and the
   // recovery pass has not been over it yet.
   Result.Add('finished', ALog.HasTrailer);
+  // How much of the file the loader could not use. Zero on a clean
+  // sidecar, and the one number that says a pointer track is thinner
+  // than its file looks — a truncated tail, a number that is not
+  // finite, a stamp that does not advance. The loader is deliberately
+  // tolerant of all three and says nothing about it on its own.
+  Result.Add('sidecar_skipped_lines', ALog.SkippedLines);
   if ALog.HasTrailer then
   begin
     Result.Add('duration_seconds', ALog.Trailer.DurationSeconds);
@@ -1198,6 +1381,7 @@ function McpTakeInfoSummary(const AMoviePath: string; ALog: TSidecarLog;
 var
   Available: TSidecarEffectAvailability;
   Effects: string;
+  Gap: Double;
 begin
   Available := AvailableExportEffects(ALog);
   if ALog = nil then
@@ -1235,13 +1419,20 @@ begin
   // take a pointer can still be drawn into: a baked take's track is
   // nothing anybody will render from, and "poll record_status" is no
   // advice for a file this server did not record.
-  if Available.CanDrawCursor
-    and (LargestSampleGap(ALog) > ALog.MaxInterpolatedGap) then
+  // Walked once. Three calls used to walk the whole track between them
+  // — twice here and once in the structured answer — for one number.
+  Gap := LargestSampleGap(ALog);
+  if Available.CanDrawCursor and (Gap > ALog.MaxInterpolatedGap) then
     Result := Result + Format('. Its pointer track has a %.1fs gap, '
       + 'longer than the %.1fs a reader will draw a straight line '
       + 'through, so a drawn pointer stands still across it rather than '
       + 'gliding — poll record_status more often for a denser track',
-      [LargestSampleGap(ALog), ALog.MaxInterpolatedGap]);
+      [Gap, ALog.MaxInterpolatedGap]);
+  // And what the loader threw away, in the sentence every other face
+  // uses for it.
+  if ALog.SkippedLines > 0 then
+    Result := Result + '. '
+      + SidecarSkippedLinesNote(ALog.SkippedLines);
 end;
 
 end.

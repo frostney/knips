@@ -2,7 +2,11 @@
 
 ## Executive Summary
 
-- Prereqs: macOS on Apple silicon, FPC 3.2.2, lwpt ≥ 0.7.0 on PATH.
+- Prereqs: macOS on Apple silicon, FPC 3.2.2, lwpt on PATH — **0.6.0 is
+  what this repo is developed against and it runs every gate**, `lwpt
+  agents` included. The `^0.7.0` in `lwpt.toml` is a different number:
+  it is the release tag the `cli` and `testing` packages are fetched
+  from, not a requirement on the binary doing the fetching.
 - `lwpt install` → `lwpt build` → `./build/knips probe` → `./build/knips
   record --out=demo.mp4`, Ctrl-C to stop.
 - `./build/knips app` is the menu-bar version: click the icon, drag a

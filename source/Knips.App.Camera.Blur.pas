@@ -463,7 +463,6 @@ const
   OutputClassName = 'KnipsCameraOutput';
   OutputSuperclassName = 'NSObject';
   OutputProtocolName = 'AVCaptureVideoDataOutputSampleBufferDelegate';
-  OwnerIvarName = 'knipsOwner';
   SampleSelector = 'captureOutput:didOutputSampleBuffer:fromConnection:';
   QueueLabel = 'knips.camera.blur';
 

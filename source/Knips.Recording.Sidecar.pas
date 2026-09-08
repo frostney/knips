@@ -129,6 +129,13 @@ const
   // it, and a megabyte is a thousand times its longest line.
   MaxSidecarLineDepth = 64;
   MaxSidecarLineBytes = 1024 * 1024;
+  // And a bound on the whole file, checked before a byte of it is read.
+  // A sidecar is one short line per sample: an hour at 30 Hz is about
+  // 11 MB, so 64 MB is six hours of continuous sampling and nothing a
+  // recording produces. Past it the file is refused rather than loaded,
+  // because the load is what costs the memory — there is no way to be
+  // careful about a file already in a string.
+  MaxSidecarBytes = Int64(64) * 1024 * 1024;
   // 2^53: the largest integer a Double still represents exactly, and so
   // the point past which an integer field read through one stops being
   // a number and starts being an approximation. Every count this format
@@ -162,6 +169,10 @@ type
     // this is a field and not a boolean — one says "no pointer wanted",
     // the other says "the pointer is in here, put it back".
     scrSmooth);
+
+  // How much of a sidecar a load needs. slmWholeTrack is every line;
+  // slmHeaderOnly stops at the header, and leaves SampleCount at zero.
+  TSidecarLoadMode = (slmWholeTrack, slmHeaderOnly);
 
   TSidecarHeader = record
     // The format version the file was written at. A reader must refuse
@@ -408,30 +419,69 @@ type
     FSampleCount: Integer;
     FButtons: TSidecarButtonEventArray;
     FButtonCount: Integer;
+    // The source rectangle in force, carried across records rather than
+    // read back off the last accepted sample. See ReadObject: sx/sy/sw/sh
+    // are delta-encoded, and a record can announce a new rectangle and
+    // still be dropped.
+    FCarrySourceX: Double;
+    FCarrySourceY: Double;
+    FCarrySourceWidth: Double;
+    FCarrySourceHeight: Double;
+    FHasCarrySource: Boolean;
     FSkippedLines: Integer;
     FTooNew: Boolean;
+    FHasHeader: Boolean;
     FForeignFormat: Boolean;
     FForeignFormatName: string;
+    procedure BeginLoad;
+    function ConsumeLine(const ALine: string;
+      AMode: TSidecarLoadMode): Boolean;
+    function FinishLoad(out AError: string): Boolean;
     procedure AddSample(const ASample: TSidecarSample);
     procedure AddButton(const AEvent: TSidecarButtonEvent);
     function ReadObject(AObject: TJSONObject): Boolean;
   public
     constructor Create;
-    // False with a message when the file cannot be read at all — which
-    // is two cases and only two: a header naming a format that is not
-    // knips-events (ForeignFormat), and one naming a version above this
-    // reader's (TooNew). A file whose *last* line is half-written still
-    // loads: the truncated line is counted in SkippedLines and
-    // everything before it is kept, which is the whole reason the format
-    // is one object per line. So does a line too deeply nested or too
-    // long to hand to the parser (MaxSidecarLineDepth), and so does one
-    // whose numbers are not finite — all of them skipped, none of them
-    // fatal.
+    // False with a message when the file cannot be read at all, which is
+    // FOUR cases:
+    //
+    //   1. there is no file at APath;
+    //   2. reading it raised — a permission, a device, a directory
+    //      where a file was expected;
+    //   3. it is longer than MaxSidecarBytes;
+    //   4. LoadFromText refused what was in it (see there: a foreign
+    //      format, or a version above this reader's).
+    //
+    // This comment used to say "two cases and only two", naming just the
+    // last pair, which is a dangerous thing for it to have said: a
+    // reader who believed it would drop the FileExists guard as
+    // redundant. Knips.App.Playback made the same claim with a
+    // different number.
     //
     // Every call resets this object completely, header included: a
     // TSidecarLog loaded twice must not carry anything of the first
     // file into the second.
-    function LoadFromFile(const APath: string; out AError: string): Boolean;
+    function LoadFromFile(const APath: string;
+      out AError: string): Boolean; overload;
+    // The same, reading only as much of the file as AMode needs. A
+    // header-only load stops after line one, which is what a caller
+    // asking one header field wants: `knips export` used to parse a
+    // whole track — hundreds of thousands of samples — to find out
+    // whether a movie's pointer was in its sidecar.
+    function LoadFromFile(const APath: string; AMode: TSidecarLoadMode;
+      out AError: string): Boolean; overload;
+    // False with a message in two cases and only two: a header naming a
+    // format that is not knips-events (ForeignFormat), and one naming a
+    // version above this reader's (TooNew).
+    //
+    // Everything else is survivable and survived. A file whose *last*
+    // line is half-written still loads: the truncated line is counted in
+    // SkippedLines and everything before it is kept, which is the whole
+    // reason the format is one object per line. So does a line too
+    // deeply nested or too long to hand to the parser
+    // (MaxSidecarLineDepth), one whose numbers are not finite, and one
+    // whose timestamp does not advance on the sample before it — all of
+    // them skipped, none of them fatal.
     function LoadFromText(const AText: string; out AError: string): Boolean;
     // Seconds on the movie's own timeline for a host-clock time. Only
     // meaningful when HasAnchor; 0 otherwise.
@@ -453,15 +503,20 @@ type
     // so the rule scales with how fast the take said it was sampling and
     // a reader never has to guess it. Floored and CAPPED: the rate is a
     // number in a file, and a file that claims a very slow one must not
-    // be able to talk this reader into a five-minute straight line. See InterpolatePath for why the
-    // limit exists at all; a caller drawing a pointer from this track
-    // should pass this to it.
+    // be able to talk this reader into a five-minute straight line, and
+    // a rate below MinBelievableSampleHz is not believed at all. See
+    // InterpolatePath for why the limit exists; a caller drawing a
+    // pointer from this track should pass this to it.
     function MaxInterpolatedGap: Double;
     property Header: TSidecarHeader read FHeader;
     property HasAnchor: Boolean read FHasAnchor;
     property AnchorHost: Double read FAnchorHost;
     property HasTrailer: Boolean read FHasTrailer;
     property Trailer: TSidecarTrailer read FTrailer;
+    // Whether a header line was read and accepted. False for a file that
+    // had none, which is a file every other field of this object is
+    // guessing about.
+    property HasHeader: Boolean read FHasHeader;
     property SampleCount: Integer read FSampleCount;
     function Sample(AIndex: Integer): TSidecarSample;
     // The samples as one array, for a caller that wants to run the whole
@@ -489,6 +544,17 @@ type
     // message, exactly as for TooNew.
     property ForeignFormat: Boolean read FForeignFormat;
   end;
+
+// Whether a candidate sample's stamp may join a track whose last stamp
+// is APreviousTime. The track is a time series and every reader
+// downstream — StateAt's binary search, InterpolatePath's walk,
+// SmoothSidecarPath's sliding window — depends on that; a stamp that
+// does not advance is not a later position, it is a contradiction. A
+// named question rather than one inline comparison because it is the
+// rule the FORMAT states (docs/event-sidecar.md, *Sampling*) and a
+// reader of this unit should be able to find and test it by name.
+function SidecarSampleTimeAdvances(APreviousTime,
+  ACandidateTime: Double): Boolean;
 
 // `demo.mp4` -> `demo.knips.jsonl`. The movie's own extension is replaced,
 // so `.mov` and `.mp4` recordings of the same stem would collide — which
@@ -539,6 +605,15 @@ function AvailableExportEffects(
 // AWindowSeconds is the full width of the window. Zero or less returns the
 // input unchanged. Endpoints use whatever part of the window exists, so
 // the path is not pulled toward its own start and end.
+//
+// Linear in the number of samples: prefix sums and a window whose two
+// ends only move forward. It assumes the stamps ADVANCE, which is what
+// the loader guarantees — a sample whose time does not is dropped as a
+// skipped line. The walk this replaced re-scanned the window per
+// sample, which on a track of identical stamps was quadratic; the
+// measured before and after are in docs/event-sidecar.md, *Sampling*,
+// stated once there rather than restated at every site that would
+// otherwise have to be kept in step with it.
 function SmoothSidecarPath(const ASamples: TSidecarSampleArray;
   ACount: Integer; AWindowSeconds: Double): TSidecarSampleArray;
 
@@ -569,6 +644,27 @@ function InterpolatePath(const ASamples: TSidecarSampleArray;
   out AX, AY: Double): Boolean;
 
 implementation
+
+type
+  // A forward line reader over a stream, so a sidecar is walked rather
+  // than held. See TSidecarLog.LoadFromFile for what it replaced.
+  TSidecarLineReader = class
+  private
+    FStream: TStream;
+    FBuffer: TBytes;
+    FFilled: Integer;
+    FCursor: Integer;
+    function Fill: Boolean;
+    function Segment(AStart, ACount: Integer): string;
+  public
+    constructor Create(AStream: TStream);
+    function NextLine(out ALine: string): Boolean;
+  end;
+
+const
+  // 64 kB a read: past the point where syscall overhead matters and far
+  // inside any cache.
+  ReadBlockBytes = 64 * 1024;
 
 const
   // How many decimals each kind of number is written with. Times are
@@ -679,6 +775,78 @@ begin
   AValue := Round(Number);
 end;
 
+{ TSidecarLineReader }
+
+constructor TSidecarLineReader.Create(AStream: TStream);
+begin
+  inherited Create;
+  FStream := AStream;
+  SetLength(FBuffer, ReadBlockBytes);
+  FFilled := 0;
+  FCursor := 0;
+end;
+
+function TSidecarLineReader.Fill: Boolean;
+begin
+  FFilled := FStream.Read(FBuffer[0], Length(FBuffer));
+  FCursor := 0;
+  Result := FFilled > 0;
+end;
+
+// One segment of the buffer as a string, byte for byte. NOT through
+// TEncoding: a sidecar is UTF-8 and these strings hold UTF-8, so a
+// conversion would be a re-encode of bytes that are already right — and
+// a measurably expensive one over a million lines.
+function TSidecarLineReader.Segment(AStart, ACount: Integer): string;
+begin
+  SetString(Result, PAnsiChar(@FBuffer[AStart]), ACount);
+end;
+
+function TSidecarLineReader.NextLine(out ALine: string): Boolean;
+var
+  Start: Integer;
+  Character: AnsiChar;
+begin
+  ALine := '';
+  Result := False;
+  repeat
+    if FCursor >= FFilled then
+      if not Fill then
+        Exit(ALine <> '');
+    Start := FCursor;
+    while FCursor < FFilled do
+    begin
+      Character := AnsiChar(FBuffer[FCursor]);
+      if (Character = #10) or (Character = #13) then
+      begin
+        if FCursor > Start then
+          if ALine = '' then
+            ALine := Segment(Start, FCursor - Start)
+          else
+            ALine := ALine + Segment(Start, FCursor - Start);
+        Inc(FCursor);
+        // A line is a line even when it is empty; the caller skips
+        // blanks. Returning here rather than looping keeps a CRLF from
+        // costing a line, because the second terminator produces an
+        // empty one.
+        Exit(True);
+      end;
+      Inc(FCursor);
+    end;
+    if FCursor > Start then
+      if ALine = '' then
+        ALine := Segment(Start, FCursor - Start)
+      else
+        ALine := ALine + Segment(Start, FCursor - Start);
+    // A single line longer than the whole file is possible in principle
+    // and refused in practice by SidecarLineWithinLimits; the guard is
+    // here so a pathological file cannot grow this string without bound
+    // before that check ever runs.
+    if Length(ALine) > MaxSidecarLineBytes then
+      Exit(True);
+  until False;
+end;
+
 // Whether a line is shallow and short enough to hand to fpjson at all —
 // see MaxSidecarLineDepth for why this is measured before the parse
 // rather than caught after it. Quoted strings are skipped over, escapes
@@ -756,6 +924,12 @@ begin
     end;
   end;
   Result := Result + '"';
+end;
+
+function SidecarSampleTimeAdvances(APreviousTime,
+  ACandidateTime: Double): Boolean;
+begin
+  Result := ACandidateTime > APreviousTime;
 end;
 
 function SidecarPathFor(const AMoviePath: string): string;
@@ -1144,6 +1318,7 @@ begin
       Candidate.MenuBarInset]) then
       Exit(False);
     FHeader := Candidate;
+    FHasHeader := True;
     Exit(True);
   end;
   if Kind = 'anchor' then
@@ -1164,29 +1339,59 @@ begin
       High(Integer), Whole) then
       Exit(False);
     Sample.Buttons := Integer(Whole);
-    // Carried forward from the last sample that named one; the header's
-    // base rectangle seeded that in LoadFromText.
-    Sample.SourceX := AObject.Get('sx', TJSONFloat(FHeader.BaseX));
-    Sample.SourceY := AObject.Get('sy', TJSONFloat(FHeader.BaseY));
-    Sample.SourceWidth := AObject.Get('sw', TJSONFloat(FHeader.BaseWidth));
-    Sample.SourceHeight := AObject.Get('sh', TJSONFloat(FHeader.BaseHeight));
-    if FSampleCount > 0 then
+    // The source rectangle is DELTA-ENCODED: WriteSample emits
+    // sx/sy/sw/sh only on a sample that moves them, so a record naming
+    // none inherits the one in force. That state is kept in FCarrySource*
+    // and NOT read back off the last accepted sample, because a record
+    // can carry a new rectangle and still be dropped — the stamp rule
+    // below refuses one whose time does not advance — and the rectangle
+    // it announced is still what the capture was reading from that
+    // moment on. Read it off FSamples and one dropped line silently
+    // reframes the whole rest of the take: two files differing only in a
+    // duplicate stamp rendered to different pictures.
+    if not FHasCarrySource then
     begin
-      if AObject.Find('sx') = nil then
-        Sample.SourceX := FSamples[FSampleCount - 1].SourceX;
-      if AObject.Find('sy') = nil then
-        Sample.SourceY := FSamples[FSampleCount - 1].SourceY;
-      if AObject.Find('sw') = nil then
-        Sample.SourceWidth := FSamples[FSampleCount - 1].SourceWidth;
-      if AObject.Find('sh') = nil then
-        Sample.SourceHeight := FSamples[FSampleCount - 1].SourceHeight;
+      // Seeded from the header the first time a cursor record is read,
+      // which is where the base rectangle is: it IS the source rectangle
+      // until a sample says otherwise, exactly as the writer assumes.
+      FCarrySourceX := FHeader.BaseX;
+      FCarrySourceY := FHeader.BaseY;
+      FCarrySourceWidth := FHeader.BaseWidth;
+      FCarrySourceHeight := FHeader.BaseHeight;
+      FHasCarrySource := True;
     end;
+    Sample.SourceX := AObject.Get('sx', TJSONFloat(FCarrySourceX));
+    Sample.SourceY := AObject.Get('sy', TJSONFloat(FCarrySourceY));
+    Sample.SourceWidth := AObject.Get('sw', TJSONFloat(FCarrySourceWidth));
+    Sample.SourceHeight := AObject.Get('sh',
+      TJSONFloat(FCarrySourceHeight));
     // A sample with an infinity in it poisons everything downstream: the
     // binary search in StateAt, the interpolation across it, and the
     // source rectangle every later sample carries forward from it. It is
-    // dropped, and the drop is a skipped line like any other.
+    // dropped, and the drop is a skipped line like any other — and the
+    // carried rectangle is left exactly as it was, because an infinite
+    // one is the single thing that must never be carried.
     if not AllFinite([Sample.Time, Sample.X, Sample.Y, Sample.SourceX,
       Sample.SourceY, Sample.SourceWidth, Sample.SourceHeight]) then
+      Exit(False);
+    // Folded in BEFORE the stamp rule, and that order is the point: a
+    // dropped record's rectangle is still a fact about the capture.
+    FCarrySourceX := Sample.SourceX;
+    FCarrySourceY := Sample.SourceY;
+    FCarrySourceWidth := Sample.SourceWidth;
+    FCarrySourceHeight := Sample.SourceHeight;
+    // The track is a TIME SERIES, and every reader downstream depends on
+    // that: StateAt binary-searches it, InterpolatePath walks it, and
+    // SmoothSidecarPath slides one window along it. A sample whose stamp
+    // does not advance is not a later position, it is a contradiction —
+    // and a file full of them made the smoothing quadratic; the measured
+    // before and after are in docs/event-sidecar.md, *Sampling*, which
+    // is the one place they are stated. Dropped as a skipped line, like
+    // any other line the reader cannot use, so the count still says how
+    // much of the file was not believed.
+    if (FSampleCount > 0)
+      and not SidecarSampleTimeAdvances(FSamples[FSampleCount - 1].Time,
+      Sample.Time) then
       Exit(False);
     AddSample(Sample);
     Exit(True);
@@ -1227,15 +1432,11 @@ begin
   end;
 end;
 
-function TSidecarLog.LoadFromText(const AText: string;
-  out AError: string): Boolean;
-var
-  Lines: TStringList;
-  I: Integer;
-  Line: string;
-  Data: TJSONData;
+// The three parts every load is made of, so a load from a file and a
+// load from a string in memory are the same reader driven by two
+// different sources rather than two readers that have to agree.
+procedure TSidecarLog.BeginLoad;
 begin
-  AError := '';
   // Every scrap of per-load state, and the header with it. A TSidecarLog
   // is loaded more than once in a couple of places, and a header left
   // standing from the previous file is the worst kind of stale: it names
@@ -1247,71 +1448,91 @@ begin
   FHeader.SampleHz := DefaultSidecarSampleHz;
   FSampleCount := 0;
   FButtonCount := 0;
+  FCarrySourceX := 0;
+  FCarrySourceY := 0;
+  FCarrySourceWidth := 0;
+  FCarrySourceHeight := 0;
+  FHasCarrySource := False;
   FSkippedLines := 0;
   FHasAnchor := False;
   FAnchorHost := 0;
   FHasTrailer := False;
   FTrailer := Default(TSidecarTrailer);
   FTooNew := False;
+  FHasHeader := False;
   FForeignFormat := False;
   FForeignFormatName := '';
-  Lines := TStringList.Create;
+end;
+
+// One line. False when there is no point reading any more of the file:
+// a header-only load has its header, or the header itself was refused.
+function TSidecarLog.ConsumeLine(const ALine: string;
+  AMode: TSidecarLoadMode): Boolean;
+var
+  Line: string;
+  Data: TJSONData;
+begin
+  Result := True;
+  Line := Trim(ALine);
+  if Line = '' then
+    Exit;
+  // Measured before the parser is allowed near it: fpjson recurses,
+  // and a deep enough line is a stack overflow rather than an
+  // exception. See MaxSidecarLineDepth.
+  if not SidecarLineWithinLimits(Line) then
+  begin
+    Inc(FSkippedLines);
+    Exit;
+  end;
+  Data := nil;
+  // The guard covers the READ as well as the parse, and that is the
+  // structural half of this rule rather than a belt on a brace.
+  //
+  // It used to wrap `GetJSON` alone, on the reasoning that parsing is
+  // where a malformed line bites. It is not: fpjson hands back a
+  // document happily and the coercions in ReadObject are where a
+  // number that is not a number raises — measured, an
+  // EAccessViolation out of `Get('fps', 0)` on a `1e999`, escaping
+  // LoadFromFile, killing the process and leaking the document with
+  // it. Every field is checked below now, but the checks are a list
+  // and lists go stale; this is the rule that does not. Anything
+  // that raises anywhere in a line's reading is a skipped line, for
+  // ever, including whatever a future record kind does.
   try
-    Lines.Text := AText;
-    for I := 0 to Lines.Count - 1 do
-    begin
-      Line := Trim(Lines[I]);
-      if Line = '' then
-        Continue;
-      // Measured before the parser is allowed near it: fpjson recurses,
-      // and a deep enough line is a stack overflow rather than an
-      // exception. See MaxSidecarLineDepth.
-      if not SidecarLineWithinLimits(Line) then
+    try
+      Data := GetJSON(Line);
+      if (Data <> nil) and (Data is TJSONObject) then
       begin
+        if not ReadObject(TJSONObject(Data)) then
+          Inc(FSkippedLines);
+      end
+      else
         Inc(FSkippedLines);
-        Continue;
-      end;
-      Data := nil;
-      // The guard covers the READ as well as the parse, and that is the
-      // structural half of this rule rather than a belt on a brace.
-      //
-      // It used to wrap `GetJSON` alone, on the reasoning that parsing is
-      // where a malformed line bites. It is not: fpjson hands back a
-      // document happily and the coercions in ReadObject are where a
-      // number that is not a number raises — measured, an
-      // EAccessViolation out of `Get('fps', 0)` on a `1e999`, escaping
-      // LoadFromFile, killing the process and leaking the document with
-      // it. Every field is checked below now, but the checks are a list
-      // and lists go stale; this is the rule that does not. Anything
-      // that raises anywhere in a line's reading is a skipped line, for
-      // ever, including whatever a future record kind does.
-      try
-        try
-          Data := GetJSON(Line);
-          if (Data <> nil) and (Data is TJSONObject) then
-          begin
-            if not ReadObject(TJSONObject(Data)) then
-              Inc(FSkippedLines);
-          end
-          else
-            Inc(FSkippedLines);
-        except
-          // A half-written last line, a line from a newer writer this
-          // parser cannot make sense of, or a value that blew up on the
-          // way out. Counted, never fatal — that is the whole reason the
-          // format is one object per line.
-          on Exception do
-            Inc(FSkippedLines);
-        end;
-      finally
-        // In a finally, not after the read: the read can now be left
-        // early by an exception, and the document is ours either way.
-        Data.Free;
-      end;
+    except
+      // A half-written last line, a line from a newer writer this
+      // parser cannot make sense of, or a value that blew up on the
+      // way out. Counted, never fatal — that is the whole reason the
+      // format is one object per line.
+      on Exception do
+        Inc(FSkippedLines);
     end;
   finally
-    Lines.Free;
+    // In a finally, not after the read: the read can now be left
+    // early by an exception, and the document is ours either way.
+    Data.Free;
   end;
+  // A header-only load stops at the header, which is the first line of
+  // every sidecar this program writes. That is the whole point of it:
+  // `knips export` asks one header field of a movie's sidecar before a
+  // trim, and used to parse the entire track — hundreds of thousands of
+  // samples — to read one word out of line one.
+  if AMode = slmHeaderOnly then
+    Result := not (FHasHeader or FForeignFormat or FTooNew);
+end;
+
+function TSidecarLog.FinishLoad(out AError: string): Boolean;
+begin
+  AError := '';
   // The blunter refusal first: a file that is not one of these at all
   // has no version worth reporting.
   if FForeignFormat then
@@ -1334,10 +1555,37 @@ begin
   Result := True;
 end;
 
-function TSidecarLog.LoadFromFile(const APath: string;
+function TSidecarLog.LoadFromText(const AText: string;
   out AError: string): Boolean;
 var
-  Text: TStringList;
+  Lines: TStringList;
+  I: Integer;
+begin
+  BeginLoad;
+  Lines := TStringList.Create;
+  try
+    Lines.Text := AText;
+    for I := 0 to Lines.Count - 1 do
+      if not ConsumeLine(Lines[I], slmWholeTrack) then
+        Break;
+  finally
+    Lines.Free;
+  end;
+  Result := FinishLoad(AError);
+end;
+
+function TSidecarLog.LoadFromFile(const APath: string;
+  out AError: string): Boolean;
+begin
+  Result := LoadFromFile(APath, slmWholeTrack, AError);
+end;
+
+function TSidecarLog.LoadFromFile(const APath: string;
+  AMode: TSidecarLoadMode; out AError: string): Boolean;
+var
+  Stream: TFileStream;
+  Reader: TSidecarLineReader;
+  Line: string;
 begin
   Result := False;
   AError := '';
@@ -1346,10 +1594,10 @@ begin
     AError := 'no event sidecar at ' + APath;
     Exit;
   end;
-  Text := TStringList.Create;
+  Stream := nil;
   try
     try
-      Text.LoadFromFile(APath);
+      Stream := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
     except
       on E: Exception do
       begin
@@ -1357,9 +1605,38 @@ begin
         Exit;
       end;
     end;
-    Result := LoadFromText(Text.Text, AError);
+    if Stream.Size > MaxSidecarBytes then
+    begin
+      AError := Format('%s is %d MB; this reader will not load an event '
+        + 'sidecar past %d MB', [APath, Stream.Size div (1024 * 1024),
+        MaxSidecarBytes div (1024 * 1024)]);
+      Exit;
+    end;
+    BeginLoad;
+    // One line at a time, off the stream. It used to be a TStringList
+    // loaded from the file, then `.Text` (a second whole copy), then a
+    // SECOND TStringList parsed out of that — three passes and about ten
+    // times the file's size resident, for a format that is read strictly
+    // forwards one line at a time.
+    Reader := TSidecarLineReader.Create(Stream);
+    try
+      try
+        while Reader.NextLine(Line) do
+          if not ConsumeLine(Line, AMode) then
+            Break;
+      except
+        on E: Exception do
+        begin
+          AError := E.Message;
+          Exit;
+        end;
+      end;
+    finally
+      Reader.Free;
+    end;
+    Result := FinishLoad(AError);
   finally
-    Text.Free;
+    Stream.Free;
   end;
 end;
 
@@ -1628,52 +1905,60 @@ end;
 function SmoothSidecarPath(const ASamples: TSidecarSampleArray;
   ACount: Integer; AWindowSeconds: Double): TSidecarSampleArray;
 var
-  I, J: Integer;
-  Half, SumX, SumY: Double;
+  I, Low, High: Integer;
+  Half: Double;
+  PrefixX, PrefixY: array of Double;
   Used: Integer;
 begin
-  SetLength(Result, 0);
+  // Assigned rather than SetLength'd to zero, so the compiler can see
+  // the managed result initialised on every path — the one
+  // project-owned warning left in the build after the hotkey guard
+  // became a compile-time check.
+  Result := nil;
   if ACount <= 0 then
     Exit;
   SetLength(Result, ACount);
+  for I := 0 to ACount - 1 do
+    Result[I] := ASamples[I];
   if AWindowSeconds <= 0 then
-  begin
-    for I := 0 to ACount - 1 do
-      Result[I] := ASamples[I];
     Exit;
-  end;
   Half := AWindowSeconds / 2;
+  // Prefix sums, so a window of any width costs two subtractions
+  // rather than a walk. Written this way because the walk was
+  // quadratic on a track whose stamps do not advance — see the
+  // monotonicity gate in ReadObject, which is what makes the two
+  // pointers below sound.
+  SetLength(PrefixX, ACount + 1);
+  SetLength(PrefixY, ACount + 1);
+  PrefixX[0] := 0;
+  PrefixY[0] := 0;
   for I := 0 to ACount - 1 do
   begin
-    Result[I] := ASamples[I];
-    SumX := 0;
-    SumY := 0;
-    Used := 0;
-    // Walk out from I in both directions until the window runs out. The
-    // samples are evenly spaced in practice, so this is a handful of
-    // steps; it is written as a walk rather than a fixed index offset
-    // because a stalled run loop leaves real gaps in the track and a
-    // fixed offset would then average over a much wider time than asked.
-    J := I;
-    while (J >= 0) and (ASamples[I].Time - ASamples[J].Time <= Half) do
-    begin
-      SumX := SumX + ASamples[J].X;
-      SumY := SumY + ASamples[J].Y;
-      Inc(Used);
-      Dec(J);
-    end;
-    J := I + 1;
-    while (J < ACount) and (ASamples[J].Time - ASamples[I].Time <= Half) do
-    begin
-      SumX := SumX + ASamples[J].X;
-      SumY := SumY + ASamples[J].Y;
-      Inc(Used);
-      Inc(J);
-    end;
+    PrefixX[I + 1] := PrefixX[I] + ASamples[I].X;
+    PrefixY[I + 1] := PrefixY[I] + ASamples[I].Y;
+  end;
+  Low := 0;
+  High := 0;
+  for I := 0 to ACount - 1 do
+  begin
+    // Both bounds only ever move forward, which is what makes the whole
+    // pass linear: on a track whose stamps advance, the window for
+    // sample I + 1 starts no earlier and ends no earlier than I's. Low
+    // needs no catch-up clamp of its own — the loop below only advances
+    // it while it is still behind I, so it can never pass I — and the
+    // one that stood here was dead code claiming otherwise.
+    while (Low < I) and (ASamples[I].Time - ASamples[Low].Time > Half) do
+      Inc(Low);
+    if High < I then
+      High := I;
+    while (High + 1 < ACount)
+      and (ASamples[High + 1].Time - ASamples[I].Time <= Half) do
+      Inc(High);
+    Used := High - Low + 1;
     if Used > 0 then
     begin
-      Result[I].X := SumX / Used;
-      Result[I].Y := SumY / Used;
+      Result[I].X := (PrefixX[High + 1] - PrefixX[Low]) / Used;
+      Result[I].Y := (PrefixY[High + 1] - PrefixY[Low]) / Used;
     end;
   end;
 end;

@@ -50,7 +50,8 @@ uses
   Math,
   SysUtils,
 
-  Knips.Export.Bitmap;
+  Knips.Export.Bitmap,
+  Knips.Export.Timing;
 
 const
   GifMaxColors = 256;
@@ -94,7 +95,16 @@ const
   // Browsers clamp 0 and 1 centisecond delays to 10; 2 is the smallest
   // delay that is honoured everywhere.
   GifMinDelayCentiseconds = 2;
-  GifMaxDelayCentiseconds = 65535;
+  // The same two-byte field Knips.Export.Timing plans against, under
+  // the name this encoder's own code reads. It was 65535 twice, in two
+  // units, about one fact: a GIF's delay field and an APNG's delay_num
+  // are both uint16.
+  GifMaxDelayCentiseconds = MaximumDelayTicks;
+  // The largest canvas the encoder will allocate index buffers for. Two
+  // of them, one byte a pixel each, so 128 megapixels is 256 MB — the
+  // same budget Knips.Export.Apng and Knips.Export.Bitmap keep, and far
+  // past anything inside the 4096-pixel --width bound.
+  GifMaxCanvasPixels = Int64(128) * 1024 * 1024;
   // Disposal 1 = leave the frame in place, which is what lets the next
   // frame repaint only the rectangle that changed.
   GifDisposalLeaveInPlace = 1;
@@ -892,15 +902,15 @@ begin
   FMinCodeSize := Max(2, FTableBits);
   FClearCode := 1 shl FMinCodeSize;
   FEndCode := FClearCode + 1;
+  // Only what does NOT depend on the canvas size. The frame buffers are
+  // allocated in Open, after the bounds check, the way the APNG encoder
+  // already does it: a 65535x65535 canvas is refused there, and this
+  // constructor used to reserve seventeen gigabytes for it first.
   SetLength(FBuffer, OutputBufferSize);
-  SetLength(FIndices, FWidth * FHeight);
-  SetLength(FPrevious, FWidth * FHeight);
   SetLength(FMemoKey, GifMemoSlots);
   SetLength(FMemoValue, GifMemoSlots);
   FillChar(FMemoKey[0], Length(FMemoKey) * SizeOf(Int32), $FF);
   BuildGreenOrder;
-  SetLength(FErrorCurrent, (FWidth + 2) * 3);
-  SetLength(FErrorNext, (FWidth + 2) * 3);
   SetLength(FHashKey, HashSlots);
   SetLength(FHashValue, HashSlots);
 end;
@@ -1394,6 +1404,21 @@ begin
     AError := 'a GIF canvas cannot exceed 65535 pixels on a side';
     Exit;
   end;
+  // In Int64, before a single SetLength: a canvas inside the per-side
+  // bound can still ask for a buffer no 32-bit index reaches. The same
+  // guard, in the same shape and at the same moment, as
+  // Knips.Export.Apng's.
+  if Int64(FWidth) * Int64(FHeight) > GifMaxCanvasPixels then
+  begin
+    AError := Format('a %dx%d GIF canvas needs more than %d MB of index '
+      + 'buffers', [FWidth, FHeight,
+      (Int64(FWidth) * Int64(FHeight) * 2) div (1024 * 1024)]);
+    Exit;
+  end;
+  SetLength(FIndices, FWidth * FHeight);
+  SetLength(FPrevious, FWidth * FHeight);
+  SetLength(FErrorCurrent, (FWidth + 2) * 3);
+  SetLength(FErrorNext, (FWidth + 2) * 3);
   try
     FOutput := TFileStream.Create(APath, fmCreate);
   except

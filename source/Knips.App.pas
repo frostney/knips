@@ -64,6 +64,7 @@ uses
   Knips.Recording.CursorMath,
   Knips.Recording.LiveMath,
   Knips.Recording.Recovery,
+  Knips.Recording.Sidecar,
   MacOSAll;
 
 // Installs the status item and runs NSApp until the user quits. Returns
@@ -115,7 +116,6 @@ type
 const
   TargetClassName = 'KnipsAppTarget';
   TargetSuperclassName = 'NSObject';
-  OwnerIvarName = 'knipsOwner';
 
   RecordRegionSelector = 'recordRegion:';
   RecordDisplaySelector = 'recordDisplay:';
@@ -228,6 +228,9 @@ const
   // LogMessage's second channel; see the comment on it for why NSLog on
   // its own reaches nobody. Relative to the user's home directory.
   LogFileRelativePath = 'Library/Logs/Knips.log';
+  // O_NOFOLLOW from the Darwin SDK's sys/fcntl.h. BaseUnix declares
+  // O_CREAT, O_APPEND and the rest but not this one on this target.
+  DarwinONoFollow = $100;
   LogFileMaxBytes = 1024 * 1024;
 
   ElapsedTimerSeconds = 1.0;
@@ -239,7 +242,6 @@ const
   // finishing the writer pumps the run loop too, and the stop arrives
   // from a status-item action.
   DeferredStartSeconds = 0.0;
-  SecondsPerDay = 86400;
 
   // The Record Window submenu is built inside AppKit's menu tracking,
   // which is the one place in this app that pumps a nested run loop
@@ -371,6 +373,11 @@ type
     // uses: the render turns the run loop over so its progress can be
     // drawn, which is exactly when a menu click could otherwise arrive.
     FRendering: Boolean;
+    // Whether this session has already explained why a window take is
+    // being composited. Once per session: it is a standing consequence
+    // of a setting, not an event, and repeating it every take would
+    // make it noise. See Knips.App.State.WindowCompositingNote.
+    FSaidWindowCompositing: Boolean;
     FRenderPercent: Integer;
     FHasLastRegion: Boolean;
     FLastRegionDisplayID: UInt32;
@@ -520,6 +527,7 @@ type
     // recordings directory (Knips.Recording.Recovery). Public because the
     // deferred one-shot dispatches into it.
     procedure RecoverUnfinishedTakes;
+    function TakeCanStillBeRendered(const ASidecarPath: string): Boolean;
     destructor Destroy; override;
     function Setup(out AError: string): Boolean;
     procedure RefreshStatusItem;
@@ -610,15 +618,29 @@ begin
     // decimal 666: it is rw-rw-rw-, which umask then narrows to the
     // usual rw-r--r--. Spelled out because the ampersand form is rare
     // enough to read as a mistake.
+    // O_NOFOLLOW: the log is opened by a fixed path in a directory
+    // anything the user runs can write, and a symlink planted at that
+    // path would have every diagnostic line appended to whatever it
+    // points at. Refusing is the whole of the response — a menu-bar app
+    // that cannot write its log is an app with no log, not a broken one.
+    // Declared here rather than taken from BaseUnix, which does not
+    // carry it on Darwin; verified against the platform SDK's
+    // sys/fcntl.h (0x100).
     Handle := FpOpen(PAnsiChar(Path),
-      O_WRONLY or O_APPEND or O_CREAT, &666);
+      O_WRONLY or O_APPEND or O_CREAT or DarwinONoFollow, &666);
     if Handle < 0 then
       Exit;
     if FpLseek(Handle, 0, SEEK_END) > LogFileMaxBytes then
     begin
       FileClose(Handle);
-      Handle := FileCreate(Path);
-      if Handle = THandle(-1) then
+      // Reopened with the same O_NOFOLLOW, not with FileCreate: that
+      // one follows a symlink, so the rotation branch handed back
+      // exactly the write the open above had just refused — a link
+      // planted at the log path would have been truncated and written
+      // through the moment the file passed a megabyte.
+      Handle := FpOpen(PAnsiChar(Path),
+        O_WRONLY or O_CREAT or O_TRUNC or DarwinONoFollow, &666);
+      if Handle < 0 then
         Exit;
     end;
     try
@@ -1790,7 +1812,7 @@ var
 begin
   if not FWindowEntriesValid then
     Exit(False);
-  Age := (Now - FWindowEntriesAt) * SecondsPerDay;
+  Age := (Now - FWindowEntriesAt) * SecsPerDay;
   // A clock that moved backwards reads as stale, not as fresh forever.
   Result := (Age >= 0) and (Age < WindowListCacheSeconds);
 end;
@@ -2695,7 +2717,7 @@ function TAppController.ElapsedSeconds: Int64;
 begin
   if FState <> asRecording then
     Exit(0);
-  Result := Trunc((Now - FStartedAt) * SecondsPerDay);
+  Result := Trunc((Now - FStartedAt) * SecsPerDay);
   if Result < 0 then
     Result := 0;
 end;
@@ -3213,6 +3235,12 @@ begin
     Pool := NSAutoreleasePool(NSAutoreleasePool.alloc.init);
     try
       Session := TRenderSession.Create(ARawPath, ADeliverablePath, FEffects);
+      // The app renders on EVERY stop, and a take it can apply nothing
+      // to still has to end up with a deliverable beside its raw take —
+      // the pair is the app's whole model. So the app asks for the copy
+      // explicitly whenever its own effects come to nothing, which is
+      // the same request `--effects=none` makes on the CLI.
+      Session.ExplicitCopy := not EffectsAskForAnything(FEffects);
       try
         // No console under an app bundle.
         Session.Verbose := False;
@@ -3236,6 +3264,13 @@ begin
             LogMessage('render: '
               + EffectZoomNoteLine(Session.Report.ZoomNote));
         end;
+        // What the sidecar loader could not use, whatever the notes
+        // said. The log rather than the menu slot: it is a fact about
+        // the file this render read, not an explanation of an effect
+        // that did not happen, and the one slot belongs to the latter.
+        if Result and (Session.Report.SidecarSkippedLines > 0) then
+          LogMessage('render: '
+            + SidecarSkippedLinesNote(Session.Report.SidecarSkippedLines));
       finally
         Session.Free;
       end;
@@ -3595,9 +3630,25 @@ begin
       (FCamera <> nil) and FCamera.Visible) then
     begin
       if CompositeWindowForPending then
+      begin
         LogMessage('recording this window through a rectangle of its '
           + 'display so the effects (and the camera, if it is up) reach '
-          + 'the file; the take is raw and can be re-rendered')
+          + 'the file; the take is raw and can be re-rendered');
+        // And once per session where somebody will actually see it. The
+        // log is not a user interface; the Last-error slot is the one
+        // line this app has, and a window take that comes back with a
+        // notification baked into it needs the sentence BEFORE it
+        // happens, not in a file nobody opens. Once, because it is a
+        // standing consequence of a setting rather than an event: said
+        // on every take it would be noise, and noise is what gets
+        // ignored.
+        if not FSaidWindowCompositing then
+        begin
+          FSaidWindowCompositing := True;
+          NoteError(WindowCompositingNote(FEffects,
+            (FCamera <> nil) and FCamera.Visible));
+        end;
+      end
       else
         // A RecordError and not a log line: the user asked for effects
         // and is about to get a take that can never be given any. The
@@ -4175,7 +4226,7 @@ procedure TAppController.RecoverUnfinishedTakes;
 var
   Takes: TRecoveredTakes;
   Summary: string;
-  I, Recovered, Swept: Integer;
+  I, Recovered, Renderable, Swept: Integer;
 begin
   try
     Recovered := RecoverOrphanedTakes(RecordingsDirectory(GetUserDir),
@@ -4201,17 +4252,42 @@ begin
   Summary := DescribeRecoveredTakes(Takes);
   if Summary <> '' then
     LogMessage(Summary);
+  // How many of them a render could still do something with. A recovered
+  // take is left RAW — the process died before the render — so the file
+  // the user gets back is `…-raw.mp4`, and until this line the menu gave
+  // them the raw name and no route from it to a deliverable. Nothing is
+  // rendered here: a launch is the wrong moment to spend minutes on a
+  // file nobody has asked for.
+  Renderable := 0;
+  for I := 0 to High(Takes) do
+    if TakeCanStillBeRendered(Takes[I].SidecarPath) then
+      Inc(Renderable);
   // RecordError, not LogMessage alone: a recording the user thought they
   // had lost is exactly the thing they should be told about, and the menu
   // is the only place this app can tell them.
-  if Length(Takes) = 1 then
-    RecordError('an earlier recording did not finish and has been '
-      + 'recovered: ' + ExtractFileName(Takes[0].MoviePath))
-  else
-  begin
-    I := Length(Takes);
-    RecordError(Format('%d earlier recordings did not finish and have '
-      + 'been recovered', [I]));
+  RecordError(RecoveredTakesNote(Length(Takes), Renderable,
+    ExtractFileName(Takes[0].MoviePath)));
+end;
+
+// Whether an effect could still be applied to the take this sidecar
+// belongs to — the same question `take_info` answers, asked here so the
+// recovery note can say whether Re-export would do anything.
+function TAppController.TakeCanStillBeRendered(
+  const ASidecarPath: string): Boolean;
+var
+  Log: TSidecarLog;
+  Available: TSidecarEffectAvailability;
+  Error: string;
+begin
+  Result := False;
+  Log := TSidecarLog.Create;
+  try
+    if not Log.LoadFromFile(ASidecarPath, Error) then
+      Exit;
+    Available := AvailableExportEffects(Log);
+    Result := Available.CanDrawCursor or Available.CanZoomOnClick;
+  finally
+    Log.Free;
   end;
 end;
 

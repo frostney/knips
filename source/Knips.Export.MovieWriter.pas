@@ -84,6 +84,13 @@ uses
 {$linkframework CoreVideo}
 
 const
+  // Keyframe every four seconds: fine for playback, small files.
+  // Public because Knips.Export.Render encodes into the same container
+  // and had a second copy of the number with "as the recorder does"
+  // written beside it — which is a comment where a reference belongs.
+  KeyframeIntervalSeconds = 4;
+
+const
   // kAudioFormatMPEG4AAC from CoreAudioTypes: the four-character code
   // 'aac ' (0x61616320). AVFormatIDKey wants it as a plain integer.
   AudioFormatMPEG4AAC = 1633772320;
@@ -347,8 +354,6 @@ implementation
 {$IFDEF DARWIN}
 
 const
-  // Keyframe every four seconds: fine for playback, small files.
-  KeyframeIntervalSeconds = 4;
   // How often a movie fragment is flushed. Two seconds is the most a
   // kill -9 can cost, and the overhead is one moof header per fragment —
   // measured at well under a tenth of a percent of a real recording.
@@ -356,7 +361,6 @@ const
   // to lose takes.
   MovieFragmentSeconds = 2;
   FinishTimeoutSlices = 30000;
-  RunLoopSliceSeconds = 0.001;
 
 var
   // One process-global flag for a completion handler that is a global
@@ -376,6 +380,14 @@ var
   // The other reason it is left alone: reaching the timeout at all means
   // AVAssetWriter did not answer in thirty seconds, and by then the take
   // is being reported as failed either way.
+  //
+  // Worth restating now that there IS a long-lived multi-finish
+  // process: `knips mcp` runs an unbounded number of sessions in one
+  // process, so it is the first face where a stale handler could reach
+  // a *later* writer at all. The CLI finishes once and exits and the
+  // app finishes one take at a time; the reasoning above is unchanged
+  // and the status check is still what catches it, but the window it
+  // guards is no longer hypothetical.
   GFinishReady: Boolean = False;
 
 procedure FinishCompletionHandler; cdecl;
@@ -1099,7 +1111,7 @@ begin
   WaitCount := 0;
   while (not GFinishReady) and (WaitCount < FinishTimeoutSlices) do
   begin
-    CFRunLoopRunInMode(kCFRunLoopDefaultMode, RunLoopSliceSeconds, False);
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, FrameworkSliceSeconds, False);
     Inc(WaitCount);
   end;
   if not GFinishReady then

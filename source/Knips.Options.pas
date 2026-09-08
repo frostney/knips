@@ -26,6 +26,19 @@ const
   MaxBitRate = 60000000;
   // 0 = detect the display's backing scale factor at capture time.
   ScaleAuto = 0;
+  // The same number as text, and the compile-time check that keeps the
+  // two together, so the refusal below can be a CONSTANT sentence — the
+  // MCP rewriter's table is a const array and cannot call Format, and
+  // it used to carry the number as a literal of its own.
+  ScaleAutoText = '0';
+  // The refusal --scale produces, without the offending value. Both the
+  // producer and Knips.Mcp.Params's rewrite table name this, so they
+  // cannot say different things about the same flag.
+  ScaleRefusal = '--scale must be 1, 2, or ' + ScaleAutoText + ' for auto';
+  // What --display means when it was not given: whichever display the
+  // system calls the main one. The one negative index that means
+  // anything, which is why it has a name.
+  MainDisplayIndex = -1;
   MaxScale = 2;
   // Audio defaults. ScreenCaptureKit delivers system audio at whatever
   // sample rate and channel count the stream configuration asks for;
@@ -56,7 +69,47 @@ const
   // deliverable's name. Here rather than in the render unit because two
   // units have to agree on it: the one that writes it, and the crash
   // recovery pass that sweeps the ones a killed render left behind.
+  //
+  // Every writer that can replace a file the user already has builds
+  // through one of these — the MP4 render, the GIF and APNG exports and
+  // the passthrough trim — so a Ctrl-C can never leave the previous
+  // good file half-overwritten.
   RenderTemporarySuffix = '.knips-render-tmp';
+
+  // The four extensions this program reads and writes.
+  //
+  // Here rather than higher up because this is the unit that DECIDES
+  // what an extension means — ContainerForPath and ExportFormatForPath
+  // are both below — and the literals were repeated there while named
+  // constants for two of them sat in units this one cannot see
+  // (Knips.App.State's GifFileExtension, Knips.Mcp.Params's
+  // ApngFileExtension). Those two now name these.
+  Mpeg4FileExtension = '.mp4';
+  QuickTimeFileExtension = '.mov';
+  GifFileExtension = '.gif';
+  ApngFileExtension = '.apng';
+  // What is written beside a temporary to say which process owns it:
+  // one line, the pid. The sweep reads it and leaves a temporary whose
+  // owner is still running alone — before this existed the sweep at
+  // every `record` and every app launch deleted a LIVE render's
+  // temporary out from under it.
+  RenderTemporaryOwnerSuffix = '.pid';
+  // AVAssetWriter's fast-start scratch under the macOS sandbox arrives
+  // as `<file>.sb-<token>`. A shadow of one of our temporaries is ours;
+  // a shadow of anything else is not.
+  RenderTemporaryShadowPrefix = '.sb-';
+
+  // One turn of a run loop being pumped for a framework answer.
+  //
+  // A millisecond is short enough that the wait never shows up in a
+  // measurement and long enough not to be a spin. Five units had a
+  // private copy of it — two capture units, the movie writer, the trim
+  // and the render, under two different names — about one thing: how
+  // finely this program is willing to poll something asynchronous.
+  //
+  // The recorder's own loop is NOT this: it turns at the sidecar's
+  // sample rate, because there the slice is the sampling clock.
+  FrameworkSliceSeconds = 0.001;
 
   // What counts as silence, as a sample magnitude in 0..1. About -60 dBFS.
   // Chosen so a muted source and a source recording a quiet room are told
@@ -93,6 +146,10 @@ const
   SuggestedSlowFramesPerSecond = 15;
 
 type
+  // See ClassifyRenderTemporary.
+  TRenderTemporaryKind = (rtkNotOurs, rtkTemporary, rtkOwnerMarker,
+    rtkSandboxShadow);
+
   TCaptureRegion = record
     Left: Integer;
     Top: Integer;
@@ -270,6 +327,33 @@ type
   // What a finished render actually did, flattened out of
   // Knips.Export.Render's TRenderReport so the sentence describing it
   // can live below the Darwin line. See RenderAppliedSummary.
+  // The export's counterpart to TRenderAppliedFacts: everything a
+  // finished GIF or APNG can say about what reached its pixels, as
+  // plain scalars, because TExportReport lives behind the Darwin line
+  // and this has to be reachable from everywhere.
+  //
+  // It exists because the render round's shared-wording work never
+  // reached this side: `knips export` composed its own sentence, the
+  // MCP export tools composed a shorter and differently-ordered one,
+  // and neither mentioned the palette, the synthesised frames or the
+  // frames the pointer track could not place.
+  TExportAppliedFacts = record
+    Format: TExportFormat;
+    // GIF only; zero for APNG, which quantises nothing.
+    PaletteColors: Integer;
+    ExactPalette: Boolean;
+    SampledFrames: Integer;
+    SmoothCursor: Boolean;
+    SmoothCursorFrames: Int64;
+    SmoothCursorOffFrame: Int64;
+    ZoomOnClick: Boolean;
+    ZoomedFrames: Int64;
+    ZoomClicks: Integer;
+    SynthesizedFrames: Int64;
+    SynthesisFramesPerSecond: Integer;
+    UnframedFrames: Int64;
+  end;
+
   TRenderAppliedFacts = record
     ZoomApplied: Boolean;
     ZoomedFrames: Int64;
@@ -392,6 +476,31 @@ function EffectCursorNoteLine(const ACursorNote: string): string;
 
 function EffectZoomNoteLine(const AZoomNote: string): string;
 
+// The third wrapper, and it exists for symmetry rather than for words:
+// the framing note is not about an effect that did not happen, it is
+// about the pixels, so it is said in the report's own words and this
+// only passes it through. Having all three means a caller composes the
+// same way whichever note it is holding.
+function EffectFramingNoteLine(const AFramingNote: string): string;
+
+// The framing note itself: what a run leaves behind about frames whose
+// framing the pointer track cannot account for. One sentence, because
+// there were two — the MP4 render said "this take's pointer track" and
+// the animation export said "this recording's", about the same fact,
+// from two copies of the same Format call.
+function UnframedFramesNote(AFrames: Int64): string;
+
+// What a load of an event sidecar could not use, in words; '' when the
+// whole file was believed. TSidecarLog survives a line it cannot read —
+// a truncated tail, a number that is not finite, a stamp that does not
+// advance — and counts it in SkippedLines, and until this existed that
+// count was reachable only from inside the loader. It matters because a
+// skipped cursor record is a hole in the pointer track a render draws
+// from: the deliverable is correct and it is thinner than the file
+// looks. One sentence, in one place, so `knips render`, `knips export`,
+// the MCP payloads and the menu-bar app's log all say it the same way.
+function SidecarSkippedLinesNote(ASkippedLines: Integer): string;
+
 // Everything a finished render can say about what it DID, in one clause
 // list — ", zoom on 34 of 100 frames from 1 clicks, pointer on 100
 // frames (0 off frame)" — or '' when nothing applied.
@@ -403,7 +512,31 @@ function EffectZoomNoteLine(const AZoomNote: string): string;
 // sentence; they used to hold a byte-identical 25-line copy each, which
 // is exactly the kind of duplication that drifts the first time one of
 // the four clauses is reworded.
-function RenderAppliedFacts: TRenderAppliedFacts;
+//
+// The FILLING is Knips.Export.Render.RenderFactsOf, for the same
+// reason: the two faces each held the same fourteen assignments out of
+// the report, which is where the duplication came back. This is the
+// empty record they start from — Default- like every other "the value
+// before anybody has said anything" function here.
+function DefaultRenderAppliedFacts: TRenderAppliedFacts;
+
+// The export's own pair, filled by Knips.Export.Pipeline.ExportFactsOf
+// and composed here so `knips export`, the MCP export tools and the
+// playback window all say the same thing in the same order.
+function DefaultExportAppliedFacts: TExportAppliedFacts;
+
+// Everything a finished export applied, in one clause list — " (255
+// colours), export cursor on 145 frames (0 off frame), zoom on 35
+// frames from 1 clicks, 12 frames filled in at 20 fps where the capture
+// had none". Never '': the palette clause is always there, because it
+// is what the format IS.
+function ExportAppliedSummary(const AFacts: TExportAppliedFacts): string;
+
+// The line a finished export reports: the animation, its shape, and
+// AApplied.
+function ExportSummaryLine(const APath: string; APixelWidth,
+  APixelHeight: Integer; AFrames: Int64; ADurationSeconds: Double;
+  AOutputBytes: Int64; const AApplied: string): string;
 
 function RenderAppliedSummary(const AFacts: TRenderAppliedFacts): string;
 
@@ -415,6 +548,14 @@ function RenderSummaryLine(const APath: string; APixelWidth,
   APixelHeight: Integer; AFrames: Int64; ADurationSeconds: Double;
   AOutputBytes: Int64; ACopied: Boolean; const AApplied: string): string;
 
+// The line a finished passthrough trim reports: the movie, the range it
+// kept out of the movie it came from, and the size — and the fact that
+// matters most about it, which is that nothing was decoded. One
+// function because `knips export --trim` and the MCP export_trim tool
+// held the same Format call each.
+function TrimSummaryLine(const APath: string; AStartSeconds, AEndSeconds,
+  ASourceDurationSeconds: Double; AOutputBytes: Int64): string;
+
 // Whether a render may write APath. Only the two movie containers, for
 // the reason the tool descriptions and `--out=demo.mp4` already give:
 // this pass re-encodes H.264 into a QuickTime-family container and can
@@ -425,6 +566,27 @@ function RenderSummaryLine(const APath: string; APixelWidth,
 // cannot disagree.
 function ValidateRenderOutputPath(const APath: string;
   out AError: string): Boolean;
+
+// What a file name found beside a deliverable IS, as far as the crash
+// sweep is concerned. The sweep used to match `*<suffix>*` and delete
+// whatever came back, which took an ordinary user file called
+// `notes.knips-render-tmp.txt` with it and, worse, took a LIVE render's
+// temporary. Three shapes are ours and nothing else is:
+//
+//   `demo.mp4.knips-render-tmp`         the temporary itself
+//   `demo.mp4.knips-render-tmp.pid`     its owner marker
+//   `demo.mp4.knips-render-tmp.sb-abc`  AVAssetWriter's sandbox shadow
+//
+// ATemporaryName comes back as the temporary all three belong to, so a
+// caller can decide once per temporary and act on its whole family.
+function ClassifyRenderTemporary(const AFileName: string;
+  out ATemporaryName: string): TRenderTemporaryKind;
+
+// `demo.mp4` -> `demo.mp4.knips-render-tmp`.
+function RenderTemporaryPathFor(const AOutputPath: string): string;
+
+// `demo.mp4.knips-render-tmp` -> `demo.mp4.knips-render-tmp.pid`.
+function RenderTemporaryOwnerPathFor(const ATemporaryPath: string): string;
 
 // Container from the output path's extension; False for unknown ones.
 function ContainerForPath(const APath: string;
@@ -465,9 +627,24 @@ function DefaultExportOptions: TExportOptions;
 // Whether this effects record asks for a pointer to be drawn at all.
 function EffectsDrawCursor(const AEffects: TExportEffects): Boolean;
 
+// Whether it asks for ANYTHING — a pointer or a zoom. False is the
+// record `--effects=none` produces, and the one a render is allowed to
+// honour by copying its input.
+function EffectsAskForAnything(const AEffects: TExportEffects): Boolean;
+
 function ExportCursorModeName(AMode: TExportCursorMode): string;
 
 // "as-recorded", "none", "smooth", or "big", case-insensitively.
+//
+// The empty string is NOT one of them, and used to be: it parsed as
+// as-recorded, so a caller that had nothing to parse got a real answer
+// back and could not tell the difference. The two places that bit are
+// both about a value somebody else supplied — a saved effect default
+// whose `cursor` key is not a string at all
+// (Knips.App.State.MigratedEffectCursor, which then silently discarded
+// the legacy keys it was meant to migrate) and an MCP `"cursor": ""`.
+// A caller with nothing to parse should not be calling this; `knips
+// export` checks its flag was given first.
 function ParseExportCursorMode(const AText: string;
   out AMode: TExportCursorMode): Boolean;
 
@@ -507,6 +684,29 @@ function ParseExportEffectsNaming(const AText: string;
   var AEffects: TExportEffects; out ACursorNamed: Boolean;
   out AError: string): Boolean;
 
+// `--cursor` and `--effects` together, which is the one surface that has
+// two spellings of one setting.
+//
+// ACursorText is what `--cursor` was given, '' when it was not passed at
+// all; AEffectsText is `--effects`. Both are applied to AEffects, in
+// that order, and the pair is refused when they name the pointer and
+// disagree — `--cursor=big --effects=smooth-cursor` used to apply the
+// list and throw the flag away without a word. Agreeing is fine:
+// `--cursor=none --effects=no-cursor` says one thing twice.
+//
+// Here rather than in `knips.pas` so the rule is testable without a
+// command line, which it was not: neither the flag's own refusal nor the
+// disagreement had a single assertion behind it.
+function ReconcileCursorAndEffects(const ACursorText, AEffectsText: string;
+  var AEffects: TExportEffects; out AError: string): Boolean;
+
+// Whether an --effects list asks, in so many words, for a copy: the
+// word `none`, which means no pointer and no zoom. It is the one
+// request a render honours by applying nothing (see
+// Knips.Export.Render's ExplicitCopy), so a render that applies nothing
+// WITHOUT it is a duplicate rather than a deliverable and is refused.
+function ExportEffectsRequestCopy(const AText: string): Boolean;
+
 // Export format from the output path's extension; False for unknown ones.
 function ExportFormatForPath(const APath: string;
   out AFormat: TExportFormat): Boolean;
@@ -534,13 +734,38 @@ function ParseTrimRange(const AText: string;
 function ValidateExportOptions(var AOptions: TExportOptions;
   out AError: string): Boolean;
 
+// What a writer says when StopRequested cut it short. One sentence for
+// every face and every writer, so a Ctrl-C reads the same whether it
+// landed in a render, an export or a trim — and says the thing that
+// actually matters, which is that the file the user already had is
+// still there.
+function ExportCancelledMessage: string;
+
+// The process-wide "stop what you are doing" flag: set from the
+// program's SIGINT/SIGTERM handler, polled by every long-running loop
+// there is — the recorder's run loop, the render's frame walk, the
+// export's two passes, the trim's wait.
+//
+// Here, in the one unit every layer reaches and which reaches nothing,
+// because it used to live in Knips.Recording and only the RECORDER
+// polled it. `knips export` did not even install the handler, so a
+// Ctrl-C during an export was the default disposition — die instantly,
+// leaving a truncated animation where a good one had been.
+//
+// A Boolean written from a signal handler and read from the main thread
+// is the whole of the synchronisation, deliberately: the handler does
+// one aligned store of a word and nothing else, which is what makes it
+// async-signal-safe.
+var
+  StopRequested: Boolean = False;
+
 implementation
 
 function DefaultRecordingOptions: TRecordingOptions;
 begin
   Result := Default(TRecordingOptions);
   Result.TargetKind := ctkDisplay;
-  Result.DisplayIndex := -1;
+  Result.DisplayIndex := MainDisplayIndex;
   Result.FramesPerSecond := DefaultFramesPerSecond;
   Result.Scale := ScaleAuto;
   Result.ShowsCursor := True;
@@ -666,9 +891,87 @@ begin
     Result := 'no zoom applied (' + AZoomNote + ')';
 end;
 
-function RenderAppliedFacts: TRenderAppliedFacts;
+function EffectFramingNoteLine(const AFramingNote: string): string;
+begin
+  Result := AFramingNote;
+end;
+
+function UnframedFramesNote(AFrames: Int64): string;
+begin
+  Result := '';
+  if AFrames <= 0 then
+    Exit;
+  Result := Format('%d frame(s) run past the end of this take''s pointer '
+    + 'track, so what they were showing is not recorded; nothing was '
+    + 'cropped for them and the pointer was placed from the last '
+    + 'position the track holds', [AFrames]);
+end;
+
+function SidecarSkippedLinesNote(ASkippedLines: Integer): string;
+begin
+  Result := '';
+  if ASkippedLines <= 0 then
+    Exit;
+  if ASkippedLines = 1 then
+    Result := '1 line of this take''s event sidecar could not be read '
+      + 'and was skipped; the pointer track is that much thinner than '
+      + 'the file looks'
+  else
+    Result := Format('%d lines of this take''s event sidecar could not '
+      + 'be read and were skipped; the pointer track is that much '
+      + 'thinner than the file looks', [ASkippedLines]);
+end;
+
+function DefaultRenderAppliedFacts: TRenderAppliedFacts;
 begin
   Result := Default(TRenderAppliedFacts);
+end;
+
+function DefaultExportAppliedFacts: TExportAppliedFacts;
+begin
+  Result := Default(TExportAppliedFacts);
+  Result.ExactPalette := True;
+end;
+
+function ExportAppliedSummary(const AFacts: TExportAppliedFacts): string;
+begin
+  Result := '';
+  // The palette first, because it is what the format IS: a GIF's
+  // colours, or the fact that an APNG has none to lose.
+  if AFacts.Format = efGif then
+  begin
+    Result := Format(' (%d colours', [AFacts.PaletteColors]);
+    // Worth saying: the histogram overflowed into its 6-bit fallback,
+    // which costs palette accuracy, and a GIF that looks banded should
+    // not have to be guessed at.
+    if not AFacts.ExactPalette then
+      Result := Result + ', 6-bit histogram';
+    Result := Result + ')';
+  end
+  else
+    Result := ' (truecolour)';
+  // Then the pointer, then the zoom — the same order the notes are
+  // printed in and the render's own summary uses.
+  if AFacts.SmoothCursor then
+    Result := Result + Format(', export cursor on %d frames '
+      + '(%d off frame)',
+      [AFacts.SmoothCursorFrames, AFacts.SmoothCursorOffFrame]);
+  if AFacts.ZoomOnClick then
+    Result := Result + Format(', zoom on %d frames from %d clicks',
+      [AFacts.ZoomedFrames, AFacts.ZoomClicks]);
+  if AFacts.SynthesizedFrames > 0 then
+    Result := Result + Format(', %d frames filled in at %d fps where the '
+      + 'capture had none',
+      [AFacts.SynthesizedFrames, AFacts.SynthesisFramesPerSecond]);
+end;
+
+function ExportSummaryLine(const APath: string; APixelWidth,
+  APixelHeight: Integer; AFrames: Int64; ADurationSeconds: Double;
+  AOutputBytes: Int64; const AApplied: string): string;
+begin
+  Result := Format('wrote %s: %dx%d, %d frames, %.1fs, %d kB%s',
+    [APath, APixelWidth, APixelHeight, AFrames, ADurationSeconds,
+    AOutputBytes div 1024, AApplied]);
 end;
 
 function RenderAppliedSummary(const AFacts: TRenderAppliedFacts): string;
@@ -715,6 +1018,14 @@ begin
     AOutputBytes div 1024, AApplied]);
 end;
 
+function TrimSummaryLine(const APath: string; AStartSeconds, AEndSeconds,
+  ASourceDurationSeconds: Double; AOutputBytes: Int64): string;
+begin
+  Result := Format('wrote %s: %.2fs–%.2fs of %.2fs, %d kB (streams copied)',
+    [APath, AStartSeconds, AEndSeconds, ASourceDurationSeconds,
+    AOutputBytes div 1024]);
+end;
+
 function ValidateRenderOutputPath(const APath: string;
   out AError: string): Boolean;
 var
@@ -737,6 +1048,49 @@ begin
     Exit;
   end;
   Result := True;
+end;
+
+function ExportCancelledMessage: string;
+begin
+  Result := 'stopped before it finished; nothing was written and any '
+    + 'file that was already there is untouched';
+end;
+
+function ClassifyRenderTemporary(const AFileName: string;
+  out ATemporaryName: string): TRenderTemporaryKind;
+var
+  Cut: Integer;
+  Tail: string;
+begin
+  ATemporaryName := '';
+  Result := rtkNotOurs;
+  Cut := Pos(RenderTemporarySuffix, AFileName);
+  if Cut <= 1 then
+    Exit;
+  ATemporaryName := Copy(AFileName, 1,
+    Cut + Length(RenderTemporarySuffix) - 1);
+  Tail := Copy(AFileName, Cut + Length(RenderTemporarySuffix), MaxInt);
+  if Tail = '' then
+    Exit(rtkTemporary);
+  if Tail = RenderTemporaryOwnerSuffix then
+    Exit(rtkOwnerMarker);
+  // `.sb-` and at least one character of token; a bare `.sb-` is not a
+  // name the framework produces and is not worth claiming.
+  if (Length(Tail) > Length(RenderTemporaryShadowPrefix))
+    and (Copy(Tail, 1, Length(RenderTemporaryShadowPrefix))
+    = RenderTemporaryShadowPrefix) then
+    Exit(rtkSandboxShadow);
+  ATemporaryName := '';
+end;
+
+function RenderTemporaryPathFor(const AOutputPath: string): string;
+begin
+  Result := AOutputPath + RenderTemporarySuffix;
+end;
+
+function RenderTemporaryOwnerPathFor(const ATemporaryPath: string): string;
+begin
+  Result := ATemporaryPath + RenderTemporaryOwnerSuffix;
 end;
 
 function ParseCaptureRegion(const AText: string;
@@ -772,9 +1126,9 @@ var
 begin
   Result := True;
   Extension := LowerCase(ExtractFileExt(APath));
-  if Extension = '.mp4' then
+  if Extension = Mpeg4FileExtension then
     AContainer := ocMPEG4
-  else if Extension = '.mov' then
+  else if Extension = QuickTimeFileExtension then
     AContainer := ocQuickTime
   else
   begin
@@ -823,7 +1177,12 @@ function SuggestedBitRate(APixelWidth, APixelHeight,
 var
   Budget: Double;
 begin
-  Budget := APixelWidth * APixelHeight * AFramesPerSecond
+  // Int64 before the Double, and that is not belt and braces: three
+  // Integers multiplied together wrap. 6016 x 3384 at 120 fps is
+  // 2,442,977,280, past High(Integer) — it came out negative, fell
+  // through the low clamp, and a 6K 120 fps recording was encoded at
+  // 1 Mbit/s. The Double at the end never saw the real number.
+  Budget := Int64(APixelWidth) * Int64(APixelHeight) * Int64(AFramesPerSecond)
     * AutoBitsPerPixelPerFrame;
   if Budget < MinBitRate then
     Budget := MinBitRate
@@ -850,6 +1209,18 @@ begin
       + ExtractFileExt(AOptions.OutputPath) + '" (use .mp4 or .mov)';
     Exit;
   end;
+  // -1 is "the main display" and is the only negative that means
+  // anything. Every other one used to be accepted and silently treated
+  // as -1, so `--display=-5` recorded the main display and said nothing
+  // — a typed index that quietly became a different index.
+  if (AOptions.TargetKind = ctkDisplay)
+    and (AOptions.DisplayIndex < MainDisplayIndex) then
+  begin
+    AError := Format('--display must be 0 or more, or %d for the main '
+      + 'display (given %d; see `knips displays`)',
+      [MainDisplayIndex, AOptions.DisplayIndex]);
+    Exit;
+  end;
   if (AOptions.FramesPerSecond < MinFramesPerSecond)
     or (AOptions.FramesPerSecond > MaxFramesPerSecond) then
   begin
@@ -859,12 +1230,13 @@ begin
   end;
   if (AOptions.Scale < ScaleAuto) or (AOptions.Scale > MaxScale) then
   begin
-    AError := Format('--scale must be 1, 2, or %d for auto', [ScaleAuto]);
+    AError := Format(ScaleRefusal + ' (given %d)', [AOptions.Scale]);
     Exit;
   end;
   if AOptions.BitRate < 0 then
   begin
-    AError := '--bitrate must be a positive number of bits per second';
+    AError := Format('--bitrate must be a positive number of bits per '
+      + 'second (given %d)', [AOptions.BitRate]);
     Exit;
   end;
   if (AOptions.TargetKind = ctkWindow) and AOptions.HasRegion then
@@ -883,12 +1255,16 @@ begin
     // about what is supposed to happen next: one bakes a big pointer into
     // the movie, the other leaves the movie cursorless so an export can
     // draw a smooth one. Refusing beats picking.
-    AError := '--big-cursor and --smooth-cursor are mutually exclusive';
+    AError := '--big-cursor and --smooth-cursor are mutually exclusive: '
+      + 'one bakes an enlarged pointer into the movie and the other '
+      + 'leaves the movie cursorless for a later render';
     Exit;
   end;
   if AOptions.SmoothCursor and not AOptions.ShowsCursor then
   begin
-    AError := '--no-cursor and --smooth-cursor are mutually exclusive';
+    AError := '--no-cursor and --smooth-cursor are mutually exclusive: '
+      + 'one asks for no pointer at all and the other leaves the movie '
+      + 'cursorless so that a render can draw one back in';
     Exit;
   end;
   if (AOptions.TargetKind = ctkWindow) and AOptions.SmoothCursor then
@@ -901,10 +1277,14 @@ begin
   end;
   if AOptions.BigCursor and not AOptions.ShowsCursor then
   begin
-    // One asks for no pointer and the other for a bigger one. Guessing
-    // which was meant would silently give the caller the opposite of one
-    // of the two flags it passed.
-    AError := '--no-cursor and --big-cursor are mutually exclusive';
+    // The reason, not only the fact. Guessing which was meant would
+    // silently give the caller the opposite of one of the two flags it
+    // passed — and the MCP rewriter used to bolt this explanation on for
+    // an agent while the person at the command line got the bare
+    // sentence.
+    AError := '--no-cursor and --big-cursor are mutually exclusive: one '
+      + 'asks for no pointer and the other for a bigger one. Pass '
+      + 'exactly one of them';
     Exit;
   end;
   if (AOptions.TargetKind = ctkWindow) and AOptions.BigCursor then
@@ -986,6 +1366,11 @@ end;
 // decided. A render with nothing to apply is a copy, and this is the
 // question that says so. Implementation-only: the one caller is the
 // validation below.
+function EffectsAskForAnything(const AEffects: TExportEffects): Boolean;
+begin
+  Result := AEffects.ZoomOnClick or EffectsDrawCursor(AEffects);
+end;
+
 function EffectsAreDefault(const AEffects: TExportEffects): Boolean;
 begin
   Result := (AEffects.Cursor = ecmAsRecorded) and not AEffects.ZoomOnClick;
@@ -1010,7 +1395,7 @@ begin
   Result := True;
   AMode := ecmAsRecorded;
   Normalized := LowerCase(Trim(AText));
-  if (Normalized = 'as-recorded') or (Normalized = '') then
+  if Normalized = 'as-recorded' then
     AMode := ecmAsRecorded
   else if Normalized = 'none' then
     AMode := ecmNone
@@ -1020,6 +1405,47 @@ begin
     AMode := ecmBig
   else
     Result := False;
+end;
+
+function ExportEffectsRequestCopy(const AText: string): Boolean;
+var
+  Part: string;
+begin
+  Result := False;
+  for Part in AText.Split([',']) do
+    if LowerCase(Trim(Part)) = 'none' then
+      Exit(True);
+end;
+
+function ReconcileCursorAndEffects(const ACursorText, AEffectsText: string;
+  var AEffects: TExportEffects; out AError: string): Boolean;
+var
+  FromFlag: TExportCursorMode;
+  FlagGiven, CursorNamed: Boolean;
+begin
+  Result := False;
+  AError := '';
+  FlagGiven := Trim(ACursorText) <> '';
+  if FlagGiven then
+  begin
+    if not ParseExportCursorMode(ACursorText, AEffects.Cursor) then
+    begin
+      AError := '--cursor must be as-recorded, none, smooth, or big';
+      Exit;
+    end;
+  end;
+  FromFlag := AEffects.Cursor;
+  if not ParseExportEffectsNaming(AEffectsText, AEffects, CursorNamed,
+    AError) then
+    Exit;
+  if FlagGiven and CursorNamed and (AEffects.Cursor <> FromFlag) then
+  begin
+    AError := '--cursor and --effects both name the pointer and disagree '
+      + '(--cursor=' + Trim(ACursorText) + ' against --effects='
+      + Trim(AEffectsText) + '); pass one of them';
+    Exit;
+  end;
+  Result := True;
 end;
 
 function DescribeExportEffects(const AEffects: TExportEffects): string;
@@ -1152,11 +1578,12 @@ begin
   Result := True;
   AFormat := efGif;
   Extension := LowerCase(ExtractFileExt(APath));
-  if Extension = '.gif' then
+  if Extension = GifFileExtension then
     AFormat := efGif
-  else if Extension = '.apng' then
+  else if Extension = ApngFileExtension then
     AFormat := efApng
-  else if (Extension = '.mp4') or (Extension = '.mov') then
+  else if (Extension = Mpeg4FileExtension)
+    or (Extension = QuickTimeFileExtension) then
     AFormat := efMovie
   else
     Result := False;
@@ -1321,15 +1748,22 @@ begin
       [MinGifWidth, MaxGifWidth]);
     Exit;
   end;
+  // Both of these name the ONE side at fault and echo it, which is what
+  // lets the MCP rewriter turn them into something useful: a
+  // token-for-token rewrite of "--trim cannot start before zero"
+  // produced "trim_start/trim_end cannot start before zero", which
+  // names both arguments and blames neither.
   if AOptions.TrimStartSeconds < 0 then
   begin
-    AError := '--trim cannot start before zero';
+    AError := Format('--trim cannot start before zero (given %.2f)',
+      [AOptions.TrimStartSeconds]);
     Exit;
   end;
   if AOptions.HasTrimEnd
     and (AOptions.TrimEndSeconds <= AOptions.TrimStartSeconds) then
   begin
-    AError := '--trim must end after it starts';
+    AError := Format('--trim must end after it starts (given %.2f to '
+      + '%.2f)', [AOptions.TrimStartSeconds, AOptions.TrimEndSeconds]);
     Exit;
   end;
   Result := True;

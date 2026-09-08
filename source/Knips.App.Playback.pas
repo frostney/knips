@@ -252,7 +252,6 @@ uses
 const
   DelegateClassName = 'KnipsPlaybackDelegate';
   DelegateSuperclassName = 'NSObject';
-  OwnerIvarName = 'knipsOwner';
   WindowWillCloseSelector = 'windowWillClose:';
   WindowShouldCloseSelector = 'windowShouldClose:';
 
@@ -525,13 +524,14 @@ begin
   try
     if not Log.LoadFromFile(SidecarPathFor(FRawPath), Error) then
     begin
-      // The loader's own reason, not a guess at it. A load fails in
-      // exactly three ways — the file is not there, it was written by a
-      // newer knips (TooNew), or it is not a knips sidecar at all
-      // (ForeignFormat) — and this used to report all three as the
-      // first. The version refusal in particular exists to be SEEN:
-      // telling somebody their sidecar is missing when it is sitting
-      // right there is worse than saying nothing.
+      // The loader's own reason, not a guess at it. A load can fail for
+      // any of the reasons LoadFromFile lists — the file is not there,
+      // reading it raised, it is longer than the reader will hold, it
+      // was written by a newer knips (TooNew), or it is not a knips
+      // sidecar at all (ForeignFormat) — and this used to report every
+      // one of them as the first. The version refusal in particular
+      // exists to be SEEN: telling somebody their sidecar is missing
+      // when it is sitting right there is worse than saying nothing.
       FEffectsReason := Error;
       FCursorReason := FEffectsReason;
       FZoomReason := FEffectsReason;
@@ -908,13 +908,14 @@ var
   Options: TExportOptions;
   Session: TExportSession;
   Pool: NSAutoreleasePool;
-  Error: string;
+  Error, Note: string;
   Succeeded: Boolean;
   WarnWidth, WarnHeight: Integer;
   WarnBytes: Int64;
 begin
   if (FWindow = nil) or FExporting or (FPath = '') then
     Exit;
+  Note := '';
   WarnWidth := 0;
   WarnHeight := 0;
   WarnBytes := 0;
@@ -983,6 +984,13 @@ begin
           WarnWidth := Session.Report.PixelWidth;
           WarnHeight := Session.Report.PixelHeight;
           WarnBytes := Session.Report.OutputBytes;
+          // Read before the session goes, exactly as the Re-export path
+          // reads the render's. An export that SUCCEEDS can still have
+          // failed to apply what was asked for — a zoom on a take whose
+          // capture was already zooming, a pointer on a take that has
+          // one in its pixels — and this button used to say nothing at
+          // all about that while the button beside it said everything.
+          Note := Session.Report.Note;
         end;
       finally
         FEstimateSource := nil;
@@ -997,6 +1005,11 @@ begin
     if FWindow <> nil then
       FWindow.setTitle(PascalToNSString(TitleWithNote));
   end;
+  // After FExporting has been cleared, or SetTitleNote refuses to touch
+  // the title. Same order, same two surfaces, as the Re-export path.
+  SetTitleNote(Note);
+  if Note <> '' then
+    ReportError('export: ' + Note);
   if Succeeded then
   begin
     // The CLI prints this advice on stderr; the app has no stderr, so a
@@ -1120,6 +1133,11 @@ begin
     Pool := NSAutoreleasePool(NSAutoreleasePool.alloc.init);
     try
       Session := TRenderSession.Create(FRawPath, FPath, Effects);
+      // Effects turned all the way off in the pull-down is a request for
+      // the raw pixels as the deliverable, exactly as `--effects=none`
+      // is on the CLI — and the window must still end up with a file to
+      // play.
+      Session.ExplicitCopy := not EffectsAskForAnything(Effects);
       try
         // No console under an app bundle; the title is the report.
         Session.Verbose := False;

@@ -48,6 +48,7 @@ uses
   fpjson,
   jsonparser,
 
+  Knips.App.State,
   Knips.Mcp.Params,
   Knips.Options,
   Knips.Recording.Sidecar,
@@ -62,7 +63,9 @@ uses
   Knips.Export.MovieWriter,
   Knips.Export.Pipeline,
   Knips.Export.Render,
-  Knips.Recording
+  Knips.ObjC.Runtime,
+  Knips.Recording,
+  Knips.Recording.Recovery
   {$ENDIF};
 
 const
@@ -103,6 +106,11 @@ const
   {$ENDIF}
 
 type
+  // Every tool handler has this shape, so one wrapper can put a pool
+  // around all ten rather than ten bodies each remembering to.
+  TKnipsToolHandler = function(AArguments: TJSONObject;
+    const ACtx: TMCPRequestContext): TMCPToolResult of object;
+
   TKnipsMcpController = class
   private
     {$IFDEF DARWIN}
@@ -115,25 +123,47 @@ type
     function RunExport(AArguments: TJSONObject;
       AFormat: TExportFormat): TMCPToolResult;
     {$ENDIF}
+    function TakeInfoWork(AArguments: TJSONObject;
+      const ACtx: TMCPRequestContext): TMCPToolResult;
     function TakeInfo(AArguments: TJSONObject;
+      const ACtx: TMCPRequestContext): TMCPToolResult;
+    function RenderWork(AArguments: TJSONObject;
       const ACtx: TMCPRequestContext): TMCPToolResult;
     function Render(AArguments: TJSONObject;
       const ACtx: TMCPRequestContext): TMCPToolResult;
+    function ListDisplaysWork(AArguments: TJSONObject;
+      const ACtx: TMCPRequestContext): TMCPToolResult;
     function ListDisplays(AArguments: TJSONObject;
+      const ACtx: TMCPRequestContext): TMCPToolResult;
+    function ListWindowsWork(AArguments: TJSONObject;
       const ACtx: TMCPRequestContext): TMCPToolResult;
     function ListWindows(AArguments: TJSONObject;
       const ACtx: TMCPRequestContext): TMCPToolResult;
+    function RecordStartWork(AArguments: TJSONObject;
+      const ACtx: TMCPRequestContext): TMCPToolResult;
     function RecordStart(AArguments: TJSONObject;
+      const ACtx: TMCPRequestContext): TMCPToolResult;
+    function RecordStopWork(AArguments: TJSONObject;
       const ACtx: TMCPRequestContext): TMCPToolResult;
     function RecordStop(AArguments: TJSONObject;
       const ACtx: TMCPRequestContext): TMCPToolResult;
+    function RecordStatusWork(AArguments: TJSONObject;
+      const ACtx: TMCPRequestContext): TMCPToolResult;
     function RecordStatus(AArguments: TJSONObject;
+      const ACtx: TMCPRequestContext): TMCPToolResult;
+    function ExportGifWork(AArguments: TJSONObject;
       const ACtx: TMCPRequestContext): TMCPToolResult;
     function ExportGif(AArguments: TJSONObject;
       const ACtx: TMCPRequestContext): TMCPToolResult;
+    function ExportApngWork(AArguments: TJSONObject;
+      const ACtx: TMCPRequestContext): TMCPToolResult;
     function ExportApng(AArguments: TJSONObject;
       const ACtx: TMCPRequestContext): TMCPToolResult;
+    function ExportTrimWork(AArguments: TJSONObject;
+      const ACtx: TMCPRequestContext): TMCPToolResult;
     function ExportTrim(AArguments: TJSONObject;
+      const ACtx: TMCPRequestContext): TMCPToolResult;
+    function InPool(AHandler: TKnipsToolHandler; AArguments: TJSONObject;
       const ACtx: TMCPRequestContext): TMCPToolResult;
   public
     destructor Destroy; override;
@@ -162,6 +192,39 @@ begin
     AStructured.Add(AName, McpArgumentMessage(ANote));
 end;
 
+// Every structured payload this server hands back goes out through
+// here, and it exists to keep a promise the schemas make: a tool's
+// structuredContent matches its declared outputSchema.
+//
+// The two are written by hand at opposite ends of the file — a JSON
+// string literal in Knips.Mcp.Params, a TJSONObject.Create list here —
+// and they drifted: the exports emitted six fields their schema never
+// declared, including the palette a GIF was quantised to, and nothing
+// noticed for as long as the only check was a person reading both.
+// McpUndeclaredPayloadKeys compares the REAL payload against the REAL
+// schema, so there is no third list to keep in step, and the first call
+// to a tool whose payload has outgrown its schema is the call that says
+// so.
+//
+// The payload still goes back whole. A key the schema forgot is a
+// mistake in this program, never in the client's request, and dropping
+// a caller's numbers over it would turn a documentation bug into data
+// loss; the line on the text block is what gets it fixed.
+function KnipsStructuredResult(ATool: TKnipsMcpTool;
+  const ASummary: string; AStructured: TJSONObject): TMCPToolResult;
+var
+  Undeclared, Text: string;
+begin
+  Text := ASummary;
+  Undeclared := McpUndeclaredPayloadKeys(ATool, AStructured);
+  if Undeclared <> '' then
+    Text := Text + #10 + 'internal: this result carries keys '
+      + KnipsMcpToolName(ATool) + '''s output schema does not declare ('
+      + Undeclared + '); the payload is returned as it is and the schema '
+      + 'is what needs correcting.';
+  Result := MCPStructuredResult(Text, AStructured);
+end;
+
 // The three effect notes as text lines, in the order
 // Knips.Options.EffectNoteSummary ranks them and — through
 // EffectCursorNoteLine / EffectZoomNoteLine — in the words `knips
@@ -179,7 +242,8 @@ function EffectNoteLines(const AFramingNote, ACursorNote,
 begin
   Result := '';
   if AFramingNote <> '' then
-    Result := Result + #10 + McpArgumentMessage(AFramingNote);
+    Result := Result + #10
+      + EffectFramingNoteLine(McpArgumentMessage(AFramingNote));
   if ACursorNote <> '' then
     Result := Result + #10
       + EffectCursorNoteLine(McpArgumentMessage(ACursorNote));
@@ -239,7 +303,102 @@ begin
   inherited Destroy;
 end;
 
+// One tool call, inside its own autorelease pool.
+//
+// This server is the first long-lived multi-session process knips has.
+// The CLI runs one session and exits; the menu-bar app has AppKit's
+// pool around every event. `knips mcp` had neither, so the autoreleased
+// objects every AVFoundation factory hands back — AVAssetWriter,
+// AVAssetReader, AVURLAsset and the NSURLs and NSDictionaries around
+// them (Knips.Export.MovieWriter, Knips.Export.MovieReader,
+// Knips.Export.Render) — accumulated for the life of the process:
+// measured at +19.5 MB and exactly +3 file descriptors per
+// record -> render -> export_gif cycle, growing without bound.
+//
+// The pool is per CALL rather than per session because a call is what
+// this server has: one request in, one result out, and nothing of the
+// framework's own left over between them.
+function TKnipsMcpController.InPool(AHandler: TKnipsToolHandler;
+  AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+{$IFDEF DARWIN}
+var
+  Pool: Pointer;
+{$ENDIF}
+begin
+  {$IFDEF DARWIN}
+  Pool := BeginAutoreleasePool;
+  try
+    Result := AHandler(AArguments, ACtx);
+  finally
+    EndAutoreleasePool(Pool);
+  end;
+  {$ELSE}
+  Result := AHandler(AArguments, ACtx);
+  {$ENDIF}
+end;
+
+function TKnipsMcpController.TakeInfo(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := InPool(TakeInfoWork, AArguments, ACtx);
+end;
+
+function TKnipsMcpController.Render(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := InPool(RenderWork, AArguments, ACtx);
+end;
+
 function TKnipsMcpController.ListDisplays(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := InPool(ListDisplaysWork, AArguments, ACtx);
+end;
+
+function TKnipsMcpController.ListWindows(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := InPool(ListWindowsWork, AArguments, ACtx);
+end;
+
+function TKnipsMcpController.RecordStart(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := InPool(RecordStartWork, AArguments, ACtx);
+end;
+
+function TKnipsMcpController.RecordStop(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := InPool(RecordStopWork, AArguments, ACtx);
+end;
+
+function TKnipsMcpController.RecordStatus(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := InPool(RecordStatusWork, AArguments, ACtx);
+end;
+
+function TKnipsMcpController.ExportGif(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := InPool(ExportGifWork, AArguments, ACtx);
+end;
+
+function TKnipsMcpController.ExportApng(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := InPool(ExportApngWork, AArguments, ACtx);
+end;
+
+function TKnipsMcpController.ExportTrim(AArguments: TJSONObject;
+  const ACtx: TMCPRequestContext): TMCPToolResult;
+begin
+  Result := InPool(ExportTrimWork, AArguments, ACtx);
+end;
+
+function TKnipsMcpController.ListDisplaysWork(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 {$IFDEF DARWIN}
 var
@@ -277,7 +436,7 @@ begin
     end;
     if Text = '' then
       Text := 'no capturable displays';
-    Result := MCPStructuredResult(Text,
+    Result := KnipsStructuredResult(kmtListDisplays, Text,
       TJSONObject.Create(['displays', Displays]));
     // Ownership moved into the structured result.
     Displays := nil;
@@ -290,7 +449,7 @@ begin
   {$ENDIF}
 end;
 
-function TKnipsMcpController.ListWindows(AArguments: TJSONObject;
+function TKnipsMcpController.ListWindowsWork(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 {$IFDEF DARWIN}
 var
@@ -332,7 +491,7 @@ begin
     end;
     if Text = '' then
       Text := 'no capturable windows';
-    Result := MCPStructuredResult(Text,
+    Result := KnipsStructuredResult(kmtListWindows, Text,
       TJSONObject.Create(['windows', Windows]));
     Windows := nil;
   finally
@@ -344,13 +503,15 @@ begin
   {$ENDIF}
 end;
 
-function TKnipsMcpController.RecordStart(AArguments: TJSONObject;
+function TKnipsMcpController.RecordStartWork(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 {$IFDEF DARWIN}
 var
   Recording: TRecordingOptions;
   Structured: TJSONObject;
-  Error, Directory, Note, Text: string;
+  Recovered: TRecoveredTakes;
+  RecoveredCount, Swept: Integer;
+  Error, Directory, Note, Recovery, Text: string;
 {$ENDIF}
 begin
   {$IFDEF DARWIN}
@@ -371,6 +532,17 @@ begin
   if (Directory <> '') and not ForceDirectories(Directory) then
     Exit(KnipsToolError('could not create ' + Directory));
 
+  // The crash-recovery pass, in the directory this take is about to be
+  // written into — exactly what `knips record` does, and what this face
+  // did not. A take whose process died is finished off and a killed
+  // render's scratch is swept, both reported as a note rather than
+  // silently. It used to be left out on cost grounds, and the cost was
+  // the old parse: an unfinished sidecar is now settled by a 4 kB read
+  // of its tail, measured at +17 ms against a directory of 500 takes.
+  RecoveredCount := RecoverOrphanedTakes(
+    ExtractFileDir(ExpandFileName(Recording.OutputPath)), Recovered, Swept);
+  Recovery := McpRecoveryNote(RecoveredCount, Swept);
+
   FSession := TRecordingSession.Create(Recording);
   if not FSession.StartCapture(Error) then
   begin
@@ -389,6 +561,8 @@ begin
   Note := McpSparseTrackNote(FSession.Report.SmoothCursor);
   if Note <> '' then
     Text := Text + #10 + Note;
+  if Recovery <> '' then
+    Text := Text + #10 + Recovery;
   Structured := TJSONObject.Create([
     'recording', True,
     'path', FOutputPath,
@@ -406,7 +580,8 @@ begin
     'raw', FSession.Report.SmoothCursor]);
   if Note <> '' then
     Structured.Add('note', Note);
-  Result := MCPStructuredResult(Text, Structured);
+  AddNote(Structured, 'recovery', Recovery);
+  Result := KnipsStructuredResult(kmtRecordStart, Text, Structured);
   {$ELSE}
   Result := UnsupportedResult;
   {$ENDIF}
@@ -426,7 +601,7 @@ begin
 end;
 {$ENDIF}
 
-function TKnipsMcpController.RecordStop(AArguments: TJSONObject;
+function TKnipsMcpController.RecordStopWork(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 {$IFDEF DARWIN}
 var
@@ -505,13 +680,13 @@ begin
     Structured.Add('advice', Advice);
   end;
   FreeAndNil(FSession);
-  Result := MCPStructuredResult(Summary, Structured);
+  Result := KnipsStructuredResult(kmtRecordStop, Summary, Structured);
   {$ELSE}
   Result := UnsupportedResult;
   {$ENDIF}
 end;
 
-function TKnipsMcpController.RecordStatus(AArguments: TJSONObject;
+function TKnipsMcpController.RecordStatusWork(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 {$IFDEF DARWIN}
 var
@@ -523,7 +698,7 @@ var
 begin
   {$IFDEF DARWIN}
   if (FSession = nil) or not FSession.Capturing then
-    Exit(MCPStructuredResult('not recording',
+    Exit(KnipsStructuredResult(kmtRecordStatus, 'not recording',
       TJSONObject.Create(['recording', False])));
   // One pointer sample into the event sidecar, because this is the only
   // moment an MCP recording has a main thread to sample on: the stdio
@@ -556,7 +731,8 @@ begin
       Text := 'the recording failed while writing and has been stopped; '
         + 'finalising the partial file also failed (' + StopError
         + '). ' + Path + ' may be unplayable.';
-    Result := MCPStructuredResult(McpArgumentMessage(Text),
+    Result := KnipsStructuredResult(kmtRecordStatus,
+      McpArgumentMessage(Text),
       TJSONObject.Create([
       'recording', False,
       'failed', True,
@@ -577,7 +753,7 @@ begin
     Exit;
   end;
 
-  Result := MCPStructuredResult(
+  Result := KnipsStructuredResult(kmtRecordStatus,
     Format('recording %s for %.1fs: %d frames (%d dropped)',
     [FOutputPath, Elapsed, Statistics.AppendedFrames,
     Statistics.DroppedFrames]),
@@ -632,10 +808,16 @@ begin
     Session.Verbose := False;
     if not Session.Run(Error) then
       Exit(KnipsToolError(Error));
-    Summary := McpExportSummary(Session.Report.OutputPath,
-      Session.Report.Format, Session.Report.PixelWidth,
-      Session.Report.PixelHeight, Session.Report.FramesWritten,
-      Session.Report.DurationSeconds, Session.Report.OutputBytes);
+    // The CLI's own sentence, from the CLI's own function: the two
+    // faces described the same export in different words and a
+    // different order, and the shorter one left the palette, the
+    // synthesised frames and the frames the pointer track could not
+    // place out entirely.
+    Summary := ExportSummaryLine(Session.Report.OutputPath,
+      Session.Report.PixelWidth, Session.Report.PixelHeight,
+      Session.Report.FramesWritten, Session.Report.DurationSeconds,
+      Session.Report.OutputBytes,
+      ExportAppliedSummary(ExportFactsOf(Session.Report)));
     // Through the rewriter, like every other message that leaves this
     // server. This one advises in flags — "consider --width=800 or
     // --fps=15" — which is exactly the sentence that sends an agent
@@ -667,7 +849,23 @@ begin
       'clicks', Session.Report.ZoomClicks,
       'cursor_drawn', Session.Report.SmoothCursor,
       'cursor_frames', Session.Report.SmoothCursorFrames,
-      'cursor_off_frame_frames', Session.Report.SmoothCursorOffFrame]);
+      'cursor_off_frame_frames', Session.Report.SmoothCursorOffFrame,
+      // The five the CLI printed and this payload did not carry at all.
+      // A GIF's palette is the single biggest thing deciding what the
+      // file looks like, and a client had no way to see it.
+      'palette_colors', Session.Report.PaletteColors,
+      'exact_palette', Session.Report.ExactPalette,
+      'sampled_frames', Session.Report.SampledFrames,
+      'synthesized_frames', Session.Report.SynthesizedFrames,
+      'synthesis_fps', Session.Report.SynthesisFramesPerSecond,
+      'unframed_frames', Session.Report.UnframedFrames,
+      // How much of the take's event sidecar the loader could not use.
+      // Zero for a clean file, and the one number that says the pointer
+      // track this export drew from has holes in it.
+      'sidecar_skipped_lines', Session.Report.SidecarSkippedLines]);
+    if Session.Report.SidecarSkippedLines > 0 then
+      Summary := Summary + #10
+        + SidecarSkippedLinesNote(Session.Report.SidecarSkippedLines);
     Summary := Summary + EffectNoteLines(Session.Report.FramingNote,
       Session.Report.SmoothCursorNote, Session.Report.ZoomNote);
     AddNote(Structured, 'framing_note', Session.Report.FramingNote);
@@ -678,7 +876,13 @@ begin
     // different claim from "nothing to say".
     if Advice <> '' then
       Structured.Add('advice', Advice);
-    Result := MCPStructuredResult(Summary, Structured);
+    // GIF and APNG are two tools sharing one body, and they have two
+    // schemas; the check below is only worth anything against the right
+    // one.
+    if AFormat = efApng then
+      Result := KnipsStructuredResult(kmtExportApng, Summary, Structured)
+    else
+      Result := KnipsStructuredResult(kmtExportGif, Summary, Structured);
   finally
     Session.Free;
   end;
@@ -700,7 +904,7 @@ end;
 // its own tool is also what lets it carry ReadOnlyHint, so a client can
 // let a planning call through without a confirmation it would have to
 // ask for on record_stop.
-function TKnipsMcpController.TakeInfo(AArguments: TJSONObject;
+function TKnipsMcpController.TakeInfoWork(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 var
   Log: TSidecarLog;
@@ -725,7 +929,7 @@ begin
     Loaded := Log.LoadFromFile(SidecarPath, LoadError);
     if not Loaded then
       FreeAndNil(Log);
-    Result := MCPStructuredResult(
+    Result := KnipsStructuredResult(kmtTakeInfo,
       McpTakeInfoSummary(Path, Log, LoadError),
       McpTakeInfoObject(Path, SidecarPath, FileSizeOf(Path), Log,
       LoadError));
@@ -738,7 +942,7 @@ end;
 // TRenderSession `knips render` runs, so an MCP tool and a subcommand
 // are one implementation — which is the invariant this server was
 // breaking for as long as it had no render at all.
-function TKnipsMcpController.Render(AArguments: TJSONObject;
+function TKnipsMcpController.RenderWork(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 {$IFDEF DARWIN}
 var
@@ -803,6 +1007,11 @@ begin
     Exit(KnipsToolError(Error));
 
   Session := TRenderSession.Create(InputPath, OutputPath, Effects);
+  // The MCP spelling of `--effects=none`: cursor "none" with zoom off,
+  // both said rather than defaulted. It is the one way to ask a render
+  // to apply nothing and get a copy; a render that applies nothing
+  // WITHOUT it is refused rather than writing a duplicate of its input.
+  Session.ExplicitCopy := McpRequestsCopy(AArguments);
   try
     // Progress on stdout would land in the middle of the JSON-RPC
     // stream, exactly as it would for an export.
@@ -817,20 +1026,11 @@ begin
     // The same clause list `knips render` prints, from the same
     // function in Knips.Options — the two used to hold a byte-identical
     // copy of it each.
-    Facts := RenderAppliedFacts;
-    Facts.ZoomApplied := Session.Report.ZoomApplied;
-    Facts.ZoomedFrames := Session.Report.ZoomedFrames;
-    Facts.FramesWritten := Session.Report.FramesWritten;
-    Facts.UsableClicks := Session.Report.UsableClicks;
-    Facts.CursorDrawn := Session.Report.CursorDrawn;
-    Facts.CursorFrames := Session.Report.CursorFrames;
-    Facts.CursorOffFrameFrames := Session.Report.CursorOffFrameFrames;
-    Facts.SynthesizedFrames := Session.Report.SynthesizedFrames;
-    Facts.SynthesisFramesPerSecond :=
-      Session.Report.SynthesisFramesPerSecond;
-    Facts.AudioTracks := Session.Report.AudioTracks;
-    Facts.AudioPassthrough := Session.Report.AudioPassthrough;
-    Facts.AudioSamples := Session.Report.AudioSamples;
+    // Fourteen assignments used to sit here and again in the other
+    // front end, byte for byte. The report is the render's own record,
+    // so the render is where it gets turned into the neutral facts the
+    // wording is composed from.
+    Facts := RenderFactsOf(Session.Report);
     Applied := RenderAppliedSummary(Facts);
     Summary := RenderSummaryLine(Session.Report.OutputPath,
       Session.Report.PixelWidth, Session.Report.PixelHeight,
@@ -874,7 +1074,12 @@ begin
       'audio_samples', Session.Report.AudioSamples,
       'audio_passthrough', Session.Report.AudioPassthrough,
       'elapsed_seconds', Session.Report.ElapsedSeconds,
-      'realtime_factor', Session.Report.RealtimeFactor]);
+      'realtime_factor', Session.Report.RealtimeFactor,
+      // See the export payload's field of the same name.
+      'sidecar_skipped_lines', Session.Report.SidecarSkippedLines]);
+    if Session.Report.SidecarSkippedLines > 0 then
+      Summary := Summary + #10
+        + SidecarSkippedLinesNote(Session.Report.SidecarSkippedLines);
     // The deliverable's own sidecar. A rendered take is two movies and
     // two sidecars, and without this the second pair is written and
     // never mentioned.
@@ -891,7 +1096,7 @@ begin
     AddNote(Structured, 'framing_note', Session.Report.FramingNote);
     AddNote(Structured, 'cursor_note', Session.Report.CursorNote);
     AddNote(Structured, 'zoom_note', Session.Report.ZoomNote);
-    Result := MCPStructuredResult(Summary, Structured);
+    Result := KnipsStructuredResult(kmtRender, Summary, Structured);
   finally
     Session.Free;
   end;
@@ -900,7 +1105,7 @@ begin
   {$ENDIF}
 end;
 
-function TKnipsMcpController.ExportGif(AArguments: TJSONObject;
+function TKnipsMcpController.ExportGifWork(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
   {$IFDEF DARWIN}
@@ -910,7 +1115,7 @@ begin
   {$ENDIF}
 end;
 
-function TKnipsMcpController.ExportApng(AArguments: TJSONObject;
+function TKnipsMcpController.ExportApngWork(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 begin
   {$IFDEF DARWIN}
@@ -920,7 +1125,7 @@ begin
   {$ENDIF}
 end;
 
-function TKnipsMcpController.ExportTrim(AArguments: TJSONObject;
+function TKnipsMcpController.ExportTrimWork(AArguments: TJSONObject;
   const ACtx: TMCPRequestContext): TMCPToolResult;
 {$IFDEF DARWIN}
 var
@@ -943,11 +1148,10 @@ begin
   try
     if not Session.Run(Error) then
       Exit(KnipsToolError(Error));
-    Result := MCPStructuredResult(Format(
-      'wrote %s: %.2fs–%.2fs of %.2fs, %d kB (streams copied)',
-      [Session.Report.OutputPath, Session.Report.StartSeconds,
+    Result := KnipsStructuredResult(kmtExportTrim, TrimSummaryLine(
+      Session.Report.OutputPath, Session.Report.StartSeconds,
       Session.Report.EndSeconds, Session.Report.SourceDurationSeconds,
-      Session.Report.OutputBytes div 1024]),
+      Session.Report.OutputBytes),
       TJSONObject.Create([
       'path', Session.Report.OutputPath,
       'start_seconds', Session.Report.StartSeconds,
@@ -1029,10 +1233,11 @@ begin
   AServer.RegisterTool(ToolDefinition(kmtRecordStart,
     ObjectSchema
       .AddString('out', 'Output file, .mp4 or .mov. Defaults to a '
-      + 'timestamped name in ~/Movies/knips/ — with a "-raw" suffix when '
-      + 'smooth_cursor is on, so the deliverable render writes has the '
-      + 'plain name. A relative path is resolved against the server''s '
-      + 'working directory and returned absolute.', False)
+      + 'timestamped name in ' + RecordingsFolderLabel + ' — with a '
+      + '"-raw" suffix when smooth_cursor is on, so the deliverable '
+      + 'render writes has the plain name. A relative path is resolved '
+      + 'against the server''s working directory and returned absolute.',
+      False)
       .AddBoolean('overwrite', 'Replace "out" if it already exists '
       + '(default false). Without this, an existing file is refused '
       + 'rather than destroyed.', False)

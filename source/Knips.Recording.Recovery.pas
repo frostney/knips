@@ -53,11 +53,14 @@ interface
 
 uses
   BaseUnix,
+  Classes,
+  DateUtils,
   SysUtils,
 
   Knips.Capture.CoreMedia,
   Knips.Export.MovieReader,
   Knips.Export.MovieTrim,
+  Knips.ObjC.Runtime,
   Knips.Options,
   Knips.Recording.Sidecar;
 
@@ -97,10 +100,26 @@ function RecoverOrphanedTakes(const ADirectory: string;
 function DescribeRecoveredTakes(const ATakes: TRecoveredTakes): string;
 
 // Removes the scratch files a killed render left in ADirectory, and
-// answers how many. The render pass renames its temporary into place as
-// its last act (Knips.Export.Render), so one still sitting there is one
-// that died and nothing will ever finish it. Exposed so it can be asked
-// for and tested on its own; RecoverOrphanedTakes runs it first.
+// answers how many temporaries were removed. The render pass renames
+// its temporary into place as its last act (Knips.Export.Render), so
+// one still sitting there is one that died and nothing will ever finish
+// it — UNLESS it is still being written, which is the whole reason this
+// is not a delete of everything that matches.
+//
+// Two gates, both of which used to be missing:
+//
+//   1. the NAME has to be one of the three shapes a temporary's family
+//      takes (Knips.Options.ClassifyRenderTemporary). The old pattern
+//      was `*<suffix>*` and deleted an ordinary user file called
+//      `notes.knips-render-tmp.txt`;
+//   2. the OWNER has to be gone — the marker's pid, tested exactly as
+//      an unfinished sidecar's is, or failing that the temporary's own
+//      age. The old sweep ran unconditionally at every `record` and
+//      every app launch, and deleted a live render's temporary out from
+//      under it.
+//
+// Exposed so it can be asked for and tested on its own;
+// RecoverOrphanedTakes runs it first.
 function SweepRenderTemporaries(const ADirectory: string): Integer;
 
 // Whether a process with this pid exists — `kill(pid, 0)`, which sends
@@ -120,6 +139,15 @@ function ProcessIsAlive(APid: Integer): Boolean;
 implementation
 
 {$IFDEF DARWIN}
+
+const
+  // How old a temporary with no owner marker has to be before it counts
+  // as abandoned. Long enough that no render in progress is ever inside
+  // it — the two-minute FinishTimeoutSlices bound in
+  // Knips.Export.Render is the longest a render can legitimately sit
+  // still — and short enough that a directory does not carry scratch
+  // around for a session.
+  TemporaryGraceMinutes = 10;
 
 // kill(pid, 0) sends no signal; it asks whether the process exists and
 // whether this user could signal it. ESRCH means gone, which is the only
@@ -383,6 +411,7 @@ var
   Search: TSearchRec;
   Take: TRecoveredTake;
   Directory: string;
+  Pool: Pointer;
 begin
   SetLength(ATakes, 0);
   Result := 0;
@@ -407,12 +436,22 @@ begin
         Continue;
       // One bad sidecar must not stop the pass: the next one might be the
       // take somebody actually wants back.
+      // One pool per take. A directory of ten orphans is ten
+      // AVAssetExportSessions and ten AVURLAssets, every one of them
+      // autoreleased by its factory, and this pass is the one place in
+      // the CLI that runs more than one framework session in a process
+      // (Knips.ObjC.Runtime.BeginAutoreleasePool).
+      Pool := BeginAutoreleasePool;
       try
-        if not RecoverOne(Directory + Search.Name, Take) then
-          Continue;
-      except
-        on Exception do
-          Continue;
+        try
+          if not RecoverOne(Directory + Search.Name, Take) then
+            Continue;
+        except
+          on Exception do
+            Continue;
+        end;
+      finally
+        EndAutoreleasePool(Pool);
       end;
       SetLength(ATakes, Result + 1);
       ATakes[Result] := Take;
@@ -423,10 +462,51 @@ begin
   end;
 end;
 
+// Whether a temporary at APath belongs to a render that is still
+// running. The owner marker is the answer where there is one — the same
+// `kill(pid, 0)` test an unfinished sidecar gets — and a temporary with
+// no marker is judged by its age, because a render that claimed one
+// before markers existed, or one whose marker could not be written,
+// must not be swept out from under itself either.
+function TemporaryIsLive(const APath: string): Boolean;
+var
+  Marker: TStringList;
+  MarkerPath: string;
+  Pid: Integer;
+  Written: TDateTime;
+begin
+  MarkerPath := RenderTemporaryOwnerPathFor(APath);
+  if FileExists(MarkerPath) then
+  begin
+    Marker := TStringList.Create;
+    try
+      try
+        Marker.LoadFromFile(MarkerPath);
+      except
+        on Exception do
+          Exit(True);
+      end;
+      if (Marker.Count > 0) and TryStrToInt(Trim(Marker[0]), Pid) then
+        Exit(ProcessIsAlive(Pid));
+    finally
+      Marker.Free;
+    end;
+    // A marker that says nothing readable is a marker somebody is
+    // half way through writing.
+    Exit(True);
+  end;
+  if not FileAge(APath, Written) then
+    Exit(False);
+  Result := (Now - Written) * MinsPerDay < TemporaryGraceMinutes;
+end;
+
 function SweepRenderTemporaries(const ADirectory: string): Integer;
 var
   Search: TSearchRec;
-  Directory: string;
+  Directory, TemporaryName: string;
+  Kind: TRenderTemporaryKind;
+  Live, Found: TStringList;
+  I: Integer;
 begin
   Result := 0;
   if ADirectory = '' then
@@ -434,24 +514,54 @@ begin
   Directory := IncludeTrailingPathDelimiter(ADirectory);
   if not DirectoryExists(Directory) then
     Exit;
-  // Trailing '*' as well as leading: AVAssetWriter under the macOS
-  // sandbox writes a shadow file beside its output named
-  // `<output>.sb-<token>`, so a killed render leaves both
-  // `x.mp4.knips-render-tmp` and `x.mp4.knips-render-tmp.sb-…`. Both are
-  // ours and both are dead; the suffix in the middle is what keeps the
-  // pattern from ever matching a real take.
-  if FindFirst(Directory + '*' + RenderTemporarySuffix + '*', faAnyFile,
-    Search) <> 0 then
-    Exit;
+  Live := TStringList.Create;
+  Found := TStringList.Create;
   try
-    repeat
-      if (Search.Attr and faDirectory) <> 0 then
+    Live.Sorted := True;
+    Live.Duplicates := dupIgnore;
+    // Two passes, because a temporary's family — the file itself, its
+    // owner marker, and AVAssetWriter's `.sb-<token>` shadow of it — has
+    // to be judged as one thing, and the directory may well list the
+    // shadow before the marker. The first pass decides which
+    // temporaries are somebody's live work; the second deletes only
+    // what is left.
+    if FindFirst(Directory + '*' + RenderTemporarySuffix + '*', faAnyFile,
+      Search) <> 0 then
+      Exit;
+    try
+      repeat
+        if (Search.Attr and faDirectory) <> 0 then
+          Continue;
+        // The tightened rule. `*<suffix>*` used to match — and delete —
+        // an ordinary user file called `notes.knips-render-tmp.txt`.
+        Kind := ClassifyRenderTemporary(Search.Name, TemporaryName);
+        if Kind = rtkNotOurs then
+          Continue;
+        Found.AddObject(Search.Name, TObject(PtrInt(Ord(Kind))));
+        if (Live.IndexOf(TemporaryName) < 0)
+          and TemporaryIsLive(Directory + TemporaryName) then
+          Live.Add(TemporaryName);
+      until FindNext(Search) <> 0;
+    finally
+      FindClose(Search);
+    end;
+    for I := 0 to Found.Count - 1 do
+    begin
+      ClassifyRenderTemporary(Found[I], TemporaryName);
+      if Live.IndexOf(TemporaryName) >= 0 then
         Continue;
-      if DeleteFile(Directory + Search.Name) then
+      // Only the temporary itself is counted. Its marker and its shadow
+      // are bookkeeping, and a caller told "3 leftover render scratch
+      // file(s) removed" about one dead render would be told a number
+      // that means nothing.
+      if DeleteFile(Directory + Found[I])
+        and (TRenderTemporaryKind(PtrInt(Found.Objects[I])) = rtkTemporary)
+        then
         Inc(Result);
-    until FindNext(Search) <> 0;
+    end;
   finally
-    FindClose(Search);
+    Found.Free;
+    Live.Free;
   end;
 end;
 

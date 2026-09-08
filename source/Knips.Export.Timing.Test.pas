@@ -69,7 +69,8 @@ var
   Emitted: Integer;
   Pending: Boolean;
 begin
-  SetLength(Result, 0);
+  // A managed result is not initialised on entry.
+  Result := nil;
   ASpentTicks := 0;
   ALastSeconds := 0;
   BaseSeconds := 0;

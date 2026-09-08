@@ -854,11 +854,12 @@ var
 begin
   Indices := SampledIndices(1000000000, Frames);
   Expect<Boolean>(Length(Indices) > 1).ToBe(True);
-  // Derived from the cap rather than transcribed: whatever the estimate
-  // claimed, the stride STARTS at GifPaletteMaxSeedStride, so a stream
-  // of Frames gets one sample per capped stride and the count follows
-  // from the constant. A transcribed 8 would have to be re-derived by
-  // hand the day the cap moves, which is exactly when it would be wrong.
+  // Both: the exact count this input produces, and the derivation that
+  // says WHY it is that. The derived bound alone is nearly a tautology
+  // — it recomputes the implementation's own arithmetic — and a
+  // schedule that quietly stopped capping the seed stride would satisfy
+  // it while returning something else entirely.
+  Expect<Integer>(Length(Indices)).ToBe(8);
   Expect<Integer>(Length(Indices))
     .ToBe((Frames + GifPaletteMaxSeedStride - 1)
     div GifPaletteMaxSeedStride);
@@ -906,10 +907,13 @@ var
   I: Integer;
 begin
   Indices := SampledIndices(GifPaletteSampleFrames, 10000);
-  // Logarithmic, not linear. The exact 263 was transcribed from a run
-  // and said nothing the two assertions below do not: what matters is
-  // that the count grew far past the target and stayed far below the
-  // frame count, and that the tail was reached anyway.
+  // Logarithmic, not linear — and the exact number, beside the two
+  // bounds that say what "logarithmic" MEANS. The bounds alone let the
+  // schedule change shape completely without a single test moving,
+  // which is the opposite of what a schedule test is for; 263 is what
+  // this schedule produces for this input, and a change to it should
+  // have to be looked at.
+  Expect<Integer>(Length(Indices)).ToBe(263);
   Expect<Boolean>(Length(Indices) > GifPaletteSampleFrames).ToBe(True);
   Expect<Boolean>(Length(Indices) < 10000 div 4).ToBe(True);
   Expect<Int64>(Indices[0]).ToBe(0);
@@ -1320,7 +1324,12 @@ begin
 end;
 
 begin
-  GScratchDirectory := GetTempDir;
+  // Pid-qualified, like Knips.Recording.Recovery.Test's directory: two
+  // runs of this suite at once otherwise write the same fixture paths
+  // and read each other's half-written files.
+  GScratchDirectory := IncludeTrailingPathDelimiter(GetTempDir)
+    + 'knips-gif-test-' + IntToStr(GetProcessID);
+  ForceDirectories(GScratchDirectory);
   TestRunnerProgram.AddSuite(TGifQuantizerTests.Create('TGifQuantizer'));
   TestRunnerProgram.AddSuite(
     TGifPaletteSamplerTests.Create('TGifPaletteSampler'));

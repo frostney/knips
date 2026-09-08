@@ -478,7 +478,6 @@ uses
 const
   ViewClassName = 'KnipsCameraView';
   ViewSuperclassName = 'NSView';
-  OwnerIvarName = 'knipsOwner';
   // kCGWindowLevelForKey(kCGFloatingWindowLevelKey): above ordinary
   // windows, below the menu bar and the selection overlay. NOT the
   // CocoaAll constant — every NSWindowLevel in FPC 3.2.2's CocoaAll

@@ -131,7 +131,6 @@ const
   WindowClassName = 'KnipsOverlayWindow';
   ViewSuperclassName = 'NSView';
   WindowSuperclassName = 'NSWindow';
-  OwnerIvarName = 'knipsOwner';
   IndexIvarName = 'knipsIndex';
   // Kap dims the rest of the screen rather than hiding it.
   DimAlpha = 0.35;

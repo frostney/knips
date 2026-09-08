@@ -268,14 +268,18 @@ begin
 end;
 
 // **This function has a near-identical twin**, and the duplication is
-// deliberate rather than overlooked: Knips.Export.CursorEffect's TExportCursor.RenderSprite
+// deliberate rather than overlooked:
+// Knips.Export.CursorEffect's TExportCursor.RenderSprite
 // builds the same sprite the same way — +[NSCursor arrowCursor], the
 // image's bitmap representation, a CGBitmapContextCreate at
 // premultiplied BGRA, one CGContextDrawImage at the scaled extent.
 //
-// What differs is the kernel, and it is not a parameter. This one draws at RECORD time, at the CAPTURE's scale, into
-// pixels the capture queue then blits into every frame; the other draws
-// at export time at the OUTPUT's scale.
+// What differs is the scale and when. This one draws at RECORD time, at
+// the CAPTURE's scale, into pixels the capture queue then blits into
+// every frame; the other draws at export time at the OUTPUT's scale.
+// (There is no "kernel" here in any sense — that word belongs to
+// Knips.Export.Bitmap's resampling and said nothing true about either
+// of these.)
 // Unifying them would mean a third unit owning a Quartz drawing routine
 // that neither of these layers could then reach without importing it,
 // for a saving of about thirty lines — and the two are free to diverge

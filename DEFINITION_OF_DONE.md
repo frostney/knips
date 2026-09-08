@@ -2,11 +2,21 @@
 
 A change is shippable only when every applicable item holds.
 
-- `lwpt format --check`, `lwpt build`, and `lwpt test` exit zero.
-- `lwpt build --mode release` exits zero and the release binary passes
-  `knips probe` (release turns on -O4's field reordering, which dev
-  builds never exercise — an alignment bug it exposed shipped
-  crash-free in dev mode from the first on-device commit).
+- **`tools/release-gate.sh` exits zero.** That is this list's first six
+  items, in order and in one command: `lwpt format --check`, `lwpt
+  build`, `lwpt test`, `lwpt agents --check`, `lwpt build --mode
+  release`, and `knips probe` against the release binary — release turns
+  on -O4's field reordering, which dev builds never exercise, and an
+  alignment bug it exposed shipped crash-free in dev mode from the first
+  on-device commit. Off a Mac, or without Screen Recording permission,
+  `--no-probe` runs the four that do not need one.
+
+  **The run leaves `build/knips` a release binary**; `lwpt build` puts
+  the dev one back, and the script says so on the way out.
+
+  The first four also run as the `pre-push` hook, which is installed by
+  `lefthook install` and is the only automation this repository has —
+  there is no CI service (docs/tooling.md).
 - Platform-neutral code has co-located `*.Test.pas` coverage of its
   public surface.
 - Darwin changes have been exercised on a Mac: `knips probe` passes and
@@ -20,5 +30,6 @@ A change is shippable only when every applicable item holds.
 - `CHANGELOG.md` carries an entry for the change. It is **hand-maintained**
   — curated prose under `## [Unreleased]`, written for someone deciding
   whether they want the change, not a transcription of commit subjects.
-  (`cliff.toml` is kept for the release-tagging step and is not what
-  produces the entries above.)
+  Nothing generates it: there was a `cliff.toml` here, carried in from
+  lantaarn, naming that project and configured to overwrite this file
+  from commit subjects. It has been deleted.

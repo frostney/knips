@@ -382,7 +382,7 @@ direct-compiler form AGENTS.md sanctions — `fpc @lwpt.cfg` — and adds
 only `-Twin64 -Px86_64` and output directories on top of it. Every unit
 and include path still comes from the generated `lwpt.cfg`.
 
-### The two scripts
+### The three scripts
 
 ```sh
 tools/linux-ci.sh                          # neutral suites + lwpt build + smoke + format
@@ -391,6 +391,8 @@ tools/linux-ci.sh -- lwpt test             # any other command in the container
 
 tools/win64-cross.sh                       # compile + link every target for win64
 tools/win64-cross.sh -- bash               # poke around inside
+
+tools/wine-smoke.sh                        # the cross-built suites, run under Wine
 ```
 
 Both mount the checkout **read-only** and copy it inside the container,

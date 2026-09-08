@@ -32,6 +32,7 @@ uses
 
   CocoaAll,
   Knips.Capture.CoreMedia,
+  Knips.Export.Atomic,
   Knips.Export.MovieReader,
   Knips.Options,
   MacOSAll;
@@ -114,7 +115,6 @@ const
   // A cancelled session settles in well under a second; this is the
   // bound on waiting for it before the partial file is removed anyway.
   CancelTimeoutSlices = 2000;
-  RunLoopSliceSeconds = 0.001;
 
 var
   GExportReady: Boolean = False;
@@ -153,6 +153,8 @@ var
   ErrorObject: NSError;
   WaitCount: Integer;
   Handle: THandle;
+  TempPath: string;
+  Cancelled: Boolean;
 begin
   Result := False;
   AError := '';
@@ -165,6 +167,10 @@ begin
     AError := 'no such file: ' + FOptions.InputPath;
     Exit;
   end;
+  AError := OutputPathRefusal(FOptions.OutputPath);
+  if AError <> '' then
+    Exit;
+  TempPath := RenderTemporaryPathFor(FOptions.OutputPath);
 
   URL := NSURL.fileURLWithPath(NSString.stringWithUTF8String(PAnsiChar(FOptions.InputPath)));
   Asset := AVAsset(AVURLAsset.URLAssetWithURL_options(URL, nil));
@@ -202,13 +208,14 @@ begin
       Exit;
     end;
 
-    // AVAssetExportSession refuses to start when the output exists.
-    if FileExists(FOptions.OutputPath)
-      and not DeleteFile(FOptions.OutputPath) then
-    begin
-      AError := 'cannot replace ' + FOptions.OutputPath;
+    // AVAssetExportSession refuses to start when the output exists — so
+    // the trim used to DELETE the caller's file and then ask the
+    // framework for a new one, which a timeout or a refusal left as
+    // nothing at all. It builds into a neighbour instead and renames
+    // that on, so the previous movie survives every failure there is
+    // (Knips.Export.Atomic).
+    if not ClaimTemporary(TempPath, AError) then
       Exit;
-    end;
 
     Session := AVAssetExportSession(
       AVAssetExportSession.exportSessionWithAsset_presetName(Asset,
@@ -222,7 +229,7 @@ begin
     Session.retain;
     try
       Session.setOutputURL(NSURL.fileURLWithPath(
-        NSString.stringWithUTF8String(PAnsiChar(FOptions.OutputPath))));
+        NSString.stringWithUTF8String(PAnsiChar(TempPath))));
       Session.setOutputFileType(FileTypeString);
       Session.setShouldOptimizeForNetworkUse(ObjCBOOL(True));
       Range.start := CMTimeMakeWithSeconds(FReport.StartSeconds,
@@ -235,10 +242,23 @@ begin
       Session.exportAsynchronouslyWithCompletionHandler(
         ExportCompletionHandler);
       WaitCount := 0;
+      Cancelled := False;
       while (not GExportReady) and (WaitCount < ExportTimeoutSlices) do
       begin
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, RunLoopSliceSeconds, False);
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, FrameworkSliceSeconds, False);
         Inc(WaitCount);
+        if StopRequested then
+        begin
+          Cancelled := True;
+          Break;
+        end;
+      end;
+      if Cancelled then
+      begin
+        Session.cancelExport;
+        AError := ExportCancelledMessage;
+        SweepTemporary(TempPath);
+        Exit;
       end;
       if not GExportReady then
       begin
@@ -253,12 +273,12 @@ begin
           and ((Session.status = AVAssetExportSessionStatusExporting)
           or (Session.status = AVAssetExportSessionStatusWaiting)) do
         begin
-          CFRunLoopRunInMode(kCFRunLoopDefaultMode, RunLoopSliceSeconds,
+          CFRunLoopRunInMode(kCFRunLoopDefaultMode, FrameworkSliceSeconds,
             False);
           Inc(WaitCount);
         end;
         AError := 'timed out trimming the movie';
-        DeleteFile(FOptions.OutputPath);
+        SweepTemporary(TempPath);
         Exit;
       end;
 
@@ -271,7 +291,7 @@ begin
         if ErrorObject <> nil then
           AError := AError + ': '
             + string(ErrorObject.localizedDescription.UTF8String);
-        DeleteFile(FOptions.OutputPath);
+        SweepTemporary(TempPath);
         Exit;
       end;
     finally
@@ -281,11 +301,16 @@ begin
     Asset.release;
   end;
 
-  if not FileExists(FOptions.OutputPath) then
+  if not FileExists(TempPath) then
   begin
     AError := 'the trim reported success but wrote no file';
+    SweepTemporary(TempPath);
     Exit;
   end;
+  // Only here does the previous movie stop being the answer.
+  if not CommitTemporary(TempPath, FOptions.OutputPath, AError) then
+    Exit;
+  SweepTemporary(TempPath);
   Handle := FileOpen(FOptions.OutputPath, fmOpenRead or fmShareDenyNone);
   if Handle <> THandle(-1) then
   begin

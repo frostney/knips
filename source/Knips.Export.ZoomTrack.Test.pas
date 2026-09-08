@@ -138,6 +138,8 @@ end;
 
 function OneClick(ASeconds, AX, AY: Double): TZoomClickArray;
 begin
+  // A managed result is not initialised on entry.
+  Result := nil;
   SetLength(Result, 1);
   Result[0].Seconds := ASeconds;
   Result[0].X := AX;

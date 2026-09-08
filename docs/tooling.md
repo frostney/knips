@@ -5,8 +5,9 @@
 - lwpt drives everything: `install`, `build`, `test`, `format`, `health`.
 - Other platforms are gated from a Mac in Docker: `tools/linux-ci.sh`,
   `tools/win64-cross.sh`, `tools/wine-smoke.sh` ([ports.md](ports.md)).
-- Pinned: FPC 3.2.2, lwpt ≥ 0.7.0, `cli`/`testing` `^0.7.0` (locked in
-  `lwpt.lock`).
+- Pinned: FPC 3.2.2, `cli`/`testing` `^0.7.0` (locked in `lwpt.lock`).
+  The lwpt BINARY is a separate number: 0.6.0 is what this repo is
+  developed against and it runs every gate.
 - The default build entry has no `flags`; the `-k-ld_classic` variant is
   a documented, opt-in second entry that is never committed as default.
 - Off-device type-checking of Darwin units uses an FPC cross compiler
@@ -27,11 +28,17 @@
 
 ## Versions (verify live, don't trust memory)
 
+The two 0.7.0s in this file are not the same thing and the docs used to
+say they were. `^0.7.0` in `lwpt.toml` is the **release tag** the `cli`
+and `testing` packages are fetched from; it says nothing about the lwpt
+binary doing the fetching, which is 0.6.0 here and runs every gate this
+project has. AGENTS.md says the same, in the same words.
+
 | Tool | Pin | Check |
 | --- | --- | --- |
 | FPC | 3.2.2 | `fpc -iV` |
-| lwpt | ≥ 0.7.0 | `lwpt --version` |
-| cli, testing | `^0.7.0` | `lwpt.lock` |
+| lwpt (the binary) | 0.6.0 developed against | `lwpt --version` |
+| cli, testing (the packages) | `^0.7.0` release tag | `lwpt.lock` |
 | Lefthook | ≥ 1.5 | `lefthook version` |
 | git-cliff | current | `git-cliff --version` |
 | macOS | 13+ | `sw_vers` |
@@ -104,11 +111,41 @@ without a Mac:
 checked before the first on-device run; it proves declarations and
 types, nothing about the frameworks' behaviour.
 
-## Pre-commit
+## Git hooks and the release gate
 
-`lefthook.yml` runs `lwpt format` on staged Pascal/TOML files with
-`stage_fixed: true`. Heavyweight gates (`format --check`, `build`,
-`test`, `probe`) belong to CI / the PR flow.
+`lefthook.yml` is the whole of knips's automation. There is no CI
+service behind it — no workflow, no pipeline, nothing that runs on a
+server when a branch is pushed. This section used to say the heavyweight
+gates "belong to CI / the PR flow", which read as though something else
+was running them; nothing was, and in a fresh clone `lefthook install`
+had never been run either, so `.git/hooks` held only samples.
+
+    lefthook install     # once per clone; writes .git/hooks/{pre-commit,pre-push}
+
+- **pre-commit** runs `lwpt format` on staged Pascal/TOML files with
+  `stage_fixed: true`, so a commit stays fast.
+- **pre-push** is the real gate, piped and fail-fast: `lwpt format
+  --check`, `lwpt build`, `lwpt test`, `lwpt agents --check`. About a
+  minute, measured.
+- **`tools/release-gate.sh`** is the Definition of Done as a command:
+  the same four the pre-push hook runs — `lwpt format --check`, `lwpt
+  build`, `lwpt test`, `lwpt agents --check` — plus `lwpt build --mode
+  release` and `knips probe` against the release binary. Six steps, four
+  with `--no-probe`. It is not a hook because the probe needs a Mac with
+  Screen Recording permission and minutes rather than seconds.
+  `--no-probe` runs the part any machine can.
+
+  **It leaves `build/knips` a release binary.** The release build is the
+  last thing in the run that writes it, so run `lwpt build` afterwards to
+  get the dev binary back. The script says so on the way out.
+
+`KNIPS_LWPT` overrides the lwpt binary for all three.
+
+Worktrees share one hooks directory: git resolves `hooks/` against the
+common `.git`, so `lefthook install` from a worktree installs for the
+main checkout too. Each working tree still runs its own `lefthook.yml`,
+because the installed hook resolves the config from
+`git rev-parse --show-toplevel`.
 
 ## Known upstream issues
 
