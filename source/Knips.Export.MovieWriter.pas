@@ -347,6 +347,22 @@ type
     property OutputPath: string read FOutputPath;
   end;
 
+// The H.264 output settings every movie knips writes are encoded with:
+// codec, size, average bit rate, keyframe interval, expected source rate,
+// no frame reordering, high profile. One builder because there are two
+// writers — the recorder's TMovieWriter and the render pass's own
+// AVAssetWriter (Knips.Export.Render.OpenWriter) — and they had a
+// dictionary each, built key for key the same. Two copies of an encoder
+// configuration drift silently: the file still plays, it is simply worse
+// than the other one, and nothing says so.
+//
+// AFramesPerSecond is what the deliverable is CONFIGURED for, not what a
+// sparse take averaged; it feeds both the keyframe interval and the
+// encoder's rate expectation, so passing an average buys a keyframe
+// every few frames and a bit rate sized for a slideshow.
+function BuildH264OutputSettings(APixelWidth, APixelHeight,
+  AFramesPerSecond, ABitRate: Integer): NSDictionary;
+
 {$ENDIF}
 
 implementation
@@ -458,18 +474,19 @@ begin
   FAudioBitRate := ABitRate;
 end;
 
-function TMovieWriter.BuildOutputSettings: NSDictionary;
+function BuildH264OutputSettings(APixelWidth, APixelHeight,
+  AFramesPerSecond, ABitRate: Integer): NSDictionary;
 var
   Settings: NSMutableDictionary;
   Compression: NSMutableDictionary;
 begin
   Compression := NSMutableDictionary.dictionaryWithCapacity(5);
-  Compression.setObject_forKey(NSNumber.numberWithInt(FBitRate),
+  Compression.setObject_forKey(NSNumber.numberWithInt(ABitRate),
     id(AVVideoAverageBitRateKey));
   Compression.setObject_forKey(
-    NSNumber.numberWithInt(FFramesPerSecond * KeyframeIntervalSeconds),
+    NSNumber.numberWithInt(AFramesPerSecond * KeyframeIntervalSeconds),
     id(AVVideoMaxKeyFrameIntervalKey));
-  Compression.setObject_forKey(NSNumber.numberWithInt(FFramesPerSecond),
+  Compression.setObject_forKey(NSNumber.numberWithInt(AFramesPerSecond),
     id(AVVideoExpectedSourceFrameRateKey));
   Compression.setObject_forKey(NSNumber.numberWithBool(ObjCBOOL(False)),
     id(AVVideoAllowFrameReorderingKey));
@@ -478,12 +495,18 @@ begin
 
   Settings := NSMutableDictionary.dictionaryWithCapacity(4);
   Settings.setObject_forKey(id(AVVideoCodecTypeH264), id(AVVideoCodecKey));
-  Settings.setObject_forKey(NSNumber.numberWithInt(FPixelWidth),
+  Settings.setObject_forKey(NSNumber.numberWithInt(APixelWidth),
     id(AVVideoWidthKey));
-  Settings.setObject_forKey(NSNumber.numberWithInt(FPixelHeight),
+  Settings.setObject_forKey(NSNumber.numberWithInt(APixelHeight),
     id(AVVideoHeightKey));
   Settings.setObject_forKey(Compression, id(AVVideoCompressionPropertiesKey));
   Result := Settings;
+end;
+
+function TMovieWriter.BuildOutputSettings: NSDictionary;
+begin
+  Result := BuildH264OutputSettings(FPixelWidth, FPixelHeight,
+    FFramesPerSecond, FBitRate);
 end;
 
 function TMovieWriter.BuildAudioOutputSettings: NSDictionary;

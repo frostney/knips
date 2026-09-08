@@ -488,6 +488,16 @@ That last sentence is load-bearing. **A sidecar with no trailer is how
 knips finds a recording whose process died**, and it is why there is no
 separate lock or marker file: the absence of the last line already says it.
 
+**Recovery reads `movie` as a bare file name and nothing else.** A `movie`
+containing a `/` (or the host's own separator, where that differs) —
+`../B/victim.mp4`, `sub/take.mp4` — is ignored outright, as are `.` and
+`..`, and so is a name that resolves to a symbolic link. A backslash is a
+legal file-name character on macOS and is not refused there. That is not fussiness about spelling: the pass joins the name to the
+sidecar's own directory and *replaces* the file it lands on with a re-mux, so
+an unchecked name let a sidecar planted in one directory rewrite a movie in
+another. A take whose header breaks the rule is left exactly as it was found,
+sidecar included.
+
 Two things separate a crashed take from one that is still being recorded:
 the `pid` in the header, tested with `kill(pid, 0)`, and whether the movie
 beside it opens. That pid test has limits — reuse, reboots, sidecars from

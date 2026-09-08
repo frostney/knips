@@ -19,7 +19,11 @@ unit Knips.Recording.Recovery;
 //
 // Three things then have to be true before anything is touched:
 //
-//   1. the sidecar names a movie that exists and is not empty;
+//   1. the sidecar names a movie that exists, is not empty, is inside
+//      this directory rather than reachable from it — the name is a bare
+//      file name by the format's own rule, enforced here because the
+//      file it lands on is the one this pass replaces — and is not a
+//      symbolic link;
 //   2. its process is gone. A sidecar with no trailer is also exactly
 //      what a recording *in progress* looks like, and the pid in the
 //      header is what tells the two apart. `kill(pid, 0)` is the test —
@@ -58,6 +62,7 @@ uses
   SysUtils,
 
   Knips.Capture.CoreMedia,
+  Knips.Export.Atomic,
   Knips.Export.MovieReader,
   Knips.Export.MovieTrim,
   Knips.ObjC.Runtime,
@@ -344,12 +349,28 @@ begin
     // the mistake worth refusing.
     if Log.AnchorHost > HostClockSeconds then
       Exit;
-    if Log.Header.MovieName = '' then
+    // The name is joined to this directory and the file it lands on is
+    // REPLACED by a re-mux, so the format's "a bare file name, not a
+    // path" rule has to be enforced here and not merely documented. A
+    // planted sidecar naming `../B/victim.mp4` made `knips record`
+    // re-mux a movie in a different directory — the victim's inode
+    // changed and the planted sidecar came back with a recovered
+    // trailer. Nothing is touched and no trailer is written: a sidecar
+    // this pass will not act on must also not be closed off, or a
+    // planted one would silently disable recovery for the take it names.
+    if not SidecarMovieNameIsBare(Log.Header.MovieName) then
       Exit;
     if ProcessIsAlive(Log.Header.ProcessID) then
       Exit;
     MoviePath := IncludeTrailingPathDelimiter(
       ExtractFileDir(ASidecarPath)) + Log.Header.MovieName;
+    // The refusal every writer gives its output, from the unit that
+    // owns it (Knips.Export.Atomic): the re-mux renames a file onto
+    // this path, and a symlink there would be silently replaced. Knips
+    // does not write through one, and recovery is a writer like the
+    // rest.
+    if OutputPathRefusal(MoviePath) <> '' then
+      Exit;
     if not FileExists(MoviePath) then
       Exit;
     ATake.MoviePath := MoviePath;

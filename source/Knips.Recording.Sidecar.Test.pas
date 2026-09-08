@@ -91,6 +91,8 @@ type
     procedure TestANonFiniteIntegerFieldIsDropped;
     procedure TestAnOutOfRangeIntegerFieldIsDropped;
     procedure TestUnbalancedBracketsAreNotNesting;
+    procedure TestAMovieNameThatIsAPathIsNotBare;
+    procedure TestAnOrdinaryMovieNameIsBare;
   end;
 
   TTimelineTests = class(TTestSuite)
@@ -770,6 +772,10 @@ begin
     TestAnOutOfRangeIntegerFieldIsDropped);
   Test('more closing brackets than opening ones is not negative nesting',
     TestUnbalancedBracketsAreNotNesting);
+  Test('a `movie` that is a path, or a directory, is not a bare name',
+    TestAMovieNameThatIsAPathIsNotBare);
+  Test('the names a recorder actually writes are bare',
+    TestAnOrdinaryMovieNameIsBare);
 end;
 
 function DeepLine(ADepth: Integer): string;
@@ -1946,6 +1952,42 @@ begin
   Expect<Boolean>(Available.CanDrawCursor).ToBe(False);
   Expect<Boolean>(Available.CanZoomOnClick).ToBe(False);
   Expect<Boolean>(Available.Reason <> '').ToBe(True);
+end;
+
+procedure THostileFileTests.TestAMovieNameThatIsAPathIsNotBare;
+begin
+  // The reproduction this predicate exists for: a sidecar planted in a
+  // recording directory naming `../B/victim.mp4` made the recovery pass
+  // re-mux and replace a movie in a DIFFERENT directory. The format has
+  // always said `movie` is a file name and not a path; this is the
+  // question that says it in code.
+  Expect<Boolean>(SidecarMovieNameIsBare('../victim.mp4')).ToBe(False);
+  Expect<Boolean>(SidecarMovieNameIsBare('../B/victim.mp4')).ToBe(False);
+  Expect<Boolean>(SidecarMovieNameIsBare('/tmp/victim.mp4')).ToBe(False);
+  Expect<Boolean>(SidecarMovieNameIsBare('sub/take.mp4')).ToBe(False);
+  // A backslash is this host's separator on Windows and a legal file
+  // name character on macOS, where the recorder writes `a\b.mp4`
+  // verbatim (Knips.Recording.OpenSidecar) — so the answer follows
+  // PathDelim rather than being refused everywhere, or a legal name would
+  // silently never be recovered.
+  Expect<Boolean>(SidecarMovieNameIsBare('a\b.mp4')).ToBe(PathDelim = '/');
+  // The two names that are a directory rather than a movie. Joined to
+  // the scan's own directory they name the directory itself.
+  Expect<Boolean>(SidecarMovieNameIsBare('.')).ToBe(False);
+  Expect<Boolean>(SidecarMovieNameIsBare('..')).ToBe(False);
+  Expect<Boolean>(SidecarMovieNameIsBare('')).ToBe(False);
+end;
+
+procedure THostileFileTests.TestAnOrdinaryMovieNameIsBare;
+begin
+  // Everything a real take is called, including the shapes the app and
+  // the MCP face write. A predicate that refused one of these would
+  // silently stop recovering ordinary recordings.
+  Expect<Boolean>(SidecarMovieNameIsBare('demo.mp4')).ToBe(True);
+  Expect<Boolean>(SidecarMovieNameIsBare('Knips 2026-09-08 at 12.01.02-raw.mp4'))
+    .ToBe(True);
+  Expect<Boolean>(SidecarMovieNameIsBare('say "hi".mov')).ToBe(True);
+  Expect<Boolean>(SidecarMovieNameIsBare('..hidden.mp4')).ToBe(True);
 end;
 
 begin

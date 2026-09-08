@@ -562,6 +562,29 @@ function SidecarSampleTimeAdvances(APreviousTime,
 // one's sidecar should replace the first's.
 function SidecarPathFor(const AMoviePath: string): string;
 
+// Whether a header's `movie` is what the format says it is: the movie's
+// file name, and not a path (docs/event-sidecar.md, *The header*). The
+// rule was documented and never enforced, and the one thing that reads
+// sidecars nobody wrote is the recovery pass — which joins this name to
+// the sidecar's own directory and then REPLACES the file it lands on
+// with a re-mux. A planted sidecar naming `../B/victim.mp4` made
+// `knips record` re-mux a movie in a different directory (measured: the
+// victim's inode changed and the planted sidecar came back with a
+// recovered trailer).
+//
+// So: no `/`, no separator of the host this reader runs on where that
+// differs from `/`, and neither of the two names that mean a directory.
+// A backslash is deliberately NOT refused on macOS: it is a legal
+// character in a file name there, and the recorder writes such a name
+// verbatim for exactly that reason (Knips.Recording.OpenSidecar's
+// LastDelimiter('/')), so refusing it would silently leave a take called
+// `a\b.mp4` unrecovered for ever. A sidecar written on Windows and read
+// here can name `..\x.mp4`, and that is caught downstream: the joined
+// path names no file in this directory. The cost of refusing a
+// legal-but-odd name is one take not recovered — the safe direction,
+// since nothing is then touched at all.
+function SidecarMovieNameIsBare(const AMovieName: string): Boolean;
+
 // JSON string escaping, exposed because it is the one place a file name
 // can break the format: a movie called `say "hi".mp4` is a legal file
 // name and an illegal JSON string until this has run over it.
@@ -937,6 +960,15 @@ begin
   if AMoviePath = '' then
     Exit('');
   Result := ChangeFileExt(AMoviePath, SidecarExtension);
+end;
+
+function SidecarMovieNameIsBare(const AMovieName: string): Boolean;
+begin
+  if AMovieName = '' then
+    Exit(False);
+  if (AMovieName = '.') or (AMovieName = '..') then
+    Exit(False);
+  Result := (Pos('/', AMovieName) = 0) and (Pos(PathDelim, AMovieName) = 0);
 end;
 
 // The header's `target` word. Implementation-only: WriteHeader is the

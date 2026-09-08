@@ -381,10 +381,9 @@ const
   FinishTimeoutSlices = 120000;
   // How often progress is reported and the autorelease pool drained.
   ProgressEveryFrames = 30;
-  // Knips.Export.MovieWriter's KeyframeIntervalSeconds is used directly
-  // — this pass encodes into the same container the recorder does, and
-  // "as the recorder does" was a comment beside a second copy of the
-  // number.
+  // How much of a `--effects=none` take is copied between two looks at
+  // the stop flag. See CopyRawTake.
+  CopyChunkBytes = 1024 * 1024;
   PoolDrainEveryFrames = 128;
   // vImage_Flags. kvImageHighQualityResampling (32) picks the more
   // expensive Lanczos path; a zoom is an *upscale* of screen content,
@@ -635,6 +634,8 @@ end;
 function TRenderSession.CopyRawTake(out AError: string): Boolean;
 var
   Source, Destination: TFileStream;
+  Remaining: Int64;
+  Chunk: Int64;
 begin
   Result := False;
   AError := '';
@@ -646,7 +647,37 @@ begin
         Exit;
       Source := TFileStream.Create(FInputPath, fmOpenRead or fmShareDenyNone);
       Destination := TFileStream.Create(FTempPath, fmCreate);
-      Destination.CopyFrom(Source, 0);
+      // In chunks rather than one CopyFrom(Source, 0), for two reasons.
+      // Ctrl-C: a whole-file copy is a single call nothing can
+      // interrupt, so a stop during a multi-gigabyte `--effects=none`
+      // was noticed only once the copy had finished — the same wait the
+      // rendering path does not make anybody sit through, since it asks
+      // between frames (RenderFrames). And truncation: CopyFrom with a
+      // count of 0 loops on a plain Read and ENDS QUIETLY on a short one
+      // (FPC 3.2.2 streams.inc), so a take that could not be read whole
+      // was committed as a shorter deliverable with nothing said;
+      // CopyFrom with a count uses ReadBuffer, which raises, and the
+      // except below turns that into a failure and a swept temporary. A
+      // megabyte is small enough that the stop answers promptly and
+      // large enough that the poll costs nothing next to the I/O.
+      //
+      // The failure is handed on exactly as a cancelled render's is:
+      // the caller sweeps the temporary and the previous deliverable
+      // was never touched.
+      Remaining := Source.Size;
+      while Remaining > 0 do
+      begin
+        if StopRequested then
+        begin
+          AError := ExportCancelledMessage;
+          Exit;
+        end;
+        Chunk := Remaining;
+        if Chunk > CopyChunkBytes then
+          Chunk := CopyChunkBytes;
+        Destination.CopyFrom(Source, Chunk);
+        Dec(Remaining, Chunk);
+      end;
       Result := True;
     except
       on E: Exception do
@@ -696,7 +727,8 @@ var
   Error: NSError;
   Container: TOutputContainer;
   FileType: NSString;
-  Settings, Compression, Attributes: NSMutableDictionary;
+  Settings: NSDictionary;
+  Attributes: NSMutableDictionary;
   Rate, BitRate: Integer;
 begin
   Result := False;
@@ -777,33 +809,29 @@ begin
   // stays perfectly playable either way.
   FWriter.setShouldOptimizeForNetworkUse(ObjCBOOL(True));
 
-  Rate := Round(FReader.NominalFrameRate);
-  if Rate < MinFramesPerSecond then
-    Rate := DefaultFramesPerSecond;
-  if Rate > MaxFramesPerSecond then
-    Rate := MaxFramesPerSecond;
+  // The rate this file is CONFIGURED for, which is the take's own and
+  // not the average the raw file came out at. `nominalFrameRate` is
+  // total frames over duration, and a take of a still screen is carried
+  // by the idle heartbeat rather than by capture: measured 6.3 fps on a
+  // 1280x720 take the recorder itself encoded at 30 fps and
+  // 2.49 Mbit/s. Configured from that average, this pass asked for
+  // SuggestedBitRate at 6 fps — which is the 1 Mbit/s floor — and a
+  // keyframe every 24 frames instead of every 120, and then synthesised
+  // frames at the take's real 30 fps into it: exactly the stretches
+  // where the zoom and the pointer are moving got a fraction of the
+  // budget. FReport.SynthesisFramesPerSecond is the sidecar header's own
+  // rate, resolved in Run before this is called, and it is the rate the
+  // frames are actually produced at.
+  // Already resolved and clamped into 1..120 by Run, from the header
+  // where there is one and from the reader's nominal rate where there is
+  // not; this is the one place it is read for the writer.
+  Rate := FReport.SynthesisFramesPerSecond;
   BitRate := SuggestedBitRate(FReport.PixelWidth, FReport.PixelHeight, Rate);
-
-  Compression := NSMutableDictionary.dictionaryWithCapacity(5);
-  Compression.setObject_forKey(NSNumber.numberWithInt(BitRate),
-    id(AVVideoAverageBitRateKey));
-  Compression.setObject_forKey(
-    NSNumber.numberWithInt(Rate * KeyframeIntervalSeconds),
-    id(AVVideoMaxKeyFrameIntervalKey));
-  Compression.setObject_forKey(NSNumber.numberWithInt(Rate),
-    id(AVVideoExpectedSourceFrameRateKey));
-  Compression.setObject_forKey(NSNumber.numberWithBool(ObjCBOOL(False)),
-    id(AVVideoAllowFrameReorderingKey));
-  Compression.setObject_forKey(id(AVVideoProfileLevelH264HighAutoLevel),
-    id(AVVideoProfileLevelKey));
-
-  Settings := NSMutableDictionary.dictionaryWithCapacity(4);
-  Settings.setObject_forKey(id(AVVideoCodecTypeH264), id(AVVideoCodecKey));
-  Settings.setObject_forKey(NSNumber.numberWithInt(FReport.PixelWidth),
-    id(AVVideoWidthKey));
-  Settings.setObject_forKey(NSNumber.numberWithInt(FReport.PixelHeight),
-    id(AVVideoHeightKey));
-  Settings.setObject_forKey(Compression, id(AVVideoCompressionPropertiesKey));
+  // The recorder's own settings builder, called with this pass's
+  // numbers: the two used to be a dictionary each, built key for key the
+  // same, and a drift between them is a worse file that nothing reports.
+  Settings := BuildH264OutputSettings(FReport.PixelWidth,
+    FReport.PixelHeight, Rate, BitRate);
 
   FVideoInput := AVAssetWriterInput(
     AVAssetWriterInput.assetWriterInputWithMediaType_outputSettings(

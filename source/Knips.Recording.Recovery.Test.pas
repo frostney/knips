@@ -30,6 +30,7 @@ uses
   {$IFDEF DARWIN}
   BaseUnix,
   Knips.Recording.Recovery,
+  Knips.Recording.Sidecar,
   {$ENDIF}
   TestingPascalLibrary;
 
@@ -45,7 +46,6 @@ type
     // sight — a bare temporary with no marker is inside its grace
     // period and is somebody's live render until proved otherwise.
     procedure MakeAbandonedTemporary(const AName: string);
-    function DeadPid: Integer;
     function Exists(const AName: string): Boolean;
     procedure OpenDirectory;
     procedure CloseDirectory;
@@ -68,6 +68,30 @@ type
     procedure TestAnAbsentPidIsNotAlive;
     procedure TestPidZeroAndBelowAreTreatedAsAlive;
   end;
+
+  // What the pass is allowed to reach. A sidecar is a file in a
+  // directory knips scans without being asked, and the movie it names is
+  // the file the pass REPLACES with a re-mux — so the name has to be
+  // the bare one the format promises, and the path it makes has to be a
+  // real file rather than a link to somebody else's.
+  TMovieNameTests = class(TTestSuite)
+  private
+    FParent: string;
+    FChild: string;
+    procedure OpenDirectories;
+    procedure CloseDirectories;
+    procedure RemoveEverythingIn(const ADirectory: string);
+    // A take that is unfinished in every way the pass looks at: a header
+    // naming AMovieName and a pid that is gone, an anchor below the host
+    // clock, and no trailer. Everything except the name is exactly what
+    // a crashed recording leaves.
+    procedure PlantSidecar(const APath, AMovieName: string);
+    procedure MakeFile(const APath: string);
+  public
+    procedure SetupTests; override;
+    procedure TestASidecarNamingAPathOutsideTheDirectoryIsIgnored;
+    procedure TestASidecarNamingASymlinkIsIgnored;
+  end;
   {$ELSE}
   TUnsupportedTests = class(TTestSuite)
   public
@@ -77,6 +101,28 @@ type
   {$ENDIF}
 
 {$IFDEF DARWIN}
+
+// Walk down from a high pid until one is genuinely unused, so nothing
+// here depends on a particular number being free. Anything the kernel
+// hands out on macOS is below this.
+function DeadPid: Integer;
+begin
+  Result := 99999;
+  while (Result > 90000) and ProcessIsAlive(Result) do
+    Dec(Result);
+end;
+
+function ByteSize(const APath: string): Int64;
+var
+  Handle: THandle;
+begin
+  Result := -1;
+  Handle := FileOpen(APath, fmOpenRead or fmShareDenyNone);
+  if Handle = THandle(-1) then
+    Exit;
+  Result := FileSeek(Handle, Int64(0), fsFromEnd);
+  FileClose(Handle);
+end;
 
 { TSweepTests }
 
@@ -137,16 +183,6 @@ begin
     FileWrite(Handle, AName[1], Length(AName));
     FileClose(Handle);
   end;
-end;
-
-function TSweepTests.DeadPid: Integer;
-begin
-  // Walk down from a high pid until one is genuinely unused, the same
-  // way TestAnAbsentPidIsNotAlive does, so nothing here depends on a
-  // particular number being free.
-  Result := 99999;
-  while (Result > 90000) and ProcessIsAlive(Result) do
-    Dec(Result);
 end;
 
 procedure TSweepTests.MakeAbandonedTemporary(const AName: string);
@@ -383,6 +419,169 @@ begin
   Expect<Boolean>(ProcessIsAlive(-1)).ToBe(True);
 end;
 
+{ TMovieNameTests }
+
+procedure TMovieNameTests.SetupTests;
+begin
+  Test('a `movie` that climbs out of the directory is never touched',
+    TestASidecarNamingAPathOutsideTheDirectoryIsIgnored);
+  Test('a `movie` that is a symbolic link is never written through',
+    TestASidecarNamingASymlinkIsIgnored);
+end;
+
+procedure TMovieNameTests.OpenDirectories;
+begin
+  FParent := IncludeTrailingPathDelimiter(GetTempDir)
+    + 'knips-recovery-name-' + IntToStr(FpGetPid) + '-'
+    + IntToStr(Random(1000000)) + PathDelim;
+  FChild := FParent + 'takes' + PathDelim;
+  ForceDirectories(FChild);
+end;
+
+procedure TMovieNameTests.RemoveEverythingIn(const ADirectory: string);
+var
+  Search: TSearchRec;
+begin
+  if FindFirst(ADirectory + '*', faAnyFile, Search) = 0 then
+    try
+      repeat
+        if (Search.Attr and faDirectory) = 0 then
+          DeleteFile(ADirectory + Search.Name);
+      until FindNext(Search) <> 0;
+    finally
+      FindClose(Search);
+    end;
+  RemoveDir(ADirectory);
+end;
+
+procedure TMovieNameTests.CloseDirectories;
+begin
+  if FParent = '' then
+    Exit;
+  RemoveEverythingIn(FChild);
+  RemoveEverythingIn(FParent);
+  FParent := '';
+  FChild := '';
+end;
+
+procedure TMovieNameTests.MakeFile(const APath: string);
+var
+  Handle: THandle;
+  Payload: string;
+begin
+  Payload := 'not a movie, but a file somebody would miss';
+  Handle := FileCreate(APath);
+  if Handle <> THandle(-1) then
+  begin
+    FileWrite(Handle, Payload[1], Length(Payload));
+    FileClose(Handle);
+  end;
+end;
+
+procedure TMovieNameTests.PlantSidecar(const APath, AMovieName: string);
+var
+  Writer: TSidecarWriter;
+  Header: TSidecarHeader;
+begin
+  Header := Default(TSidecarHeader);
+  Header.Version := SidecarFormatVersion;
+  Header.KnipsVersion := 'planted';
+  Header.MovieName := AMovieName;
+  Header.CreatedUtc := '2026-09-08T00:00:00Z';
+  Header.ProcessID := DeadPid;
+  Header.TargetKind := ctkDisplay;
+  Header.PixelWidth := 640;
+  Header.PixelHeight := 360;
+  Header.Scale := 1;
+  Header.FramesPerSecond := 30;
+  Header.SampleHz := 30;
+  Header.BaseWidth := 640;
+  Header.BaseHeight := 360;
+  Writer := TSidecarWriter.Create(APath);
+  try
+    Writer.WriteHeader(Header);
+    // One second on the host clock: always below a running machine's
+    // reading, so the "written before the last reboot" refusal is not
+    // what this take is stopped by. No trailer, which is what makes it
+    // an unfinished take.
+    Writer.WriteAnchor(1.0);
+  finally
+    Writer.Free;
+  end;
+end;
+
+procedure TMovieNameTests.TestASidecarNamingAPathOutsideTheDirectoryIsIgnored;
+var
+  Takes: TRecoveredTakes;
+  Swept: Integer;
+  Victim, Sidecar: string;
+  SizeBefore, SidecarBefore: Int64;
+begin
+  OpenDirectories;
+  try
+    // The reproduction. `movie` is documented as a file name and was
+    // joined to the sidecar's directory unchecked, so a sidecar planted
+    // in a recording directory could name a movie in ANOTHER one — and
+    // the pass re-muxed over it, replacing the file (measured: the
+    // victim's inode changed) and appending a recovered trailer to the
+    // planted sidecar.
+    Victim := FParent + 'victim.mp4';
+    MakeFile(Victim);
+    Sidecar := FChild + 'take' + SidecarExtension;
+    PlantSidecar(Sidecar, '..' + PathDelim + 'victim.mp4');
+    SizeBefore := ByteSize(Victim);
+    SidecarBefore := ByteSize(Sidecar);
+
+    Expect<Integer>(RecoverOrphanedTakes(FChild, Takes, Swept)).ToBe(0);
+    Expect<Integer>(Length(Takes)).ToBe(0);
+    // The file in the other directory is the one that was there. The
+    // count above is what actually proves it: without the guard the pass
+    // reports the planted take, and a re-mux would replace the file.
+    Expect<Boolean>(FileExists(Victim)).ToBe(True);
+    Expect<Int64>(ByteSize(Victim)).ToBe(SizeBefore);
+    // And nothing was written back into the sidecar either. A take this
+    // pass refuses to act on must not be closed off, or one planted
+    // file would permanently disable recovery for the name it carries.
+    Expect<Int64>(ByteSize(Sidecar)).ToBe(SidecarBefore);
+  finally
+    CloseDirectories;
+  end;
+end;
+
+procedure TMovieNameTests.TestASidecarNamingASymlinkIsIgnored;
+var
+  Takes: TRecoveredTakes;
+  Swept: Integer;
+  Target, Link, Sidecar: string;
+  SizeBefore, SidecarBefore: Int64;
+begin
+  OpenDirectories;
+  try
+    // A bare name, so the rule above lets it through — and a symbolic
+    // link, which the re-mux would rename over, silently replacing the
+    // link with a movie. Every other writer in knips refuses a link at
+    // a path it writes (Knips.Export.Atomic.OutputPathRefusal); this
+    // pass is a writer too and had no such refusal.
+    Target := FParent + 'elsewhere.mp4';
+    MakeFile(Target);
+    Link := FChild + 'take.mp4';
+    Expect<Integer>(FpSymlink(PAnsiChar(Target), PAnsiChar(Link))).ToBe(0);
+    Sidecar := FChild + 'take' + SidecarExtension;
+    PlantSidecar(Sidecar, 'take.mp4');
+    SizeBefore := ByteSize(Target);
+    SidecarBefore := ByteSize(Sidecar);
+
+    Expect<Integer>(RecoverOrphanedTakes(FChild, Takes, Swept)).ToBe(0);
+    Expect<Int64>(ByteSize(Target)).ToBe(SizeBefore);
+    Expect<Int64>(ByteSize(Sidecar)).ToBe(SidecarBefore);
+    // The link itself is still a link: refused by name, never followed
+    // and never replaced.
+    Expect<Boolean>(FpReadLink(Link) = Target).ToBe(True);
+  finally
+    CloseDirectories;
+  end;
+end;
+
 {$ELSE}
 
 { TUnsupportedTests }
@@ -422,6 +621,8 @@ begin
     'sweeping up after a killed render'));
   TestRunnerProgram.AddSuite(TProcessTests.Create(
     'is the process that wrote this sidecar still there?'));
+  TestRunnerProgram.AddSuite(TMovieNameTests.Create(
+    'which movie a sidecar is allowed to name'));
   {$ELSE}
   TestRunnerProgram.AddSuite(TUnsupportedTests.Create(
     'the recovery pass, which this host does not build'));

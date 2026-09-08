@@ -108,7 +108,7 @@ lefthook install                         # once per clone: pre-commit + pre-push
 | `source/Knips.Capture.Stream.pas` | SCStream wrapper; runtime-built SCStreamOutput; frame-status filter; live `sourceRect` updates |
 | `source/Knips.Export.MovieWriter.pas` | AVAssetWriter bindings + the movie sink; holds the last delivered frame so the idle heartbeat can repeat it under the same mutex the capture queues append through |
 | `source/Knips.Export.MovieReader.pas` | AVAssetReader bindings; BGRA frames + presentation stamps, with a trim range |
-| `source/Knips.Export.Atomic.pas` | The temporary-plus-rename every writer commits through, the owner marker the crash sweep reads, and the one symlink policy `record`, `render`, `export` and the trim share |
+| `source/Knips.Export.Atomic.pas` | The temporary-plus-rename every writer commits through, the owner marker the crash sweep reads, and the one symlink policy `record`, `render`, `export`, the trim and the crash recovery's re-mux share |
 | `source/Knips.Export.Bitmap.pas` | Platform-neutral BGRA buffer + box/bilinear resampling, and the canvas budget every export is sized against (tested) |
 | `source/Knips.Export.Gif.pas` | Platform-neutral GIF89a: exact-colour histogram (64-bit counters, every pixel of every sampled frame counted — the schedule below is what bounds the work, not a per-frame budget), median cut, dithering, LZW, and the self-thinning palette sample schedule the pipeline drives (tested) |
 | `source/Knips.Export.Apng.pas` | Platform-neutral APNG: acTL/fcTL/fdAT, PNG filters, paszlib, truecolour (tested) |
@@ -160,10 +160,12 @@ and one of them had to be the source of truth.
 `Knips.Export.Atomic` sits with `Knips.Export.MovieWriter` and is
 consumed by everything that writes a file the user may already have:
 `Knips.Recording` (the symlink refusal), `Knips.Export.Render`,
-`Knips.Export.Pipeline` and `Knips.Export.MovieTrim`. Its naming rules
-are `Knips.Options`', so `Knips.Recording.Recovery` — which sweeps what
-a killed render left, gated on the owner marker's pid — agrees with the
-writers without depending on them.
+`Knips.Export.Pipeline`, `Knips.Export.MovieTrim` and
+`Knips.Recording.Recovery`, whose re-mux replaces a movie by name and
+asks the same refusal before it does. Its naming rules are
+`Knips.Options`', so the recovery pass's sweep of what a killed render
+left — gated on the owner marker's pid — agrees with the writers on
+what a temporary is called without a second copy of the rule.
 `Knips.Recording.Heartbeat` sits beside them and depends on nothing at
 all; `Knips.Recording` reads the clock and asks it whether the movie has
 fallen behind, and `Knips.Export.MovieWriter` carries the answer out
