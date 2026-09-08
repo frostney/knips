@@ -64,9 +64,6 @@ unit Knips.Export.CursorEffect;
 // at record time, which is the whole point of doing this from a sidecar.
 
 {$I Knips.inc}
-{$IFDEF DARWIN}
-{$modeswitch objectivec2}
-{$ENDIF}
 
 interface
 
@@ -75,13 +72,11 @@ interface
 uses
   SysUtils,
 
-  CocoaAll,
   Knips.Export.Bitmap,
-  Knips.ObjC.Runtime,
   Knips.Options,
   Knips.Recording.CursorMath,
-  Knips.Recording.Sidecar,
-  MacOSAll;
+  Knips.Recording.CursorSprite,
+  Knips.Recording.Sidecar;
 
 const
   // Full width of the smoothing window, in seconds. Five samples at the
@@ -104,20 +99,14 @@ type
     FOwnsLog: Boolean;
     FSmoothed: TSidecarSampleArray;
     FSmoothedCount: Integer;
-    FPixels: PByte;
-    FSpriteWidth: Integer;
-    FSpriteHeight: Integer;
-    FSpriteBytesPerRow: Integer;
-    FHotSpotX: Integer;
-    FHotSpotY: Integer;
-    FReady: Boolean;
+    // The drawn pointer, premultiplied BGRA, made once by
+    // Knips.Recording.CursorSprite at the OUTPUT's scale. Its Pixels
+    // being non-nil is what "ready" means.
+    FSprite: TCursorSprite;
     FAsked: Boolean;
     FDrawnFrames: Int64;
     FOffFrameFrames: Int64;
-    procedure ReleasePixels;
     procedure ForgetLog;
-    function RenderSprite(APixelsPerPoint: Double;
-      out AError: string): Boolean;
     function PlanAt(AWidth, AHeight: Integer; ASeconds: Double;
       AHasSource: Boolean; ASourceX, ASourceY, ASourceWidth,
       ASourceHeight: Double; out APlan: TCursorBlitPlan): Boolean;
@@ -231,51 +220,6 @@ implementation
 
 {$IFDEF DARWIN}
 
-const
-  ActivationPolicyProhibited = 2;
-  PremultipliedBgraFlags = kCGImageAlphaPremultipliedFirst
-    or kCGBitmapByteOrder32Little;
-  BitsPerComponent = 8;
-  BytesPerPixel = 4;
-
-// Same rule as Knips.Recording.CursorOverlay: +[NSCursor arrowCursor] is
-// nil without an NSApplication. `knips export` from a shell has none, so
-// one is made and immediately put in the Prohibited activation policy —
-// no Dock tile, no menu bar. The menu-bar app already has NSApp long
-// before an export starts, and the policy is set only when this call is
-// what created it, so it can never overwrite the app's own.
-procedure EnsureAppKit;
-var
-  Created: Boolean;
-begin
-  Created := NSApp = nil;
-  NSApplication.sharedApplication;
-  if Created and (NSApp <> nil) then
-    NSApp.setActivationPolicy(ActivationPolicyProhibited);
-end;
-
-function LargestBitmapRepresentation(AImage: NSImage): NSBitmapImageRep;
-var
-  Representations: NSArray;
-  Candidate: NSBitmapImageRep;
-  I: Integer;
-begin
-  Result := nil;
-  if AImage = nil then
-    Exit;
-  Representations := AImage.representations;
-  if Representations = nil then
-    Exit;
-  for I := 0 to Integer(Representations.count) - 1 do
-  begin
-    if not RespondsToSelector(Representations.objectAtIndex(I), 'CGImage') then
-      Continue;
-    Candidate := NSBitmapImageRep(Representations.objectAtIndex(I));
-    if (Result = nil) or (Candidate.pixelsWide > Result.pixelsWide) then
-      Result := Candidate;
-  end;
-end;
-
 { TExportCursor }
 
 constructor TExportCursor.Create;
@@ -285,7 +229,7 @@ end;
 
 destructor TExportCursor.Destroy;
 begin
-  ReleasePixels;
+  ReleaseCursorSprite(FSprite);
   ForgetLog;
   inherited Destroy;
 end;
@@ -296,132 +240,6 @@ begin
     FLog.Free;
   FLog := nil;
   FOwnsLog := False;
-end;
-
-procedure TExportCursor.ReleasePixels;
-begin
-  FReady := False;
-  if FPixels <> nil then
-  begin
-    FreeMem(FPixels);
-    FPixels := nil;
-  end;
-end;
-
-// **This function has a near-identical twin**, and the duplication is
-// deliberate rather than overlooked:
-// Knips.Recording.CursorOverlay's TCursorOverlay.RenderSprite
-// builds the same sprite the same way — +[NSCursor arrowCursor], the
-// image's bitmap representation, a CGBitmapContextCreate at
-// premultiplied BGRA, one CGContextDrawImage at the scaled extent.
-//
-// What differs is the scale and when. This one draws at EXPORT time, at
-// the OUTPUT's scale, into a sprite the render and the GIF pipeline
-// composite into scaled frames; the other draws at record time at the
-// capture's scale. (There is no "kernel" here in any sense — that word
-// belongs to Knips.Export.Bitmap's resampling and said nothing true
-// about either of these.)
-// Unifying them would mean a third unit owning a Quartz drawing routine
-// that neither of these layers could then reach without importing it,
-// for a saving of about thirty lines — and the two are free to diverge
-// (a different magnification rule, a different colour space at export)
-// in a way a shared routine would fight. See docs/architecture.md.
-//
-// **Change them together.** A fix to one is a fix to the other, and the
-// only thing keeping them in step is this note in both files.
-function TExportCursor.RenderSprite(APixelsPerPoint: Double;
-  out AError: string): Boolean;
-var
-  Cursor: NSCursor;
-  Image: NSImage;
-  Representation: NSBitmapImageRep;
-  Bitmap: CGImageRef;
-  Space: CGColorSpaceRef;
-  Context: CGContextRef;
-  PointWidth, PointHeight: Double;
-  ByteCount: PtrUInt;
-begin
-  Result := False;
-  AError := '';
-  ReleasePixels;
-  EnsureAppKit;
-
-  Cursor := NSCursor.arrowCursor;
-  if Cursor = nil then
-  begin
-    AError := 'AppKit has no arrow cursor to draw';
-    Exit;
-  end;
-  Image := Cursor.image;
-  Representation := LargestBitmapRepresentation(Image);
-  if Representation = nil then
-  begin
-    AError := 'the arrow cursor has no bitmap representation';
-    Exit;
-  end;
-  PointWidth := Image.size.width;
-  PointHeight := Image.size.height;
-  if (PointWidth <= 0) or (PointHeight <= 0) then
-  begin
-    AError := 'the arrow cursor has no size';
-    Exit;
-  end;
-
-  // The magnification is already folded into APixelsPerPoint by Prepare,
-  // which is the only caller: one number decides the sprite's size, so
-  // there is nowhere for the two to disagree.
-  FSpriteWidth := BigCursorSpriteExtent(PointWidth, APixelsPerPoint, 1);
-  FSpriteHeight := BigCursorSpriteExtent(PointHeight, APixelsPerPoint, 1);
-  FHotSpotX := BigCursorHotSpot(Cursor.hotSpot.x, PointWidth, FSpriteWidth);
-  FHotSpotY := BigCursorHotSpot(Cursor.hotSpot.y, PointHeight,
-    FSpriteHeight);
-  FSpriteBytesPerRow := FSpriteWidth * BytesPerPixel;
-  ByteCount := PtrUInt(FSpriteBytesPerRow) * PtrUInt(FSpriteHeight);
-
-  FPixels := GetMem(ByteCount);
-  if FPixels = nil then
-  begin
-    AError := 'could not allocate the cursor sprite';
-    Exit;
-  end;
-  // Quartz does not clear a buffer it is handed and the sprite is mostly
-  // transparent; an uncleared one would blit whatever was on the heap.
-  FillChar(FPixels^, ByteCount, 0);
-
-  Space := CGColorSpaceCreateDeviceRGB;
-  if Space = nil then
-  begin
-    AError := 'CGColorSpaceCreateDeviceRGB failed';
-    ReleasePixels;
-    Exit;
-  end;
-  Context := CGBitmapContextCreate(FPixels, FSpriteWidth, FSpriteHeight,
-    BitsPerComponent, FSpriteBytesPerRow, Space, PremultipliedBgraFlags);
-  CGColorSpaceRelease(Space);
-  if Context = nil then
-  begin
-    AError := 'CGBitmapContextCreate failed for the cursor sprite';
-    ReleasePixels;
-    Exit;
-  end;
-  Bitmap := Representation.CGImage;
-  if Bitmap <> nil then
-  begin
-    CGContextSetInterpolationQuality(Context, kCGInterpolationHigh);
-    CGContextDrawImage(Context, CGRectMake(0, 0, FSpriteWidth,
-      FSpriteHeight), Bitmap);
-    CGContextFlush(Context);
-  end;
-  CGContextRelease(Context);
-  if Bitmap = nil then
-  begin
-    AError := 'the arrow cursor representation has no CGImage';
-    ReleasePixels;
-    Exit;
-  end;
-
-  FReady := True;
-  Result := True;
 end;
 
 function TExportCursor.Prepare(const AMoviePath: string;
@@ -534,7 +352,15 @@ begin
   // smaller, relative to the content, than the real one would have been
   // at full zoom — by the zoom factor, so up to about 2x.
   PixelsPerPoint := AOutputWidth / FLog.Header.BaseWidth;
-  if not RenderSprite(PixelsPerPoint * Magnification, AError) then
+  // The magnification is folded into the pixels-per-point here rather
+  // than handed to the renderer as its own factor, which is what this
+  // call has always done: one number decides the sprite's size, so there
+  // is nowhere for the two to disagree. (Big Cursor's own caller passes
+  // the two apart, because its factor is a constant of the feature and
+  // not a resolved option.)
+  ReleaseCursorSprite(FSprite);
+  if not RenderArrowSprite(PixelsPerPoint * Magnification, 1, FSprite,
+    AError) then
   begin
     ForgetLog;
     Exit;
@@ -560,7 +386,7 @@ var
 begin
   Result := False;
   APlan := Default(TCursorBlitPlan);
-  if not FReady or (FLog = nil) then
+  if (FSprite.Pixels = nil) or (FLog = nil) then
     Exit;
   if (AWidth <= 0) or (AHeight <= 0) then
     Exit;
@@ -585,8 +411,8 @@ begin
   end;
   Mapping := CursorFrameMapping(AWidth, AHeight, ASourceX, ASourceY,
     ASourceWidth, ASourceHeight);
-  APlan := PlanCursorBlit(Mapping, X, Y, FSpriteWidth, FSpriteHeight,
-    FHotSpotX, FHotSpotY);
+  APlan := PlanCursorBlit(Mapping, X, Y, FSprite.Width, FSprite.Height,
+    FSprite.HotSpotX, FSprite.HotSpotY);
   Result := True;
 end;
 
@@ -606,8 +432,8 @@ begin
     Inc(FOffFrameFrames);
     Exit;
   end;
-  BlitPremultipliedBgra(APixels, ABytesPerRow, FPixels, FSpriteBytesPerRow,
-    Plan);
+  BlitPremultipliedBgra(APixels, ABytesPerRow, FSprite.Pixels,
+    FSprite.BytesPerRow, Plan);
   Inc(FDrawnFrames);
 end;
 

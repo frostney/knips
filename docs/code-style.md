@@ -44,18 +44,28 @@ fixed", for the incident). Comment above the clause instead.
   That splits the tree in a way worth stating, because the layer names do
   not: **every `Knips.App.*` unit below the state machine** talks to AppKit
   and takes `objectivec2`; so do both `Knips.Capture.*` units under
-  `source/`, `Knips.Recording` and `Knips.Recording.CursorOverlay`,
-  `Knips.Recording.Recovery`, and the `Knips.Export.*` units that touch
-  AVFoundation — `MovieWriter`, `MovieReader`, `MovieTrim`, `Pipeline`,
-  `Render`, `CursorEffect`. Everything else in `Knips.Export.*` is
+  `source/`, `Knips.Recording`, `Knips.Recording.CursorSprite` and
+  `Knips.Recording.Recovery`, and the `Knips.Export.*` units that declare
+  Cocoa bindings — `MovieWriter`, `MovieReader`, `MovieTrim`, `Pipeline`,
+  `Render`, `Atomic`. Everything else in `Knips.Export.*` is
   platform-neutral and has **no modeswitch at all**: `Bitmap`, `Gif`,
   `Apng`, `Timing`, `Cadence`, `ZoomTrack`, `SizeEstimate`. So are
   `Knips.Options`, `Knips.App.State`, `Knips.Mcp.Params`, the
   `Knips.Recording.*Math` pair, `Knips.Recording.Heartbeat` and
   `Knips.Recording.Sidecar` — which is what lets `lwpt test` run their
   suites on Linux. `Knips.Mcp` has none either: it reaches the Darwin
-  session classes but declares no bindings of its own, and refuses capture
-  in-band off Darwin rather than disappearing.
+  session classes but declares no bindings of its own, and refuses
+  capture in-band off Darwin rather than disappearing.
+
+  `Knips.Recording.CursorOverlay` and `Knips.Export.CursorEffect` are
+  where the rule earns its keep, because they used to be on the first
+  list and are not any more. Moving the one Quartz routine they each held
+  a copy of into `Knips.Recording.CursorSprite` took the last AppKit call
+  out of both: the overlay is now `MacOSAll` and the capture bindings, the
+  export effect is arithmetic over a sidecar plus one call into the sprite
+  unit. Neither declares a binding, so neither carries the modeswitch —
+  they stay inside `{$IFDEF DARWIN}` because what they *use* is Darwin,
+  which is a different fact and not one a modeswitch states.
 - **`Knips.ObjC.Runtime` is not in that first list, and that is the point.**
   It builds Objective-C classes through the runtime C API in the RTL's
   `objc` unit, so it needs no ObjC language mode of its own

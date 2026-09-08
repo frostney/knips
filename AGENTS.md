@@ -100,7 +100,8 @@ lefthook install                         # once per clone: pre-commit + pre-push
 | `source/Knips.Export.Render.pas` | The render pass: raw take + sidecar → deliverable MP4. Video re-encoded through an `AVAssetWriterInputPixelBufferAdaptor`, audio copied sample-for-sample, every source frame's presentation stamp passed through unchanged, extra frames interleaved where an effect is animating |
 | `source/Knips.Export.SizeEstimate.pas` | Pre-export size estimate from the source movie's own density, and the in-flight projection (tested) |
 | `source/Knips.Recording.CursorMath.pas` | Platform-neutral Big Cursor arithmetic: screen point → frame pixel under a live sourceRect, clipped sprite placement, the premultiplied BGRA blit, sprite metrics (tested) |
-| `source/Knips.Recording.CursorOverlay.pas` | Big Cursor: the arrow sprite rendered once on the main thread, composited into each frame's own pixels on the capture queue |
+| `source/Knips.Recording.CursorSprite.pas` | The arrow sprite itself: the one Quartz routine that turns `+[NSCursor arrowCursor]` into premultiplied BGRA bytes at a given scale and magnification, and the release beside it. Big Cursor and the export's drawn pointer held a copy each |
+| `source/Knips.Recording.CursorOverlay.pas` | Big Cursor: the shared sprite made once on the main thread, composited into each frame's own pixels on the capture queue |
 | `source/Knips.App.Border.pas` | The frame around a recorded region; runtime-built `KnipsBorderView` |
 | `source/Knips.App.Playback.pas` | Playback window (AVKit): the Effects pull-down, Re-export, GIF export; runtime-built `KnipsPlaybackDelegate` |
 | `source/Knips.ObjC.TypeEncoding.pas` | Method type encodings for runtime classes (tested) |
@@ -162,6 +163,22 @@ thread, and the one error the ride reports), and nothing else.
 `Knips.Recording.CursorOverlay`
 sits beside `Knips.Recording` and consumes `Knips.Recording.CursorMath`
 the way `Knips.App.Live` consumes `Knips.Recording.LiveMath`.
+`Knips.Recording.CursorSprite` sits **below both** it and
+`Knips.Export.CursorEffect`, on `Knips.Recording.CursorMath` (which
+decides the sprite's extent and hot spot), `Knips.ObjC.Runtime` and the
+two framework binding units — and on nothing else. It is the one place
+the arrow is rendered: the record-time overlay and the export-time
+pointer used to carry a copy each of the same Quartz routine, identical
+down to the wording of every error message, kept in step only by a
+comment in both files saying to change them together. What actually
+differed was two numbers, so the two numbers are the arguments
+(`RenderArrowSprite(APixelsPerPoint, AMagnification, ...)`) and they are
+passed through to `BigCursorSpriteExtent` unchanged — Big Cursor hands
+over its fixed 2.5 as its own factor, the export folds the effect's
+resolved magnification into its pixels-per-point and passes 1, exactly
+as each did before. Both callers now hold a `TCursorSprite` record
+rather than six fields of their own; it carries no managed type, so the
+capture queue may read every field of it.
 `Knips.Capture.Stream` reaches down to `Knips.Recording.LiveMath` too,
 for one thing only: the source-rect epsilon and the rectangle comparison
 that decides whether a live update is worth an `updateConfiguration:`
