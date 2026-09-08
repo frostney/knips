@@ -21,7 +21,7 @@ program Knips.Recording.Sidecar.Test;
 //     unchanged and a single spike is pulled in without the path being
 //     delayed.
 //
-// Everything here is platform-neutral and runs on Linux CI as well as
+// Everything here is platform-neutral and runs in the Linux container as well as
 // macOS: a file format is exactly the part of this feature that has
 // nothing to do with ScreenCaptureKit.
 
@@ -982,7 +982,7 @@ end;
 // the value comes back as -1 instead — a `"version":-1` that walks
 // straight past the TooNew test, and a `"pid":-1` that reads as alive),
 // which is why it was invisible on device and live everywhere else: this
-// suite, Linux CI, Wine, and any third-party reader of a format whose
+// suite, the Linux container, Wine, and any third-party reader of a format whose
 // documentation now promises that a bad line is never fatal.
 procedure THostileFileTests.TestANonFiniteIntegerFieldIsDropped;
 var

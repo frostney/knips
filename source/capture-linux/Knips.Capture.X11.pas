@@ -5,7 +5,7 @@ unit Knips.Capture.X11;
 //
 // This exists to answer one question from a Mac: can a Linux capture path
 // be built and regression-tested with no Linux machine? It can — the whole
-// thing runs against Xvfb in the CI container (see tools/linux-ci.sh and
+// thing runs against Xvfb in the Linux container (see tools/linux-ci.sh and
 // docs/ports.md). What it deliberately does not do is anything a recorder
 // needs: no repeat grabs on a clock, no damage tracking, no cursor, no
 // multi-monitor geometry, no XWayland detection. Those belong to

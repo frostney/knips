@@ -12,7 +12,7 @@
 # cheaply is Windows-shaped behaviour the compiler cannot see — path
 # separators, drive letters, line endings.
 #
-# Exits non-zero if any suite fails, so it can be wired into CI later.
+# Exits non-zero if any suite fails, so a gate can be built on it later.
 #
 # Usage:  tools/wine-smoke.sh
 
