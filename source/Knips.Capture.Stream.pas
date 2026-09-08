@@ -289,9 +289,8 @@ const
   CompletionTimeoutSlices = 5000;
   StopTimeoutSlices = 3000;
   // How long a *second* Start waits for a first one's abandoned handler
-  // before refusing. Short: this only ever runs after a timeout, and the
-  // caller (the menu-bar app) must not freeze on a retry.
-  StalePendingSlices = 1000;
+  // before refusing: Knips.Options.StalePendingSlices, shared with the
+  // shareable-content query's drain.
   // How long Stop waits for an outstanding live reconfiguration. Short on
   // purpose: this is a property change on a running stream, not a capture
   // start, so it either lands in milliseconds or it is not going to.

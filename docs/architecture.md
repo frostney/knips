@@ -1046,7 +1046,14 @@ rejects.
   `Start` waits it out for a bounded number of slices, and refuses with
   *"a previous capture start is still pending"* rather than proceeding on
   an ambiguous flag. `ClearStartResult` releases any stale error before
-  reuse.
+  reuse. The shareable-content query answers the same problem the same
+  way: `GContentPending` marks a `getShareableContent…` as outstanding
+  until its completion has retained what it was handed, the next query
+  drains that for a bounded number of run-loop slices (about 1.8 s
+  measured) and otherwise refuses with *"a previous
+  shareable-content query is still pending"*, and `ClearContentResult`
+  releases the content and error a late completion left behind — which is
+  also what keeps a timed-out query from leaking them.
 - **`Run` is `StartCapture` + wait + `FinishCapture`.** The CLI blocks in
   its own `CFRunLoopRunInMode` slices between the two; the menu-bar app
   calls them from opposite ends of `NSApplication.run`. Both halves stay

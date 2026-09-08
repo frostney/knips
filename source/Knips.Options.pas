@@ -110,6 +110,16 @@ const
   // The recorder's own loop is NOT this: it turns at the sidecar's
   // sample rate, because there the slice is the sampling clock.
   FrameworkSliceSeconds = 0.001;
+  // How long a caller waits for a framework completion that an earlier,
+  // timed-out attempt abandoned before refusing to start another. Both
+  // the capture start (Knips.Capture.Stream) and the shareable-content
+  // query (Knips.Capture.ShareableContent) drain on this budget; it lives
+  // here because both units import this one and neither may import the
+  // other. Short, because it only ever runs after a timeout and the
+  // caller must not freeze on the retry. A 1 ms slice costs nearer
+  // 1.7 ms of wall clock (measured), so this is about 1.8 s, not one
+  // second.
+  StalePendingSlices = 1000;
 
   // What counts as silence, as a sample magnitude in 0..1. About -60 dBFS.
   // Chosen so a muted source and a source recording a quiet room are told
