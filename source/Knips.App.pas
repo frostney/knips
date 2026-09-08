@@ -49,6 +49,7 @@ uses
   Knips.App.Border,
   Knips.App.Camera,
   Knips.App.Camera.Blur,
+  Knips.App.CameraRide,
   Knips.App.Hotkey,
   Knips.App.Live,
   Knips.App.Overlay,
@@ -145,7 +146,9 @@ const
   // thing that moves the region is the animator itself and the camera has
   // to move in the same turn as the frame around it. Nothing moves a
   // recorded *window* but the user, so that one is polled — see
-  // CameraRideTickSeconds.
+  // Knips.App.CameraRide's CameraRideTickSeconds. The body forwards
+  // straight into that unit; the selector stays registered here because
+  // KnipsAppTarget is the app's one runtime-built class.
   CameraRideSelector = 'cameraRideTick:';
   // KnipsAppTarget doubles as the Record Window submenu's NSMenuDelegate;
   // the list is rebuilt when AppKit is about to show it, so it is never
@@ -261,16 +264,6 @@ const
   // the previous snapshot was taken too early to contain the window.
   BorderVisibilityAttempts = 3;
 
-  // How often the camera ride polls a recorded *window*'s frame. Five
-  // times a second, not thirty: nothing moves a window but a hand on a
-  // trackpad, the poll is a CGWindowListCopyWindowInfo round trip rather
-  // than arithmetic on numbers the app already has, and a
-  // picture-in-picture that lands a fifth of a second behind a window
-  // drag reads as "it follows" while thirty hertz of window-server
-  // traffic buys nothing anybody can see. A region ride is free of this
-  // trade entirely — it rides the live animator's own tick.
-  CameraRideTickSeconds = 0.2;
-
 type
   // One line of the Record Window submenu, cached between hovers so the
   // framework query does not run on every one.
@@ -279,7 +272,12 @@ type
     Title: string;
   end;
 
-  TAppController = class
+  // The host base class is the camera ride's whole view of this object:
+  // six answers it asks for, and nothing else (Knips.App.CameraRide).
+  // Descending from it rather than handing the ride a TAppController is
+  // what lets the ride live in its own unit at all — this unit uses that
+  // one, so that one cannot use this one back.
+  TAppController = class(TCameraRideHost)
   private
     FState: TAppState;
     FTarget: id;
@@ -321,13 +319,12 @@ type
     // needs the tick, and the animator is now one of the two things that
     // happen inside it rather than the reason it exists.
     FTickTimer: NSTimer;
-    // The camera ride's timer, alive only while a WINDOW recording has a
-    // docked camera. A region ride needs no timer of its own: it happens
-    // inside the live animator's tick, in the same turn as the frame.
-    FCameraRideTimer: NSTimer;
-    // The recorded window the ride is following, and the AppKit-space
-    // rectangle it was last seen at. 0 when nothing is being ridden.
-    FRideWindowID: Cardinal;
+    // The camera dock, the composited window recording and the 5 Hz poll
+    // that keeps both on a recorded window that moves — everything that
+    // has to know where that window currently is, with its own timer.
+    // Owned here and created with the controller; the `cameraRideTick:`
+    // selector stays on KnipsAppTarget and forwards into it.
+    FCameraRide: TCameraRide;
     FLive: TLiveAnimator;
     FOverlay: TSelectionOverlay;
     FCamera: TCameraPreview;
@@ -391,21 +388,6 @@ type
     FPendingHasRegion: Boolean;
     FPendingRegion: TCaptureRegion;
     FPendingWindowID: Cardinal;
-    // The composited window recording. A window recording with the
-    // camera up is captured as a DISPLAY with a source rectangle riding
-    // the window's frame, because ScreenCaptureKit's desktop-independent
-    // window capture composits that window alone and leaves the camera
-    // out of the file — measured, see docs/architecture.md. These three
-    // are the window being ridden, the display it was on, and the
-    // rectangle whose SIZE the writer was opened with; 0 when the
-    // recording is an ordinary one.
-    FCompositedWindowID: Cardinal;
-    FCompositedDisplayID: UInt32;
-    FCompositedRegion: TCaptureRegion;
-    // Set once the recorded window has been dragged onto a display this
-    // capture cannot follow it to, so the message is said once rather
-    // than five times a second; cleared if it comes back.
-    FCompositedDisplayLost: Boolean;
     function AddMenuItem(const ATitle, ASelector: string): NSMenuItem;
     procedure BuildMenu;
     procedure BuildWindowMenu;
@@ -457,40 +439,6 @@ type
     // the border could not be shown; the recording then runs without one.
     function ShowBorderForPending: Cardinal;
     procedure HideBorder;
-    // Turns a pending WINDOW recording into a pending region recording
-    // on the display that window is on, so the capture composits
-    // everything in front of it — the camera included. False, leaving
-    // the pending request untouched, when the window's frame or its
-    // display cannot be resolved; the recording then runs
-    // desktop-independent as it always did.
-    function CompositeWindowForPending: Boolean;
-    // One tick of the composited pan: the recorded window's frame now,
-    // as a source rectangle of the recording's own fixed size.
-    procedure UpdateCompositedSourceRect; overload;
-    // The same, for a caller that has already asked the window server
-    // where the window is. CameraRideTick is that caller, and it needs
-    // the answer for the camera anyway.
-    procedure UpdateCompositedSourceRect(
-      const AWindowRect: TCameraRect); overload;
-    // Moves a visible camera window into the corner of the rectangle
-    // about to be recorded, so the picture-in-picture goes into the file
-    // the way Kap does it. A region recording docks into the region; a
-    // window recording docks into the window's own frame. A display
-    // recording already contains the camera wherever it stands, and a
-    // camera that is off has nothing to move. UndockCamera puts it back
-    // and is safe on every stop path, docked or not.
-    procedure DockCameraForPending;
-    procedure UndockCamera;
-    // The AppKit-space frame of one on-screen window, straight out of
-    // CGWindowListCopyWindowInfo. False when the window has gone — which
-    // for the ride below is how a recorded window being closed mid-take
-    // stops it, rather than by leaving the camera parked on nothing.
-    function WindowScreenRect(AWindowID: Cardinal;
-      out ARect: TCameraRect): Boolean;
-    // Starts and stops the window ride's timer. Region recordings never
-    // touch either: they ride the live animator's tick.
-    procedure StartCameraRide(AWindowID: Cardinal);
-    procedure StopCameraRide;
     procedure ShowPlayback(const APath, ARawPath: string; APixelWidth,
       APixelHeight, AScale: Integer);
     procedure HandlePlaybackError(const AMessage: string);
@@ -521,6 +469,16 @@ type
     procedure HandleSelectionCancelled;
     procedure HandleOverlayError(const AMessage: string);
     procedure HandleCameraError(const AMessage: string);
+  protected
+    // The camera ride's six questions, answered. Session and camera are
+    // read live rather than handed over once, because both are replaced
+    // while the ride is running — see the note on TCameraRideHost.
+    function RideSession: TRecordingSession; override;
+    function RideCamera: TCameraPreview; override;
+    function RideTimerTarget: id; override;
+    function RideTimerSelector: SEL; override;
+    function RideBusy: Boolean; override;
+    procedure RideRecordError(const AMessage: string); override;
   public
     constructor Create;
     // The crash-recovery pass, run one turn after launch over the
@@ -566,7 +524,8 @@ type
     procedure Tick;
     // One turn of the live animator; the 30 Hz timer's target.
     procedure LiveTick;
-    // One turn of the window ride; the 5 Hz timer's target.
+    // One turn of the window ride; the 5 Hz timer's target, forwarded
+    // to the ride itself (Knips.App.CameraRide).
     procedure CameraRideTick;
     procedure StartPending;
     procedure StopPending;
@@ -1529,6 +1488,10 @@ constructor TAppController.Create;
 begin
   inherited Create;
   FState := asIdle;
+  // Before Setup, because the ride asks this object for the timer's
+  // target rather than being handed one: it can exist from the start and
+  // simply has nothing to do until a window recording begins.
+  FCameraRide := TCameraRide.Create(Self);
 end;
 
 destructor TAppController.Destroy;
@@ -1536,7 +1499,9 @@ begin
   StopElapsedTimer;
   StopRecordingTick;
   StopLive;
-  StopCameraRide;
+  // Its destructor invalidates the poll's timer, which is what the
+  // explicit stop here used to do; nothing below asks the ride anything.
+  FreeAndNil(FCameraRide);
   // Before the target goes: the hotkey's handler talks to this object,
   // and a chord left registered by a process on its way out is a chord
   // the next Knips cannot have.
@@ -2180,10 +2145,7 @@ begin
   FPendingHasRegion := False;
   FPendingRegion := Default(TCaptureRegion);
   FPendingWindowID := 0;
-  FCompositedWindowID := 0;
-  FCompositedDisplayID := 0;
-  FCompositedRegion := Default(TCaptureRegion);
-  FCompositedDisplayLost := False;
+  FCameraRide.ClearComposited;
 end;
 
 function TAppController.ShowBorderForPending: Cardinal;
@@ -2196,7 +2158,7 @@ begin
   // never had a frame drawn round it. Drawing one now would also put a
   // second window into a capture that — unlike a region's — really does
   // see everything in front of it.
-  if FCompositedWindowID <> 0 then
+  if FCameraRide.CompositedWindowID <> 0 then
     Exit;
   // A border that will not come up is not worth failing a recording over;
   // the recording simply runs without one.
@@ -2211,397 +2173,63 @@ begin
     FBorder.Hide;
 end;
 
-{ The composited window recording.
+{ The camera ride's back-reference, and the whole of it.
 
-  **A window recording does not put the camera in the file.** That is not
-  a guess: measured on this machine by recording one application's window
-  through the ordinary path with a solid-magenta borderless window at
-  window level 3 — the camera's own level — demonstrably over it on
-  screen, and counting near-magenta pixels in the resulting frames.
-  Zero, out of 1 754 000. `SCContentFilter.initWithDesktopIndependentWindow:`
-  composits that one window and nothing on top of it, exactly as its
-  header says.
+  The dock, the composited window recording and the 5 Hz poll live in
+  Knips.App.CameraRide now — everything that has to know where a recorded
+  window currently is, on a clock of its own. It reaches back into the
+  controller through these six, which is why they are worth reading as a
+  group: they are the entire coupling between the two objects.
 
-  So docking the camera onto a recorded window used to be about the
-  *screen* only. This is the other half: capture the **display** instead,
-  with a source rectangle sitting exactly on that window's frame.
-  ScreenCaptureKit then reads the screen, which has the camera on it, and
-  the picture-in-picture really is composited into the file — the same
-  way it already is for a region.
+  The camera and the session are questions rather than values because
+  both change under the ride's feet. StartPending docks the camera —
+  which starts the poll — and only then frees one recording session and
+  creates the next, so a session pointer handed over at the start would
+  be the dead one by the first tick; and the user is free to switch the
+  camera off in the middle of a take. }
 
-  **And it is not only the camera any more.** A desktop-independent
-  window capture is the one target no post-recording effect can ever
-  reach: its frames have no fixed relationship to the screen the pointer
-  was measured against, so no pointer can be drawn back into them and no
-  crop can be computed for them. A composited one is a display take in
-  every way that matters — the samples map, the framing is written into
-  the sidecar's own per-sample source rectangles, and a zoom composes
-  inside the pan (Knips.Export.ZoomTrack) — so a window recording gets
-  the same effects a region recording does, and gets them the same way:
-  a raw take plus a render.
-
-  **The trade is real and is not hidden.** A composited window recording
-  captures whatever is in front of the window: a notification, a menu
-  pulled down over it, another app's window dragged across. The
-  desktop-independent path has none of that, and it is still what a
-  window take that wants **nothing** uses — no camera, no pointer, no
-  zoom. WindowTakeNeedsCompositing is where that line is drawn, and the
-  principle behind it is that the cost is paid only where it buys
-  something.
-
-  **The rectangle pans and never resizes.** AVAssetWriter fixes the
-  file's dimensions at the first frame; a window resized mid-take would
-  otherwise stretch the picture. So the size is the window's frame at the
-  start and the origin follows it, which is exactly what Follow Mouse
-  does to a region — and it reuses the same machinery: the 5 Hz window
-  poll that already moves the camera, and TRecordingSession.UpdateSourceRect.
-
-  **Live effects stay off.** ResolveLiveEffects gives a window recording
-  no Follow Mouse (and no live zoom, back when there was one), and that
-  answer does not change
-  because the capture underneath is now a display: a click has no fixed
-  meaning in a window the user is free to move, and two owners for one
-  source rectangle — the animator and this poll — is a rectangle that
-  fights itself. StartPending therefore does not start the animator for a
-  composited recording.
-
-  The post-recording effects are a different matter and are not off at
-  all: they are applied to the finished take, where the poll's own track
-  says exactly which rectangle each frame was showing. }
-
-function TAppController.CompositeWindowForPending: Boolean;
-var
-  WindowRect, Region: TCameraRect;
-  ScreenFrame: NSRect;
-  DisplayID: UInt32;
+function TAppController.RideSession: TRecordingSession;
 begin
-  Result := False;
-  if FPendingWindowID = 0 then
-    Exit;
-  if not WindowScreenRect(FPendingWindowID, WindowRect) then
-    Exit;
-  // The display the window is on, by its own frame rather than by the
-  // main screen: a window on the external display must be captured from
-  // the external display.
-  if not DisplayIDForScreenRect(NSMakeRect(WindowRect.X, WindowRect.Y,
-    WindowRect.Width, WindowRect.Height), DisplayID, ScreenFrame) then
-    Exit;
-  Region := ScreenRectRegion(WindowRect,
-    CameraRect(ScreenFrame.origin.x, ScreenFrame.origin.y,
-    ScreenFrame.size.width, ScreenFrame.size.height),
-    WindowRect.Width, WindowRect.Height);
-  if (Region.Width < 1) or (Region.Height < 1) then
-    Exit;
-  FCompositedWindowID := FPendingWindowID;
-  FCompositedDisplayID := DisplayID;
-  FCompositedRegion.Left := Round(Region.X);
-  FCompositedRegion.Top := Round(Region.Y);
-  FCompositedRegion.Width := Round(Region.Width);
-  FCompositedRegion.Height := Round(Region.Height);
-  // From here the pending request is a region on a display, and every
-  // step below — the display index, the source rectangle, the writer's
-  // dimensions — treats it as one. The window id lives on in
-  // FCompositedWindowID, which is what the poll rides and what the
-  // camera docks onto.
-  FPendingWindowID := 0;
-  FPendingDisplayID := DisplayID;
-  FPendingHasRegion := True;
-  FPendingRegion := FCompositedRegion;
-  Result := True;
+  Result := FSession;
 end;
 
-procedure TAppController.UpdateCompositedSourceRect;
-var
-  WindowRect: TCameraRect;
+function TAppController.RideCamera: TCameraPreview;
 begin
-  if (FCompositedWindowID = 0) or (FSession = nil) then
-    Exit;
-  if not WindowScreenRect(FCompositedWindowID, WindowRect) then
-    Exit;
-  UpdateCompositedSourceRect(WindowRect);
+  Result := FCamera;
 end;
 
-procedure TAppController.UpdateCompositedSourceRect(
-  const AWindowRect: TCameraRect);
-var
-  WindowRect, Region: TCameraRect;
-  ScreenFrame: NSRect;
-  DisplayID: UInt32;
+// The ride adds no runtime-built class of its own: `cameraRideTick:` is
+// registered on the same KnipsAppTarget every other action goes through
+// (ADR-0002), and TargetCameraRideTick forwards it.
+function TAppController.RideTimerTarget: id;
 begin
-  if (FCompositedWindowID = 0) or (FSession = nil) then
-    Exit;
-  WindowRect := AWindowRect;
-  // The display is re-resolved every tick rather than taken from the
-  // start, because the window can be dragged onto another one — and the
-  // frame it comes back with is in AppKit's *global* space, so flipping
-  // it against the display it started on would silently pan the capture
-  // into whatever happens to sit at those coordinates on that screen.
-  if not DisplayIDForScreenRect(NSMakeRect(WindowRect.X, WindowRect.Y,
-    WindowRect.Width, WindowRect.Height), DisplayID, ScreenFrame) then
-    Exit;
-  if DisplayID <> FCompositedDisplayID then
-  begin
-    // The window has left the display this capture opened on. Following
-    // it would mean rebuilding the content filter mid-stream — a new
-    // SCDisplay, and an output size the writer fixed at the first frame
-    // and cannot move — so the honest answer is to stop panning and
-    // leave the capture where it is. Said once, not five times a second.
-    if not FCompositedDisplayLost then
-    begin
-      FCompositedDisplayLost := True;
-      RecordError('the recorded window moved to another display; the '
-        + 'recording stays on the display it started on and no longer '
-        + 'follows the window');
-      RefreshStatusItem;
-    end;
-    Exit;
-  end;
-  // Back on the original display after a trip to another one: resume.
-  FCompositedDisplayLost := False;
-  // The size is the recording's, never the window's — see the header.
-  Region := ScreenRectRegion(WindowRect,
-    CameraRect(ScreenFrame.origin.x, ScreenFrame.origin.y,
-    ScreenFrame.size.width, ScreenFrame.size.height),
-    FCompositedRegion.Width, FCompositedRegion.Height);
-  // Fire and forget, with the same latest-wins coalescing the live
-  // animator relies on: an update refused while another is in flight is
-  // dropped, and the next tick carries a newer rectangle than the
-  // dropped one would have.
-  FSession.UpdateSourceRect(CGRectMake(Region.X, Region.Y, Region.Width,
-    Region.Height));
+  Result := FTarget;
 end;
 
-{ Docking the camera into the rectangle being recorded, and riding it.
-  Kap composes the picture-in-picture into the file; Knips does no
-  compositing at all (see the header of Knips.App.Camera), so the
-  equivalent is to *put the window inside the rectangle* and let
-  ScreenCaptureKit find it there.
-
-  A region recording docks into the region. A window recording docks into
-  the recorded window's own frame — which is where the user wants the
-  picture whether or not it lands in the file, and for a window recording
-  it does not: SCContentFilter.initWithDesktopIndependentWindow: composits
-  that one window and nothing on top of it, measured (docs/architecture.md,
-  "Docking"). A display recording does nothing at all, because it already
-  contains the camera wherever it stands.
-
-  And the rectangle moves. Follow Mouse pans a region; a recorded window
-  goes wherever the user drags it, and ScreenCaptureKit's
-  desktop-independent capture follows it there. A camera left at the
-  rectangle's *initial* corner is out of shot the moment either happens,
-  which is the bug the ride fixes. Two clocks drive it, because two very
-  different things move the two rectangles:
-
-  - a region rides the live animator's own tick, in the same turn that
-    moves the capture and the frame around it, so the three cannot
-    disagree by a frame (Knips.App.Live.UpdateCamera);
-  - a window is polled, five times a second, because nothing in this
-    process knows when a user drags a window and asking the window server
-    is a round trip rather than arithmetic (CameraRideTick below). }
-
-procedure TAppController.DockCameraForPending;
-var
-  ScreenFrame: NSRect;
-  WindowRect: TCameraRect;
-  WindowID: Cardinal;
+function TAppController.RideTimerSelector: SEL;
 begin
-  if (FCamera = nil) or not FCamera.Visible then
-    Exit;
-  // A window recording, ordinary or composited. The window's frame is
-  // the rectangle, and it is read from the window server rather than
-  // from ScreenCaptureKit: SCShareableContent carries no frame, and
-  // asking it would pump the run loop on the one path that must not.
-  //
-  // CompositeWindowForPending has already moved the id across to
-  // FCompositedWindowID by the time this runs, which is why both are
-  // consulted; the dock itself is identical either way.
-  WindowID := FPendingWindowID;
-  if WindowID = 0 then
-    WindowID := FCompositedWindowID;
-  if WindowID <> 0 then
-  begin
-    if not WindowScreenRect(WindowID, WindowRect) then
-      Exit;
-    if FCamera.DockTo(WindowRect) then
-      StartCameraRide(WindowID);
-    Exit;
-  end;
-  if not FPendingHasRegion or (FPendingDisplayID = 0) then
-    Exit;
-  // The same NSScreen lookup the border does, and the same flip: a
-  // capture region is top-left display points, an NSWindow frame is
-  // global bottom-left ones.
-  if not ScreenFrameForDisplayID(FPendingDisplayID, ScreenFrame) then
-    Exit;
-  // No timer for a region: StartLive hands the camera to the animator,
-  // which rides it on the tick that pans the region.
-  FCamera.DockTo(RegionScreenRect(FPendingRegion,
-    CameraRect(ScreenFrame.origin.x, ScreenFrame.origin.y,
-    ScreenFrame.size.width, ScreenFrame.size.height)));
+  Result := SelectorNamed(CameraRideSelector);
 end;
 
-procedure TAppController.UndockCamera;
+function TAppController.RideBusy: Boolean;
 begin
-  StopCameraRide;
-  // The composited window recording ends with the same call that undocks
-  // the camera, because it began with the same one that docked it: the
-  // poll they share has no other reason to run. Cleared here rather than
-  // in StopCameraRide, which StartCameraRide calls on the way in.
-  FCompositedWindowID := 0;
-  FCompositedDisplayID := 0;
-  FCompositedRegion := Default(TCaptureRegion);
-  FCompositedDisplayLost := False;
-  if FCamera <> nil then
-    FCamera.Undock;
+  Result := Busy;
 end;
 
-// One window's frame, straight out of the window server. Synchronous and
-// cheap — no run loop is pumped, which is what makes it callable from
-// StartPending and from a timer alike — where SCShareableContent is
-// neither and carries no frame anyway.
-//
-// CGWindowListCopyWindowInfo answers in Quartz's global space: points
-// with the origin at the TOP left of the primary display and y growing
-// downwards. WindowBoundsScreenRect flips it into AppKit's, against the
-// height of the screen whose origin is (0, 0) — which is
-// NSScreen.screens[0], the one both spaces are anchored to.
-function TAppController.WindowScreenRect(AWindowID: Cardinal;
-  out ARect: TCameraRect): Boolean;
-var
-  List: CFArrayRef;
-  Info, BoundsDictionary: CFDictionaryRef;
-  Bounds: CGRect;
-  Screens: NSArray;
-  PrimaryFrame: NSRect;
+// RecordError plus the status-item refresh that has always followed it
+// here: the ride says one thing, and it says it into the menu's single
+// "Last error" slot.
+procedure TAppController.RideRecordError(const AMessage: string);
 begin
-  ARect := CameraRect(0, 0, 0, 0);
-  Result := False;
-  if AWindowID = 0 then
-    Exit;
-  Screens := NSScreen.screens;
-  if (Screens = nil) or (Screens.count = 0) then
-    Exit;
-  PrimaryFrame := NSScreen(Screens.objectAtIndex(0)).frame;
-  List := CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow,
-    AWindowID);
-  if List = nil then
-    Exit;
-  try
-    // Zero entries is the answer for a window that has gone — closed
-    // mid-recording — and is how the ride stops gracefully rather than
-    // leaving the camera parked on a rectangle that no longer exists.
-    if CFArrayGetCount(List) < 1 then
-      Exit;
-    Info := CFDictionaryRef(CFArrayGetValueAtIndex(List, 0));
-    if Info = nil then
-      Exit;
-    BoundsDictionary := CFDictionaryRef(CFDictionaryGetValue(Info,
-      kCGWindowBounds));
-    if BoundsDictionary = nil then
-      Exit;
-    if CGRectMakeWithDictionaryRepresentation(BoundsDictionary, Bounds) = 0 then
-      Exit;
-    ARect := WindowBoundsScreenRect(Bounds.origin.x, Bounds.origin.y,
-      Bounds.size.width, Bounds.size.height,
-      PrimaryFrame.origin.y + PrimaryFrame.size.height);
-    Result := (ARect.Width > 0) and (ARect.Height > 0);
-  finally
-    CFRelease(List);
-  end;
+  RecordError(AMessage);
+  RefreshStatusItem;
 end;
 
-procedure TAppController.StartCameraRide(AWindowID: Cardinal);
-begin
-  StopCameraRide;
-  if AWindowID = 0 then
-    Exit;
-  FRideWindowID := AWindowID;
-  // Created unscheduled and added to the common modes, exactly like the
-  // live animator's timer and the camera's own snap ease — and for the
-  // same measured reason: the camera window is draggable during a
-  // recording, and a drag puts the run loop in
-  // NSEventTrackingRunLoopMode, where a default-mode-only timer stops
-  // firing. Scheduling first and then adding would register the same
-  // timer twice and poll at ten hertz instead of five.
-  FCameraRideTimer :=
-    NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats(
-    CameraRideTickSeconds, FTarget, SelectorNamed(CameraRideSelector), nil,
-    True);
-  if FCameraRideTimer = nil then
-  begin
-    // No timer, no ride: the camera stays wherever the dock put it while
-    // the recorded window moves out from under it. Worth neither an error
-    // nor a failed recording — the picture-in-picture is cosmetic and the
-    // file is unaffected — but it is a real loss of the feature, not
-    // "the old behaviour" as this once claimed.
-    FRideWindowID := 0;
-    Exit;
-  end;
-  FCameraRideTimer.retain;
-  NSRunLoop.currentRunLoop.addTimer_forMode(FCameraRideTimer,
-    NSRunLoopCommonModes);
-end;
-
-procedure TAppController.StopCameraRide;
-begin
-  FRideWindowID := 0;
-  if FCameraRideTimer = nil then
-    Exit;
-  FCameraRideTimer.invalidate;
-  FCameraRideTimer.release;
-  FCameraRideTimer := nil;
-end;
-
+// The 5 Hz timer fires into KnipsAppTarget like every other action, and
+// this is the whole of what the controller still does with it.
 procedure TAppController.CameraRideTick;
-var
-  Rect: TCameraRect;
-  HasRect: Boolean;
 begin
-  // An export owns the main thread and drains events to draw its
-  // progress, which is how a timer can fire in the middle of one — the
-  // same guard the live tick carries, for the same reason.
-  if Busy then
-    Exit;
-  // ONE window-server round trip a tick. The composited pan and the
-  // camera ride follow the same window whenever both are live, and each
-  // used to ask for its frame separately — two synchronous round trips
-  // five times a second for one answer, on the thread the whole app
-  // draws from.
-  HasRect := (FRideWindowID <> 0) and WindowScreenRect(FRideWindowID, Rect);
-  // The composited recording's pan comes first and is unconditional: it
-  // is what keeps the *capture* on the window, where the camera ride is
-  // only what keeps the picture-in-picture in the corner. A camera
-  // switched off mid-take must not stop the capture following the
-  // window.
-  if HasRect and (FCompositedWindowID = FRideWindowID) then
-    UpdateCompositedSourceRect(Rect)
-  else
-    UpdateCompositedSourceRect;
-  if FRideWindowID = 0 then
-  begin
-    StopCameraRide;
-    Exit;
-  end;
-  if (FCamera = nil) or not FCamera.Riding then
-  begin
-    // The camera decides for itself whether a ride is still live; a stop
-    // that has already undocked answers False here. The timer only goes
-    // if nothing else needs it — a composited recording does.
-    if FCompositedWindowID = 0 then
-      StopCameraRide;
-    Exit;
-  end;
-  if not HasRect then
-  begin
-    // The recorded window has gone. The recording carries on — SCK is
-    // free to keep a stream on a window that closed — but there is
-    // nothing left to follow, so stop rather than chase a rectangle that
-    // no longer exists. Not an error: closing a window mid-recording is
-    // the user's business.
-    StopCameraRide;
-    Exit;
-  end;
-  FCamera.RideTo(Rect);
+  FCameraRide.Tick;
 end;
 
 procedure TAppController.ShowPlayback(const APath, ARawPath: string;
@@ -2891,7 +2519,7 @@ begin
   HideBorder;
   // And so is a camera window parked in the corner of a region nothing
   // is recording any more.
-  UndockCamera;
+  FCameraRide.UndockCamera;
   RefreshStatusItem;
 end;
 
@@ -3629,7 +3257,8 @@ begin
     if WindowTakeNeedsCompositing(FEffects,
       (FCamera <> nil) and FCamera.Visible) then
     begin
-      if CompositeWindowForPending then
+      if FCameraRide.CompositeWindowForPending(FPendingWindowID,
+        FPendingDisplayID, FPendingHasRegion, FPendingRegion) then
       begin
         LogMessage('recording this window through a rectangle of its '
           + 'display so the effects (and the camera, if it is up) reach '
@@ -3721,7 +3350,7 @@ begin
   // without. Asked for only when the effect is actually going to apply —
   // ResolveLiveEffects is the single place that decides, and StartLive
   // asks it again for the same answer.
-  if FCompositedWindowID <> 0 then
+  if FCameraRide.CompositedWindowID <> 0 then
   begin
     // A window recording gets neither effect — ResolveLiveEffects says so
     // for ctkWindow and the answer does not change because the capture
@@ -3838,7 +3467,8 @@ begin
   // the recording (the output path, the options, the border) has been
   // settled above; only StartCapture itself can still fail, and it
   // undocks below.
-  DockCameraForPending;
+  FCameraRide.DockCameraForPending(FPendingWindowID, FPendingDisplayID,
+    FPendingHasRegion, FPendingRegion);
 
   // Nothing should be animating or sampling a session that is about to be
   // freed, and both hold a bare pointer to it.
@@ -3849,7 +3479,7 @@ begin
   if not FSession.StartCapture(Error) then
   begin
     HideBorder;
-    UndockCamera;
+    FCameraRide.UndockCamera;
     FreeAndNil(FSession);
     Transition(acCaptureFailed);
     // One shot: a denied Screen Recording grant fails the same way every
@@ -3912,12 +3542,12 @@ begin
   // something else was, and this one refuses Follow Mouse instead. That
   // is the right way round: the cost of being wrong is a recording with
   // its own frame sliding through it.
-  if FCompositedWindowID <> 0 then
+  if FCameraRide.CompositedWindowID <> 0 then
     // The poll is the composited recording's only animator, and it is
     // started here rather than by the dock: it has to run even when the
     // camera is undocked or hidden mid-take, because it is what keeps
     // the capture on the window.
-    StartCameraRide(FCompositedWindowID)
+    FCameraRide.Start(FCameraRide.CompositedWindowID)
   else
     StartLive(BorderWindowID, (BorderWindowID <> 0)
       and WindowIDRequested(Options.ExcludedWindowIDs, BorderWindowID)
@@ -3936,7 +3566,7 @@ begin
   // place: the window is named by id in a submenu that is rebuilt every
   // time it opens.
   if FPendingHasRegion and (FPendingDisplayID <> 0)
-    and (FCompositedWindowID = 0) then
+    and (FCameraRide.CompositedWindowID = 0) then
   begin
     FLastRegionDisplayID := FPendingDisplayID;
     FLastRegion := FPendingRegion;
@@ -4139,7 +3769,7 @@ begin
   // FinishCapture stops the stream before it finalises the writer
   // (Knips.Recording.FinishCapture, "Stream first, then writer"), so by
   // here there is nothing left for the movement to land in.
-  UndockCamera;
+  FCameraRide.UndockCamera;
   FreeAndNil(FSession);
   RefreshStatusItem;
   // The render, and it is what turns the raw take into the file the user

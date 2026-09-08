@@ -87,6 +87,7 @@ lefthook install                         # once per clone: pre-commit + pre-push
 | `source/Knips.App.Overlay.pas` | Region selection overlay; runtime-built `KnipsOverlayView`/`KnipsOverlayWindow` |
 | `source/Knips.App.Camera.pas` | Camera picture-in-picture window: mirrored AVCaptureSession + preview layer in a floating NSWindow that drags itself, snaps to the nearest corner, switches between rectangle and circle, and docks into — and rides along with — the recorded rectangle |
 | `source/Knips.App.Camera.Blur.pas` | Portrait-style background blur for that window: an AVCaptureVideoDataOutput on the same session, Vision person segmentation and a CoreImage composite on a serial GCD queue, into the window's own layer; runtime-built `KnipsCameraOutput` |
+| `source/Knips.App.CameraRide.pas` | Everything that has to know where a recorded *window* currently is, on a 5 Hz clock of its own: the composited window recording (a window request turned into a region capture of its display, panned onto the window as it moves), the camera dock into the rectangle being recorded, and the poll that keeps both there. A helper the controller owns by composition; `cameraRideTick:` stays on `KnipsAppTarget` and forwards into it |
 | `source/Knips.App.Live.pas` | Follow Mouse: a main-thread animator on the app's 30 Hz timer that moves the stream's `sourceRect`, the recording border and a docked camera. Zoom on Click was the other half and is now a render-time effect |
 | `source/Knips.App.Hotkey.pas` | The global ⌘⇧2 stop hotkey: Carbon `RegisterEventHotKey` + an application-target event handler, no TCC grant |
 | `source/Knips.Recording.LiveMath.pas` | Platform-neutral live-effect arithmetic: rect clamping, dead zone, smoothstep easing, which effects a target can have (tested) |
@@ -148,7 +149,16 @@ sits with `Knips.Recording.LiveMath`, whose arithmetic it replays, plus
 `Knips.Export.Render` and `Knips.Export.Pipeline` consume it, so an MP4
 and a GIF fill the same gaps the same way.
 `Knips.App.Hotkey` sits beside the other `Knips.App.*` units and depends
-only on `Knips.App.State` and MacOSAll. `Knips.Recording.CursorOverlay`
+only on `Knips.App.State` and MacOSAll.
+`Knips.App.CameraRide` sits beside `Knips.App.Live` and depends on the
+same layer it does — `Knips.App.Border` (the two NSScreen lookups),
+`Knips.App.Camera`, `Knips.App.State`, `Knips.Options` and
+`Knips.Recording` — and never on `Knips.App`, which uses it. The traffic
+back is a single abstract host class, `TCameraRideHost`, that
+`TAppController` descends from: six answers (the live session, the live
+camera, the timer's target and selector, whether an export owns the main
+thread, and the one error the ride reports), and nothing else.
+`Knips.Recording.CursorOverlay`
 sits beside `Knips.Recording` and consumes `Knips.Recording.CursorMath`
 the way `Knips.App.Live` consumes `Knips.Recording.LiveMath`.
 `Knips.Capture.Stream` reaches down to `Knips.Recording.LiveMath` too,
