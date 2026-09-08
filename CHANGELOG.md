@@ -45,6 +45,20 @@ Changelog](https://keepachangelog.com/en/1.1.0/)'s: **Added**,
   rule; it now says to bump both version numbers, close this section
   by hand, run `tools/release-gate.sh` and tag. The last three
   statements implying a CI service runs the gates are gone.
+- **The camera dock and its ride left the app controller.**
+  `Knips.App.pas` was 4,500 lines and the tree's most complex unit by a
+  wide margin; the camera dock, the composited window recording and the
+  poll that keeps both on a moving window are `Knips.App.CameraRide`
+  now, owned by the controller and reached back through six questions.
+  A structural move with no behaviour change; the recording lifecycle
+  was measured for the same treatment and left in place because it
+  shares some forty controller members rather than six.
+- The MP4 render and the GIF/APNG pipeline answer "what does this frame
+  show, and what crop does the zoom come to" through one pair of
+  neutral, tested functions instead of a copy each, so the frame
+  synthesis can no longer disagree with the draw. Five copies of "bytes
+  on disk" are one helper; the two animation-export MCP tools are
+  registered through one; `tools/list` is byte-identical.
 - **`docs/architecture.md` describes the current design; its superseded
   measurements moved to `docs/measurements.md`.** The architecture
   document had grown to 3,400 lines, a third of them narrating what a
