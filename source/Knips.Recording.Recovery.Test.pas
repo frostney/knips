@@ -59,6 +59,7 @@ type
     procedure TestAnUnmarkedTemporaryPastTheGraceIsSwept;
     procedure TestAFileThatMerelyContainsTheSuffixIsLeftAlone;
     procedure TestAnAbsentDirectoryIsNotAnError;
+    procedure TestBackslashNamesAreNotConfusedWithNeighbours;
   end;
 
   TProcessTests = class(TTestSuite)
@@ -130,8 +131,30 @@ begin
     TestAnUnmarkedTemporaryPastTheGraceIsSwept);
   Test('an ordinary file that merely contains the suffix is not ours',
     TestAFileThatMerelyContainsTheSuffixIsLeftAlone);
+  Test('literal backslash scratch is distinct from a live neighbour',
+    TestBackslashNamesAreNotConfusedWithNeighbours);
   Test('a directory that is not there is not an error',
     TestAnAbsentDirectoryIsNotAnError);
+end;
+
+procedure TSweepTests.TestBackslashNamesAreNotConfusedWithNeighbours;
+const
+  Pending = 'literal\take.mp4' + RenderTemporarySuffix;
+  Neighbour = 'take.mp4' + RenderTemporarySuffix;
+begin
+  OpenDirectory;
+  try
+    MakeAbandonedTemporary(Pending);
+    MakeFile(Neighbour);
+    Expect<Integer>(SweepRenderTemporaries(FDirectory)).ToBe(1);
+    Expect<Boolean>(Exists(Pending)).ToBe(False);
+    Expect<Boolean>(Exists(RenderTemporaryOwnerPathFor(Pending))).ToBe(False);
+    Expect<Boolean>(Exists(Neighbour)).ToBe(True);
+  finally
+    DeleteFile(FDirectory + Pending);
+    DeleteFile(FDirectory + RenderTemporaryOwnerPathFor(Pending));
+    CloseDirectory;
+  end;
 end;
 
 procedure TSweepTests.OpenDirectory;

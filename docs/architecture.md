@@ -423,8 +423,11 @@ because each is a decision:
   for nothing; copying one to produce a second identical file is a
   duplicate the user then has to find and delete.
 - **The output is replaced atomically.** The movie is built as
-  `<out>.knips-render-tmp` and renamed into place only when it is
-  complete, and the sidecar is written after the rename. The failure this
+  `<unique>-<out>.knips-render-tmp` and renamed into place only when it is
+  complete, and the sidecar is written after the rename. Each operation
+  reserves a unique name with an exclusive owner marker and only cleans
+  up names it successfully claimed. Sidecar failures are explicit partial
+  success warnings; a source and destination sharing a sidecar are refused. The failure this
   closes is not a render that returns an error, it is a render that is
   *killed*: writing straight to the deliverable meant deleting a good file
   and dying with a zero-byte stub under its name, which crash recovery
@@ -2252,9 +2255,10 @@ the question being asked.
 runs at render time instead (`Knips.Export.ZoomTrack`, replaying exactly
 the arithmetic below from the sidecar's click track), because a crop of
 pixels that are already in the file can be decided late and a pan cannot.
-Everything in this section still describes the machinery both were built
-on, and the composition below is what the post-hoc zoom reduces to with
-Follow off: `window` = `base`.
+The live animator now contains only Follow Mouse; its unreachable click,
+zoom, focus and hold state has been removed. The composition below
+describes the historical design and the shared math retained by the
+render-time zoom. Live capture passes `window` directly to the stream.
 
 Follow Mouse changes what a recording *shows* while it runs, and it is one
 idea with the zoom. The file's dimensions are fixed the moment
@@ -2297,7 +2301,7 @@ mid-zoom.
   `NSTimer` on the same `KnipsAppTarget` every other action goes through
   (`liveTick:`), so the feature adds no runtime class of its own. The timer
   is added to `NSRunLoopCommonModes` as well, or dragging the camera
-  window would freeze a zoom half way.
+  window would freeze the live pan.
 - **`TScreenStream.UpdateSourceRect`** rebuilds the configuration through
   the same private `BuildConfiguration` the capture started with — one
   place sets dimensions, rate, cursor and audio, so a live update cannot
@@ -2951,7 +2955,22 @@ recording rather than a recording with no pointer in it.
 
 ## Never lose a take
 
-Two things, and the first one is nearly all of it.
+**Replacement without losing the previous take.** Recording writes to a
+reserved `<unique>-<name>.knips-recording.mp4` (or `.mov`) beside the
+requested output, with its own sidecar naming that temporary movie.
+Only a successful writer finish renames the movie onto the destination.
+The closed sidecar is then copied with its final movie name and published
+by rename. These two files are separate publications: a sidecar failure
+keeps the finished movie, reports the retained sidecar, and prevents the
+app from automatically rendering with stale metadata.
+
+A failed or killed recording with flushed frames stays under its unique
+recording name. Recovery repairs and reports that take separately; it
+never replaces the earlier requested output. Recording temporaries are
+excluded from the sweep of regenerable render scratch. Empty failed
+writers remove their own scratch. The following fragment measurements
+predate this naming change; capture and crash validation for the new path
+is tracked in the runtime spike.
 
 **Movie fragments.** `AVAssetWriter.movieFragmentInterval` is set to two
 seconds, so the writer flushes a `moof`/`mdat` pair to disk on that
@@ -3021,8 +3040,9 @@ container with a `moov` at the front, replaces the original by `rename(2)`,
 and appends the trailer with `"recovered":true` so the take is never picked
 up twice. A re-mux that fails is not a failure: the fragmented file plays,
 and the caller is told which of the two it has. Nothing in the pass ever
-deletes a movie, and a scratch `*.recovering.mp4` left by a recovery that
-itself died is cleared on the next pass.
+deletes an original movie. The re-mux uses the trim writer's reserved
+temporary directly and commits in place. A neighbouring
+`*.recovering.mp4` belongs to the user and is never touched.
 
 **What `kill(pid, 0)` cannot tell you**, and what is done about it:
 

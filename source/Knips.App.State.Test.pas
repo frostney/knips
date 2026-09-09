@@ -53,6 +53,9 @@ type
     procedure TestClampKeepsTheRegionOnTheDisplay;
     procedure TestClampPullsANegativeOriginIn;
     procedure TestUsableNeedsTwoPointsEachWay;
+    procedure TestKeyboardSelectionStartsCentred;
+    procedure TestKeyboardArrowsMoveAndResize;
+    procedure TestKeyboardSelectionStaysUsableAtEdges;
     procedure TestStoredRegionSurvivesARoundTrip;
     procedure TestStoredNegativeOriginIsPulledIn;
     procedure TestStoredNonsenseIsRejected;
@@ -488,6 +491,12 @@ begin
     TestClampPullsANegativeOriginIn);
   Test('a region below the alignment is not usable',
     TestUsableNeedsTwoPointsEachWay);
+  Test('keyboard selection starts centred without a mouse gesture',
+    TestKeyboardSelectionStartsCentred);
+  Test('keyboard arrows move and resize with coarse and fine steps',
+    TestKeyboardArrowsMoveAndResize);
+  Test('keyboard selection keeps its size or minimum extent at edges',
+    TestKeyboardSelectionStaysUsableAtEdges);
   Test('a stored region survives a round trip unchanged',
     TestStoredRegionSurvivesARoundTrip);
   Test('a stored negative origin is pulled in',
@@ -556,6 +565,82 @@ begin
   Result.Top := ATop;
   Result.Width := AWidth;
   Result.Height := AHeight;
+end;
+
+procedure TSelectionTests.TestKeyboardSelectionStartsCentred;
+var
+  Region: TCaptureRegion;
+begin
+  Region := DefaultKeyboardSelection(1440, 900);
+  Expect<Integer>(Region.Left).ToBe(360);
+  Expect<Integer>(Region.Top).ToBe(225);
+  Expect<Integer>(Region.Width).ToBe(720);
+  Expect<Integer>(Region.Height).ToBe(450);
+  Expect<Boolean>(IsSelectionUsable(Region)).ToBe(True);
+  Region := DefaultKeyboardSelection(3, 2);
+  Expect<Integer>(Region.Width).ToBe(2);
+  Expect<Integer>(Region.Height).ToBe(2);
+  Expect<Boolean>(IsSelectionUsable(DefaultKeyboardSelection(0, 900)))
+    .ToBe(False);
+end;
+
+procedure TSelectionTests.TestKeyboardArrowsMoveAndResize;
+var
+  Region: TCaptureRegion;
+begin
+  Region := StoredRegion(100, 200, 640, 480);
+  Region := AdjustKeyboardSelection(Region, sdRight, False, False, 1440, 900);
+  Region := AdjustKeyboardSelection(Region, sdUp, False, True, 1440, 900);
+  Expect<Integer>(Region.Left).ToBe(110);
+  Expect<Integer>(Region.Top).ToBe(199);
+  Expect<Integer>(Region.Width).ToBe(640);
+  Expect<Integer>(Region.Height).ToBe(480);
+  Region := AdjustKeyboardSelection(Region, sdLeft, False, True, 1440, 900);
+  Region := AdjustKeyboardSelection(Region, sdDown, False, False, 1440, 900);
+  Expect<Integer>(Region.Left).ToBe(109);
+  Expect<Integer>(Region.Top).ToBe(209);
+  Region := AdjustKeyboardSelection(Region, sdRight, True, False, 1440, 900);
+  Region := AdjustKeyboardSelection(Region, sdDown, True, True, 1440, 900);
+  Expect<Integer>(Region.Width).ToBe(650);
+  Expect<Integer>(Region.Height).ToBe(481);
+  Region := AdjustKeyboardSelection(Region, sdLeft, True, True, 1440, 900);
+  Region := AdjustKeyboardSelection(Region, sdUp, True, False, 1440, 900);
+  Expect<Integer>(Region.Width).ToBe(649);
+  Expect<Integer>(Region.Height).ToBe(471);
+  Expect<Integer>(Region.Left).ToBe(109);
+  Expect<Integer>(Region.Top).ToBe(209);
+end;
+
+procedure TSelectionTests.TestKeyboardSelectionStaysUsableAtEdges;
+var
+  Region: TCaptureRegion;
+begin
+  Region := StoredRegion(0, 0, 640, 480);
+  Region := AdjustKeyboardSelection(Region, sdLeft, False, False, 1440, 900);
+  Region := AdjustKeyboardSelection(Region, sdUp, False, False, 1440, 900);
+  Expect<Integer>(Region.Left).ToBe(0);
+  Expect<Integer>(Region.Top).ToBe(0);
+  Expect<Integer>(Region.Width).ToBe(640);
+  Expect<Integer>(Region.Height).ToBe(480);
+  Region := StoredRegion(798, 418, 640, 480);
+  Region := AdjustKeyboardSelection(Region, sdRight, False, False, 1440, 900);
+  Region := AdjustKeyboardSelection(Region, sdDown, False, False, 1440, 900);
+  Expect<Integer>(Region.Left).ToBe(800);
+  Expect<Integer>(Region.Top).ToBe(420);
+  Region := AdjustKeyboardSelection(Region, sdRight, True, False, 1440, 900);
+  Region := AdjustKeyboardSelection(Region, sdDown, True, False, 1440, 900);
+  Expect<Integer>(Region.Width).ToBe(640);
+  Expect<Integer>(Region.Height).ToBe(480);
+  Region := StoredRegion(100, 200, 3, 3);
+  Region := AdjustKeyboardSelection(Region, sdLeft, True, False, 1440, 900);
+  Region := AdjustKeyboardSelection(Region, sdUp, True, False, 1440, 900);
+  Expect<Integer>(Region.Width).ToBe(2);
+  Expect<Integer>(Region.Height).ToBe(2);
+  Expect<Boolean>(IsSelectionUsable(Region)).ToBe(True);
+  Region := AdjustKeyboardSelection(Default(TCaptureRegion), sdRight,
+    False, False, 1440, 900);
+  Expect<Boolean>(IsSelectionUsable(Region)).ToBe(True);
+  Expect<Integer>(Region.Left).ToBe(370);
 end;
 
 procedure TSelectionTests.TestStoredRegionSurvivesARoundTrip;

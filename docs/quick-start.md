@@ -102,7 +102,7 @@ A `◉` appears in the menu bar. Clicking it opens:
 
 | Item | What it does |
 | --- | --- |
-| Record Region… | Dims every screen, crosshair; drag a rectangle, release to start. **Esc** cancels. |
+| Record Region… | Dims every screen with a centred starting region. Drag and release, or use **arrows** to move, **Shift + arrows** to resize the right/bottom edges (10 pt; hold **Option** for 1 pt). **Tab / Shift + Tab** selects the next / previous display with a fresh centred region. **Return / Enter** starts; **Esc** cancels. Instructions stay visible on screen. |
 | Record Display | Records the main display straight away. |
 | Record Window ▸ | Up to 20 on-screen application windows as *Application — Title*, refreshed at most once every five seconds. Knips's own windows are never listed. If the list cannot be read within a second the submenu says so instead of stalling. |
 | Record Last Region | Repeats the last region recording — same display, same rectangle. Survives a relaunch. |

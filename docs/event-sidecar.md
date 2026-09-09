@@ -30,6 +30,35 @@ never be taken out again, so those fields decide what a render is still
 free to choose. They are covered by the stability promise below exactly as
 the sample records are.
 
+## Writing and publication failures
+
+Sidecar creation and recovery append refuse a symbolic link at the file
+name, including a dangling link. The open itself refuses links on Unix;
+Windows opens the reparse point and checks the handle before truncating.
+Buffered writes stay on that checked handle if the name changes later.
+Directories and other non-regular files are refused as well.
+
+A recording writes its movie and sidecar under a unique temporary movie
+name. Only a completed movie replaces the requested output. Its sidecar
+is then copied to a temporary neighbour with the header's `movie` updated
+and published by rename. If publication fails, the previous final sidecar
+and the new recording's temporary sidecar remain available. The error
+names the retained file; the app opens the completed movie and skips its
+automatic render, so it cannot accidentally render against old metadata.
+
+A render refuses any output whose movie or sidecar collides with the
+input pair before writing anything. In particular, `source.mp4` cannot
+render to `source.mov`: both would use `source.knips.jsonl`. Existing Unix
+file aliases are checked by filesystem identity as well as by name.
+
+A successfully saved movie remains a success if its deliverable sidecar
+cannot be written. The CLI prints the explicit sidecar error on stderr;
+MCP `render` and `record_stop` include `sidecar_error` in both the structured
+result and their textual summary; the app displays the diagnostic. A render
+sets `sidecar_path` only after the sidecar has flushed and closed without
+error. On failure, a file already at the expected sidecar path may be
+old or incomplete and must not be treated as metadata for the new movie.
+
 ## Shape
 
 [JSON Lines](https://jsonlines.org): one JSON object per line, UTF-8, no

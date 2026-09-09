@@ -393,6 +393,7 @@ const
     + '"heartbeats":{"type":"integer"},'
     + '"heartbeats_refused":{"type":"integer"},'
     + '"raw":{"type":"boolean"},"sidecar_path":{"type":"string"},'
+    + '"sidecar_error":{"type":"string"},'
     + '"pointer_samples":{"type":"integer"},'
     + '"render_output_path":{"type":"string"},'
     + '"advice":{"type":"string"},'
@@ -433,13 +434,14 @@ const
     + '"elapsed_seconds":{"type":"number"},'
     + '"realtime_factor":{"type":"number"},'
     + '"sidecar_skipped_lines":{"type":"integer"},'
+    + '"sidecar_error":{"type":"string"},'
     + '"sidecar_path":{"type":"string"},"framing_note":{"type":"string"},'
     + '"cursor_note":{"type":"string"},"zoom_note":{"type":"string"}},'
     // Every key the handler emits on every successful path, which is the
     // rule this file states at the top and used to keep only half of:
     // eight of these were emitted unconditionally and promised
     // conditionally, which tells a client to guard for an absence that
-    // cannot happen. Only sidecar_path and the three notes are genuinely
+    // cannot happen. Only sidecar_path, sidecar_error and the three notes are genuinely
     // conditional.
     + '"required":["path","input_path","width","height","frames",'
     + '"duration_seconds","bytes","copied","zoom","cursor",'

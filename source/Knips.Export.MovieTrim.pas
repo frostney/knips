@@ -170,6 +170,7 @@ begin
   if AError <> '' then
     Exit;
   TempPath := RenderTemporaryPathFor(FOptions.OutputPath);
+  try
 
   URL := NSURL.fileURLWithPath(NSString.stringWithUTF8String(PAnsiChar(FOptions.InputPath)));
   Asset := AVAsset(AVURLAsset.URLAssetWithURL_options(URL, nil));
@@ -312,6 +313,9 @@ begin
   SweepTemporary(TempPath);
   FReport.OutputBytes := FileSizeOf(FOptions.OutputPath);
   Result := True;
+  finally
+    SweepTemporary(TempPath);
+  end;
 end;
 
 {$ENDIF}

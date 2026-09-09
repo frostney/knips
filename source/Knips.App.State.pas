@@ -13,6 +13,7 @@ unit Knips.App.State;
 interface
 
 uses
+  Math,
   SysUtils,
 
   Knips.Options;
@@ -287,6 +288,8 @@ const
   CameraRideEpsilon = 0.5;
 
 type
+  TSelectionDirection = (sdLeft, sdRight, sdUp, sdDown);
+
   // A window origin in AppKit's screen coordinates: bottom-left origin,
   // y growing upwards, the same space NSWindow.frame lives in. Nothing
   // here is flipped — unlike a capture region, the camera window is only
@@ -396,6 +399,16 @@ function NormalizeSelection(AAnchorX, AAnchorY, ACurrentX,
 
 // Keeps the region inside a display of the given size in points.
 function ClampSelection(const ASelection: TCaptureRegion;
+  ADisplayWidth, ADisplayHeight: Integer): TCaptureRegion;
+
+// A visible starting region for keyboard selection, centred on the display.
+function DefaultKeyboardSelection(ADisplayWidth,
+  ADisplayHeight: Integer): TCaptureRegion;
+
+// Arrows move; Shift resizes the right/bottom edge; Option uses one point
+// instead of ten. Moving at an edge preserves size; resizing stays usable.
+function AdjustKeyboardSelection(const ASelection: TCaptureRegion;
+  ADirection: TSelectionDirection; AResize, AFine: Boolean;
   ADisplayWidth, ADisplayHeight: Integer): TCaptureRegion;
 
 // A region small enough to align to nothing is a stray click, not a drag.
@@ -962,6 +975,59 @@ begin
     Result.Width := 0;
   if Result.Height < 0 then
     Result.Height := 0;
+end;
+
+function DefaultKeyboardSelection(ADisplayWidth,
+  ADisplayHeight: Integer): TCaptureRegion;
+begin
+  Result := Default(TCaptureRegion);
+  if (ADisplayWidth < DimensionAlignment)
+    or (ADisplayHeight < DimensionAlignment) then
+    Exit;
+  Result.Width := Max(DimensionAlignment, ADisplayWidth div 2);
+  Result.Height := Max(DimensionAlignment, ADisplayHeight div 2);
+  Result.Left := (ADisplayWidth - Result.Width) div 2;
+  Result.Top := (ADisplayHeight - Result.Height) div 2;
+end;
+
+function AdjustKeyboardSelection(const ASelection: TCaptureRegion;
+  ADirection: TSelectionDirection; AResize, AFine: Boolean;
+  ADisplayWidth, ADisplayHeight: Integer): TCaptureRegion;
+const
+  ArrowStep = 10;
+var
+  Step, DeltaX, DeltaY: Integer;
+begin
+  Result := ClampSelection(ASelection, ADisplayWidth, ADisplayHeight);
+  if not IsSelectionUsable(Result) then
+    Result := DefaultKeyboardSelection(ADisplayWidth, ADisplayHeight);
+  if not IsSelectionUsable(Result) then
+    Exit;
+  Step := ArrowStep;
+  if AFine then
+    Step := 1;
+  DeltaX := 0;
+  DeltaY := 0;
+  case ADirection of
+    sdLeft: DeltaX := -Step;
+    sdRight: DeltaX := Step;
+    sdUp: DeltaY := -Step;
+    sdDown: DeltaY := Step;
+  end;
+  if AResize then
+  begin
+    Result.Width := EnsureRange(Result.Width + DeltaX, DimensionAlignment,
+      ADisplayWidth - Result.Left);
+    Result.Height := EnsureRange(Result.Height + DeltaY, DimensionAlignment,
+      ADisplayHeight - Result.Top);
+  end
+  else
+  begin
+    Result.Left := EnsureRange(Result.Left + DeltaX, 0,
+      ADisplayWidth - Result.Width);
+    Result.Top := EnsureRange(Result.Top + DeltaY, 0,
+      ADisplayHeight - Result.Height);
+  end;
 end;
 
 function IsSelectionUsable(const ASelection: TCaptureRegion): Boolean;

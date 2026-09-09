@@ -366,8 +366,7 @@ begin
   end;
 end;
 
-// TLiveAnimator.HandleClick, with the same retarget-rather-than-restart
-// rule: a second click part way through the first zoom begins its curve
+// Retarget rather than restart: a second click part way through the first zoom begins its curve
 // where the old one had got to, and smoothstep leaves that point at zero
 // velocity, so nothing jumps and nothing reverses at speed.
 function ApplyClick(const AWalker: TZoomWalker;

@@ -146,6 +146,8 @@ type
     OutputPath: string;
     // The sidecar written beside the deliverable, or '' when none was.
     SidecarPath: string;
+    // The movie succeeded, but its event sidecar did not.
+    SidecarError: string;
     PixelWidth: Integer;
     PixelHeight: Integer;
     FramesRead: Int64;
@@ -714,6 +716,8 @@ end;
 function TRenderSession.CommitOutput(out AError: string): Boolean;
 begin
   Result := CommitTemporary(FTempPath, FOutputPath, AError);
+  if not Result then
+    SweepTemporaries;
 end;
 
 procedure TRenderSession.SweepTemporaries;
@@ -1555,7 +1559,11 @@ begin
   Writer := TSidecarWriter.Create(SidecarPathFor(FOutputPath));
   try
     if Writer.Failed then
+    begin
+      FReport.SidecarError := 'movie saved, but its event sidecar could '
+        + 'not be written: ' + Writer.LastError;
       Exit;
+    end;
     Header := FLog.Header;
     Header.MovieName := Copy(FOutputPath,
       LastDelimiter('/', FOutputPath) + 1, MaxInt);
@@ -1603,7 +1611,12 @@ begin
     Trailer.Frames := FReport.FramesWritten;
     Trailer.Samples := FLog.SampleCount;
     Writer.WriteTrailer(Trailer);
-    FReport.SidecarPath := Writer.Path;
+    Writer.Close;
+    if Writer.Failed then
+      FReport.SidecarError := 'movie saved, but its event sidecar could '
+        + 'not be written: ' + Writer.LastError
+    else
+      FReport.SidecarPath := Writer.Path;
   finally
     Writer.Free;
   end;
@@ -1646,28 +1659,14 @@ begin
   FLastShape := Default(TRenderedFrameShape);
   FHasLastShape := False;
   FSidecarLoadError := '';
-  if SameText(ExpandFileName(FInputPath), ExpandFileName(FOutputPath)) then
-  begin
-    AError := 'the take and the deliverable are the same file';
+  AError := RenderTakePathRefusal(FInputPath, FOutputPath);
+  if AError <> '' then
     Exit;
-  end;
   AError := OutputPathRefusal(FOutputPath);
   if AError <> '' then
     Exit;
   FTempPath := RenderTemporaryPathFor(FOutputPath);
-  // The same refusal the output gets, and it has to come BEFORE the
-  // sweep below. SweepTemporaries unlinks the temporary path outright,
-  // so a symlink planted at that name was removed by the pre-run sweep
-  // and the lstat guard inside ClaimTemporary then had nothing left to
-  // refuse — no data was lost either way, but the unit promises not to
-  // touch a link at a path it writes and this order was the one place
-  // it did. `export` refuses in the same words at the same point.
-  AError := OutputPathRefusal(FTempPath);
-  if AError <> '' then
-    Exit;
-  // A temporary left by a render that was killed. Removed rather than
-  // reused: nothing here knows how far the dead one got.
-  SweepTemporaries;
+
   StartedAt := Now;
 
   FReader := TMovieReader.Create(FInputPath);

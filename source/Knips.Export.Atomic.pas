@@ -6,7 +6,7 @@ unit Knips.Export.Atomic;
 // and the previous one is usually the thing the user cares about most:
 // the deliverable they were about to send. So none of them writes onto
 // the output's own name. Each builds into a neighbour called
-// `<output>.knips-render-tmp` and renames that onto the output as its
+// `<unique>-<output>.knips-render-tmp` and renames that onto the output as its
 // last act, because rename(2) replaces the destination atomically
 // within one filesystem. Until the rename, the old file is untouched;
 // after it, the new one is complete. There is no instant in between.
@@ -44,6 +44,7 @@ interface
 
 uses
   BaseUnix,
+  Classes,
   SysUtils,
 
   Knips.Options,
@@ -54,12 +55,15 @@ uses
 // Asked by `record`, `render`, `export` and the trim, on both faces.
 function OutputPathRefusal(const APath: string): string;
 
-// Clears any previous temporary at ATempPath and writes the owner
-// marker naming this process. False with a message when the stale
-// temporary cannot be removed, which is the one case a writer must not
-// proceed through: it would be appending to somebody else's file.
-function ClaimTemporary(const ATempPath: string;
+// Reserves a unique sibling of ATempPath with an exclusive owner marker.
+// Returns its actual name through ATempPath. Existing scratch is never
+// removed: another operation (or a crashed recording) may still need it.
+function ClaimTemporary(var ATempPath: string;
   out AError: string): Boolean;
+
+// Gives up this process's reservation without deleting the file. Used
+// for a failed recording whose flushed fragments are still recoverable.
+procedure PreserveTemporary(const ATempPath: string);
 
 // The one instant at which the old output stops being the answer.
 //
@@ -82,8 +86,8 @@ function ClaimTemporary(const ATempPath: string;
 function CommitTemporary(const ATempPath, AOutputPath: string;
   out AError: string): Boolean;
 
-// Removes ATempPath, its owner marker and any sandbox shadow of it.
-// Safe to call when there is nothing there, which is the usual case.
+// Removes only a temporary successfully claimed by this process.
+// An unclaimed template or another operation's scratch is left alone.
 procedure SweepTemporary(const ATempPath: string);
 
 {$ENDIF}
@@ -114,48 +118,78 @@ begin
       + 'one — pass the file it points at instead';
 end;
 
-function ClaimTemporary(const ATempPath: string;
+var
+  OwnedTemporaries: TStringList;
+
+function OwnsTemporary(const APath: string): Boolean;
+begin
+  Result := (OwnedTemporaries <> nil)
+    and (OwnedTemporaries.IndexOf(APath) >= 0);
+end;
+
+function ClaimTemporary(var ATempPath: string;
   out AError: string): Boolean;
 var
-  Marker: TextFile;
+  Token: TGUID;
+  Candidate, MarkerText: string;
+  Handle, Separator: Integer;
+  Info: Stat;
 begin
-  AError := '';
   Result := False;
+  AError := OutputPathRefusal(ATempPath);
+  if AError <> '' then
+    Exit;
   if ATempPath = '' then
   begin
     AError := 'no temporary path to build into';
     Exit;
   end;
-  // A temporary is never a symlink of ours; one sitting there that is
-  // has been planted, and following it is exactly what this unit exists
-  // not to do.
-  if OutputPathRefusal(ATempPath) <> '' then
+  if CreateGUID(Token) <> 0 then
   begin
-    AError := OutputPathRefusal(ATempPath);
+    AError := 'could not allocate a temporary name';
     Exit;
   end;
-  SweepTemporary(ATempPath);
-  if FileExists(ATempPath) then
+  Separator := LastDelimiter('/', ATempPath);
+  Candidate := Copy(ATempPath, 1, Separator)
+    + Copy(GUIDToString(Token), 2, 36) + '-'
+    + Copy(ATempPath, Separator + 1, MaxInt);
+  Handle := FpOpen(RenderTemporaryOwnerPathFor(Candidate),
+    O_WRONLY or O_CREAT or O_EXCL, &600);
+  if Handle < 0 then
   begin
-    AError := 'cannot replace ' + ATempPath;
+    AError := 'cannot reserve temporary for ' + ATempPath + ': '
+      + SysErrorMessage(fpgeterrno);
     Exit;
   end;
-  // Best effort: a marker that cannot be written costs the sweep its
-  // pid gate for this one temporary and nothing else, and refusing to
-  // render over it would be the worse trade.
-  AssignFile(Marker, RenderTemporaryOwnerPathFor(ATempPath));
-  try
-    Rewrite(Marker);
-    try
-      WriteLn(Marker, FpGetPid);
-    finally
-      CloseFile(Marker);
-    end;
-  except
-    on Exception do
-      ;
+  MarkerText := IntToStr(FpGetPid) + LineEnding;
+  Result := FpWrite(Handle, MarkerText[1], Length(MarkerText))
+    = Length(MarkerText);
+  FpClose(Handle);
+  // The framework creates the movie itself. Never hand it an existing
+  // name, including a dangling link or a directory.
+  if FpLStat(Candidate, Info) = 0 then
+    Result := False;
+  if not Result then
+  begin
+    DeleteFile(RenderTemporaryOwnerPathFor(Candidate));
+    AError := 'cannot reserve temporary for ' + ATempPath;
+    Exit;
   end;
-  Result := True;
+  if OwnedTemporaries = nil then
+    OwnedTemporaries := TStringList.Create;
+  OwnedTemporaries.Add(Candidate);
+  ATempPath := Candidate;
+end;
+
+procedure PreserveTemporary(const ATempPath: string);
+var
+  Index: Integer;
+begin
+  if not OwnsTemporary(ATempPath) then
+    Exit;
+  Index := OwnedTemporaries.IndexOf(ATempPath);
+  DeleteFile(RenderTemporaryOwnerPathFor(ATempPath));
+  OwnedTemporaries.Delete(Index);
 end;
 
 function CommitTemporary(const ATempPath, AOutputPath: string;
@@ -165,11 +199,21 @@ var
 begin
   AError := '';
   Result := False;
-  DeleteFile(RenderTemporaryOwnerPathFor(ATempPath));
+  if not OwnsTemporary(ATempPath) then
+  begin
+    AError := 'temporary is not owned by this operation: ' + ATempPath;
+    Exit;
+  end;
+  AError := OutputPathRefusal(AOutputPath);
+  if AError <> '' then
+    Exit;
   for Attempt := 1 to CommitAttempts do
   begin
     if RenameFile(ATempPath, AOutputPath) then
+    begin
+      SweepTemporary(ATempPath);
       Exit(True);
+    end;
     // A run-loop turn rather than a sleep: this is the main thread, and
     // whatever the frameworks have left to do may want it.
     CFRunLoopRunInMode(kCFRunLoopDefaultMode, CommitSettleSeconds, False);
@@ -178,34 +222,44 @@ begin
     + '%.2fs (errno %d, temporary %s)', [AOutputPath,
     CommitAttempts * CommitSettleSeconds, fpgeterrno,
     BoolToStr(FileExists(ATempPath), 'present', 'gone')]);
-  SweepTemporary(ATempPath);
 end;
 
 procedure SweepTemporary(const ATempPath: string);
 var
-  Search: TSearchRec;
-  Directory, Pattern, Ours: string;
+  Entries: PDir;
+  Entry: PDirent;
+  Directory, Pattern, Ours, Name: string;
 begin
-  if ATempPath = '' then
+  if not OwnsTemporary(ATempPath) then
     Exit;
   DeleteFile(ATempPath);
-  DeleteFile(RenderTemporaryOwnerPathFor(ATempPath));
-  Directory := ExtractFilePath(ATempPath);
-  Ours := ExtractFileName(ATempPath);
-  // The sandbox shadows, which carry a token nothing here can predict.
-  Pattern := Ours + RenderTemporaryShadowPrefix + '*';
-  if FindFirst(Directory + Pattern, faAnyFile, Search) <> 0 then
+  PreserveTemporary(ATempPath);
+  Directory := Copy(ATempPath, 1, LastDelimiter('/', ATempPath));
+  Ours := Copy(ATempPath, Length(Directory) + 1, MaxInt);
+  if Directory = '' then
+    Directory := './';
+  Pattern := Ours + RenderTemporaryShadowPrefix;
+  // Read the literal Unix entry: TSearchRec.Name strips a backslash as
+  // though it were a directory separator, losing part of valid names.
+  Entries := FpOpenDir(PChar(Directory));
+  if Entries = nil then
     Exit;
   try
-    repeat
-      if (Search.Attr and faDirectory) <> 0 then
-        Continue;
-      DeleteFile(Directory + Search.Name);
-    until FindNext(Search) <> 0;
+    Entry := FpReadDir(Entries^);
+    while Entry <> nil do
+    begin
+      Name := StrPas(@Entry^.d_name[0]);
+      if Copy(Name, 1, Length(Pattern)) = Pattern then
+        DeleteFile(Directory + Name);
+      Entry := FpReadDir(Entries^);
+    end;
   finally
-    FindClose(Search);
+    FpCloseDir(Entries^);
   end;
 end;
+
+finalization
+  OwnedTemporaries.Free;
 
 {$ENDIF}
 

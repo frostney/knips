@@ -15,6 +15,10 @@ Changelog](https://keepachangelog.com/en/1.1.0/)'s: **Added**,
 
 ### Added
 
+- Region selection works from the keyboard: arrows move, Shift resizes,
+  Option makes fine adjustments, Tab changes displays, Return confirms
+  and Escape cancels. The overlay shows the controls.
+
 - **A sidecar cannot point recovery at a movie outside its own
   directory.** The event sidecar's `movie` field was documented as a
   bare file name and never checked: a sidecar planted in a recording
@@ -156,6 +160,9 @@ Changelog](https://keepachangelog.com/en/1.1.0/)'s: **Added**,
 
 ### Changed
 
+- Removed unused live Zoom on Click machinery. Follow Mouse remains live;
+  Zoom on Click still runs when rendering the recorded take.
+
 - **The project is MIT-licensed.** A `LICENSE` file carries the terms and
   the README links to it; the line calling Knips a private candidate is
   gone.
@@ -203,6 +210,16 @@ Changelog](https://keepachangelog.com/en/1.1.0/)'s: **Added**,
   default build linker-flag-free.
 
 ### Fixed
+
+- Failed recordings preserve the previous movie and event sidecar.
+  Recording fragments stay under a separate recoverable name until the
+  movie finishes; sidecar publication failure reports partial success.
+- Concurrent exports and renders reserve separate temporary names and
+  never sweep each other's active work. Recovery no longer deletes a
+  neighbouring `.recovering.mp4` file.
+- Sidecar creation and recovery append refuse symbolic links in the file
+  open itself. Rendering refuses input/output names that share metadata,
+  and CLI, MCP and app diagnostics report failed sidecar writes.
 
 - **The GIF palette pass emitted a frame the file never held.** On the
   GIF path the target size was learned inside the first walk, so the
