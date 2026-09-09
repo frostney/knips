@@ -641,7 +641,12 @@ begin
     'bytes', FileSizeOf(FSession.Report.OutputPath)]);
   if FSession.Report.SidecarPath <> '' then
     Structured.Add('sidecar_path', FSession.Report.SidecarPath);
-  if FSession.Report.SmoothCursor then
+  if FSession.Report.SidecarError <> '' then
+  begin
+    Structured.Add('sidecar_error', FSession.Report.SidecarError);
+    Summary := Summary + #10 + FSession.Report.SidecarError;
+  end;
+  if FSession.Report.SmoothCursor and (FSession.Report.SidecarError = '') then
     Summary := Summary + #10 + 'this is a raw take: call render with '
       + '"in": "' + FSession.Report.OutputPath + '" to draw the pointer '
       + 'back and apply a zoom, or take_info to see what it can have.';
@@ -1064,6 +1069,11 @@ begin
     // never mentioned.
     if Session.Report.SidecarPath <> '' then
       Structured.Add('sidecar_path', Session.Report.SidecarPath);
+    if Session.Report.SidecarError <> '' then
+    begin
+      Structured.Add('sidecar_error', Session.Report.SidecarError);
+      Summary := Summary + #10 + Session.Report.SidecarError;
+    end;
     // The three, and not TRenderReport.Note beside them. Note is the
     // one-line SUMMARY of exactly these three, for a caller that has one
     // line to show — the menu's Last-error slot, the playback title.

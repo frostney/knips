@@ -1486,7 +1486,10 @@ begin
   end;
   // Only here does the previous animation stop being the answer.
   if not CommitTemporary(FTempPath, FOptions.OutputPath, AError) then
+  begin
+    SweepTemporary(FTempPath);
     Exit;
+  end;
   SweepTemporary(FTempPath);
   // Counted rather than assumed, for the same reason Big Cursor's frames
   // are: a pointer that was asked for and silently drawn into nothing

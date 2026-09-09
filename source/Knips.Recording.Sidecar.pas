@@ -354,7 +354,7 @@ type
   // LastError says what.
   TSidecarWriter = class
   private
-    FStream: TFileStream;
+    FStream: THandleStream;
     FPath: string;
     FBuffer: string;
     FFailed: Boolean;
@@ -561,6 +561,12 @@ function SidecarSampleTimeAdvances(APreviousTime,
 // is exactly right: they are the same take written twice, and the second
 // one's sidecar should replace the first's.
 function SidecarPathFor(const AMoviePath: string): string;
+// A render must preserve both members of the input take.
+function RenderTakePathRefusal(const AInputPath, AOutputPath: string): string;
+// Publish a completed sidecar beside the committed movie, rewriting its
+// header's movie name. Failure keeps the source available for recovery.
+function PublishSidecarForMovie(const ASourcePath, AMoviePath: string;
+  out AError: string): Boolean;
 
 // Whether a header's `movie` is what the format says it is: the movie's
 // file name, and not a path (docs/event-sidecar.md, *The header*). The
@@ -667,6 +673,26 @@ function InterpolatePath(const ASamples: TSidecarSampleArray;
   out AX, AY: Double): Boolean;
 
 implementation
+
+uses
+{$IFDEF UNIX}
+  BaseUnix;
+{$ENDIF}
+{$IFDEF WINDOWS}
+  Windows;
+{$ENDIF}
+
+{$IFDEF DARWIN}
+const
+  // sys/fcntl.h; absent from BaseUnix on FPC 3.2.2 Darwin.
+  SidecarOpenNoFollow = $100;
+{$ENDIF}
+
+{$IFDEF WINDOWS}
+const
+  // WinBase.h; missing from the FPC 3.2.2 Windows unit.
+  SidecarOpenReparsePoint = $00200000;
+{$ENDIF}
 
 type
   // A forward line reader over a stream, so a sidecar is walked rather
@@ -1016,10 +1042,140 @@ begin
     Result := False;
 end;
 
+function PathsReferToSameFile(const AFirst, ASecond: string): Boolean;
+{$IFDEF UNIX}
+var
+  FirstInfo, SecondInfo: Stat;
+{$ENDIF}
+begin
+  Result := SameText(ExpandFileName(AFirst), ExpandFileName(ASecond));
+{$IFDEF UNIX}
+  if not Result then
+    Result := (FpStat(PChar(AFirst), FirstInfo) = 0)
+      and (FpStat(PChar(ASecond), SecondInfo) = 0)
+      and (FirstInfo.st_dev = SecondInfo.st_dev)
+      and (FirstInfo.st_ino = SecondInfo.st_ino);
+{$ENDIF}
+end;
+
+function RenderTakePathRefusal(const AInputPath, AOutputPath: string): string;
+var
+  InputSidecar, OutputSidecar: string;
+begin
+  Result := '';
+  InputSidecar := SidecarPathFor(AInputPath);
+  OutputSidecar := SidecarPathFor(AOutputPath);
+  if PathsReferToSameFile(AInputPath, AOutputPath) then
+    Result := 'the take and the deliverable are the same file'
+  else if PathsReferToSameFile(InputSidecar, OutputSidecar)
+    or PathsReferToSameFile(AInputPath, OutputSidecar)
+    or PathsReferToSameFile(InputSidecar, AOutputPath) then
+    Result := 'the take and deliverable paths share a movie or event '
+      + 'sidecar; choose a different output name';
+end;
+
+function PublishSidecarForMovie(const ASourcePath, AMoviePath: string;
+  out AError: string): Boolean;
+var
+  OutputPath, TempPath, Line: string;
+  Identifier: TGUID;
+  Stream: TFileStream;
+  Reader: TSidecarLineReader;
+  Writer: TSidecarWriter;
+  Data: TJSONData;
+{$IFDEF UNIX}
+  Info: Stat;
+{$ENDIF}
+{$IFDEF WINDOWS}
+  Attributes: DWORD;
+{$ENDIF}
+begin
+  Result := False;
+  AError := '';
+  OutputPath := SidecarPathFor(AMoviePath);
+  if PathsReferToSameFile(ASourcePath, OutputPath) then
+  begin
+    AError := 'movie saved, but sidecar publication source and destination '
+      + 'are the same file; source sidecar retained at ' + ASourcePath;
+    Exit;
+  end;
+  CreateGUID(Identifier);
+  TempPath := OutputPath + '.' + GUIDToString(Identifier) + '.tmp';
+  Stream := nil;
+  Reader := nil;
+  Writer := nil;
+  Data := nil;
+  try
+    try
+      Stream := TFileStream.Create(ASourcePath, fmOpenRead or fmShareDenyWrite);
+      Reader := TSidecarLineReader.Create(Stream);
+      if not Reader.NextLine(Line) or not SidecarLineWithinLimits(Line) then
+        raise EInOutError.Create('sidecar has no complete header');
+      Data := GetJSON(Line);
+      if not (Data is TJSONObject) then
+        raise EInOutError.Create('sidecar header is not an object');
+      if TJSONObject(Data).Get('k', '') <> 'header' then
+        raise EInOutError.Create('sidecar has no header');
+{$IFDEF UNIX}
+      TJSONObject(Data).Strings['movie'] := Copy(AMoviePath,
+        LastDelimiter('/', AMoviePath) + 1, MaxInt);
+{$ELSE}
+      TJSONObject(Data).Strings['movie'] := ExtractFileName(AMoviePath);
+{$ENDIF}
+      Writer := TSidecarWriter.Create(TempPath);
+      Writer.Emit(Data.AsJSON);
+      while not Writer.Failed and Reader.NextLine(Line) do
+        Writer.Emit(Line);
+      Writer.Close;
+      if Writer.Failed then
+        raise EInOutError.Create(Writer.LastError);
+      // Rename replaces a name; it cannot write through a link swapped
+      // in after this refusal. The source stays intact until publication.
+{$IFDEF UNIX}
+      if (FpLStat(PChar(OutputPath), Info) = 0)
+        and FpS_ISLNK(Info.st_mode) then
+        raise EInOutError.Create(OutputPath + ' is a symbolic link');
+      if FpRename(PChar(TempPath), PChar(OutputPath)) <> 0 then
+        RaiseLastOSError;
+{$ENDIF}
+{$IFDEF WINDOWS}
+      Attributes := GetFileAttributes(PChar(OutputPath));
+      if (Attributes <> INVALID_FILE_ATTRIBUTES)
+        and ((Attributes and FILE_ATTRIBUTE_REPARSE_POINT) <> 0) then
+        raise EInOutError.Create(OutputPath + ' is a symbolic link');
+      if not MoveFileEx(PChar(TempPath), PChar(OutputPath),
+        MOVEFILE_REPLACE_EXISTING) then
+        RaiseLastOSError;
+{$ENDIF}
+      Result := True;
+    except
+      on E: Exception do
+        AError := 'movie saved, but its event sidecar could not be published: '
+          + E.Message + '; source sidecar retained at ' + ASourcePath;
+    end;
+  finally
+    Data.Free;
+    Writer.Free;
+    Reader.Free;
+    Stream.Free;
+    DeleteFile(TempPath);
+  end;
+  if Result then
+    DeleteFile(ASourcePath);
+end;
+
 { TSidecarWriter }
 
 constructor TSidecarWriter.Create(const APath: string;
   AAppend: Boolean = False);
+var
+  Handle: THandle;
+{$IFDEF UNIX}
+  Info: Stat;
+{$ENDIF}
+{$IFDEF WINDOWS}
+  Info: TByHandleFileInformation;
+{$ENDIF}
 begin
   inherited Create;
   FPath := APath;
@@ -1028,19 +1184,50 @@ begin
     NoteFailure('no sidecar path');
     Exit;
   end;
+  Handle := THandle(-1);
   try
-    if AAppend and FileExists(APath) then
+    // Refuse the link in the open itself, including a replacement raced
+    // into place after a pathname check. Truncate only the checked handle.
+{$IFDEF UNIX}
+    Handle := FpOpen(PChar(APath), O_RDWR or O_CREAT
+{$IFDEF DARWIN}
+      or SidecarOpenNoFollow
+{$ELSE}
+      or O_NOFOLLOW
+{$ENDIF}
+      or O_NONBLOCK, &666);
+    if Handle = THandle(-1) then
+      RaiseLastOSError;
+    if (FpFStat(Handle, Info) <> 0) or not FpS_ISREG(Info.st_mode) then
+      raise EInOutError.Create('sidecar is not a regular file: ' + APath);
+{$ENDIF}
+{$IFDEF WINDOWS}
+    Handle := Windows.CreateFile(PChar(APath), GENERIC_READ or GENERIC_WRITE,
+      FILE_SHARE_READ, nil, OPEN_ALWAYS, SidecarOpenReparsePoint, 0);
+    if Handle = INVALID_HANDLE_VALUE then
+      RaiseLastOSError;
+    if not GetFileInformationByHandle(Handle, Info) then
+      RaiseLastOSError;
+    if (Info.dwFileAttributes and (FILE_ATTRIBUTE_REPARSE_POINT
+      or FILE_ATTRIBUTE_DIRECTORY)) <> 0 then
+      raise EInOutError.Create('sidecar is a link or directory: ' + APath);
+{$ENDIF}
+    FStream := THandleStream.Create(Handle);
+    Handle := THandle(-1);
+    if AAppend then
     begin
-      FStream := TFileStream.Create(APath, fmOpenReadWrite or
-        fmShareDenyWrite);
       FStream.Seek(Int64(0), soEnd);
       PrimeAppend;
     end
     else
-      FStream := TFileStream.Create(APath, fmCreate);
+      FStream.Size := 0;
   except
     on E: Exception do
-      NoteFailure(E.Message);
+    begin
+      if Handle <> THandle(-1) then
+        FileClose(Handle);
+      NoteFailure(APath + ': ' + E.Message);
+    end;
   end;
 end;
 
@@ -1202,6 +1389,8 @@ end;
 procedure TSidecarWriter.Close;
 begin
   FlushBuffer;
+  if FStream <> nil then
+    FileClose(FStream.Handle);
   FreeAndNil(FStream);
 end;
 

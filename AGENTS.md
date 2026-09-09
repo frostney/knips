@@ -192,7 +192,7 @@ constant nothing production read, and a private copy doing the work —
 and one of them had to be the source of truth.
 `Knips.Export.Atomic` sits with `Knips.Export.MovieWriter` and is
 consumed by everything that writes a file the user may already have:
-`Knips.Recording` (the symlink refusal), `Knips.Export.Render`,
+`Knips.Recording` and its movie writer (recording replacement), `Knips.Export.Render`,
 `Knips.Export.Pipeline`, `Knips.Export.MovieTrim` and
 `Knips.Recording.Recovery`, whose re-mux replaces a movie by name and
 asks the same refusal before it does. Its naming rules are
@@ -251,8 +251,11 @@ no `{$IFDEF DARWIN}` at all and are tested on every host.
 - `record` writes to the path given and replaces an existing file without
   asking; `render` and `export` replace their output the same way, and
   every one of them does it **atomically** — the file is built as
-  `<out>.knips-render-tmp` and renamed on, so a Ctrl-C or a crash leaves
-  whatever was there untouched (`Knips.Export.Atomic`). A symlink at the
+  `<unique>-<out>.knips-render-tmp` and renamed on, so a Ctrl-C or a crash leaves
+  whatever was there untouched (`Knips.Export.Atomic`). Recordings use
+  `<unique>-<name>.knips-recording.mp4` and a matching sidecar so a
+  crashed take remains recoverable separately from the previous output.
+  Sidecar publication errors are reported as partial success. A symlink at the
   output is refused by name rather than written through, on every writer
   and both faces. `probe` writes and deletes `$TMPDIR/knips-probe.mp4`
   and measures the camera blur only under `probe --blur-cost`. The menu-bar app writes **two**
@@ -269,7 +272,7 @@ no `{$IFDEF DARWIN}` at all and are tested on every host.
   `render` tool writes the second pair when a client asks for it. A
   recording that asked for `smooth_cursor` and named no output takes the
   `-raw` name, so the pair lands exactly where the app's would.
-  `render` builds into `<out>.knips-render-tmp` and renames it into place,
+  `render` builds into `<unique>-<out>.knips-render-tmp` and renames it into place,
   so a killed render cannot damage an existing deliverable; the recovery
   pass sweeps any temporary a killed render left behind. The
   menu-bar app appends its diagnostics to `~/Library/Logs/Knips.log`,

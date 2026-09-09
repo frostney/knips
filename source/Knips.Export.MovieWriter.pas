@@ -76,6 +76,7 @@ uses
   CocoaAll,
   Knips.Capture.CoreMedia,
   Knips.Capture.PThreadMutex,
+  Knips.Export.Atomic,
   Knips.Options,
   MacOSAll;
 
@@ -242,6 +243,7 @@ type
   TMovieWriter = class
   private
     FOutputPath: string;
+    FTemporaryPath: string;
     FContainer: TOutputContainer;
     FPixelWidth: Integer;
     FPixelHeight: Integer;
@@ -315,7 +317,8 @@ type
     // before Open.
     procedure EnableAudioTracks(ASystem, AMicrophone: Boolean;
       ASampleRate, AChannelCount, ABitRate: Integer);
-    // Creates the writer and inputs; replaces an existing file.
+    // Creates the writer and inputs on a reserved temporary.
+    // Finish replaces the destination only after the movie is complete.
     function Open(out AError: string): Boolean;
     // Capture-queue side. Returns False when the frame was dropped or the
     // append failed; the reason is counted, not reported, on this thread.
@@ -345,6 +348,7 @@ type
     procedure Cancel;
     function Statistics: TMovieWriterStatistics;
     property OutputPath: string read FOutputPath;
+    property TemporaryPath: string read FTemporaryPath;
   end;
 
 // The H.264 output settings every movie knips writes are encoded with:
@@ -452,6 +456,12 @@ begin
     FMicrophoneInput.release;
   if FWriter <> nil then
     FWriter.release;
+  // A failed take with frames may still contain flushed fragments.
+  // Recovery finds its sidecar under this same unique recording name.
+  if FSessionStarted then
+    PreserveTemporary(FTemporaryPath)
+  else
+    SweepTemporary(FTemporaryPath);
   PThreadMutexDestroy(FLock);
   inherited Destroy;
 end;
@@ -569,29 +579,20 @@ var
 begin
   Result := False;
   AError := '';
-  // The existing file goes BEFORE the writer is even created, which
-  // means a failure anywhere below leaves the old file deleted and no
-  // new one in its place. That is deliberate and it is not a choice:
-  // +[AVAssetWriter assetWriterWithURL:fileType:error:] refuses a URL
-  // that already exists (AVErrorFileAlreadyExists), so there is no
-  // ordering in which the writer is known to be good before the path is
-  // clear. Moving the delete down to just before startWriting would
-  // narrow the window and not close it.
-  //
-  // The exposure is bounded by what is at the path. `record` and the
-  // menu-bar app write a name nothing else owns — a timestamp, or a path
-  // the caller named, and `record` replacing what it is pointed at
-  // without asking is the documented contract (AGENTS.md). The one place
-  // where a valuable file really is at the output path is a re-render of
-  // an existing deliverable, and that path does not come through here at
-  // all: Knips.Export.Render builds into `<out>.knips-render-tmp` and
-  // renames it into place, precisely so a failed render cannot destroy
-  // the file it was replacing.
-  if FileExists(FOutputPath) and not DeleteFile(FOutputPath) then
+  if FWriter <> nil then
   begin
-    AError := 'cannot replace ' + FOutputPath;
+    AError := 'this movie writer has already been used';
     Exit;
   end;
+  AError := OutputPathRefusal(FOutputPath);
+  if AError <> '' then
+    Exit;
+  // Keep recording scratch out of the render sweep: these fragments
+  // are the only copy of a crashed take, unlike regenerable renders.
+  FTemporaryPath := ChangeFileExt(FOutputPath, '.knips-recording'
+    + ExtractFileExt(FOutputPath));
+  if not ClaimTemporary(FTemporaryPath, AError) then
+    Exit;
 
   // stringWithUTF8String:, not NSSTR: NSSTR bridges through MacRoman, so
   // a path with a non-ASCII character in it becomes a DIFFERENT path —
@@ -599,7 +600,7 @@ begin
   // written somewhere the event sidecar beside it does not name, and
   // recovery would never find the pair again.
   URL := NSURL.fileURLWithPath(
-    NSString.stringWithUTF8String(PAnsiChar(FOutputPath)));
+    NSString.stringWithUTF8String(PAnsiChar(FTemporaryPath)));
   Error := nil;
   FWriter := AVAssetWriter(AVAssetWriter.assetWriterWithURL_fileType_error(
     URL, ContainerFileTypeString(FContainer), @Error));
@@ -1148,7 +1149,9 @@ begin
       + IntToStr(FWriter.status) + ': ' + WriterError;
     Exit;
   end;
-  Result := True;
+  Result := CommitTemporary(FTemporaryPath, FOutputPath, AError);
+  if not Result then
+    AError := AError + '; recording retained at ' + FTemporaryPath;
 end;
 
 procedure TMovieWriter.Cancel;

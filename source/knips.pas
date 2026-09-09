@@ -411,9 +411,12 @@ begin
     else if Session.Report.SidecarPath <> '' then
       WriteLn(Format('wrote %s: %d pointer samples (no anchor — no frame '
         + 'reached the movie)',
-        [Session.Report.SidecarPath, Session.Report.SidecarSamples]))
-    else if Session.Report.SidecarError <> '' then
-      WriteLn('no event sidecar: ', Session.Report.SidecarError);
+        [Session.Report.SidecarPath, Session.Report.SidecarSamples]));
+    if Session.Report.SidecarError <> '' then
+    begin
+      WriteLn(ErrOutput, ProgramName, ' record: ', Session.Report.SidecarError);
+      Flush(ErrOutput);
+    end;
     Result := ExitOk;
   finally
     Session.Free;
@@ -708,6 +711,8 @@ begin
     // printed, not the summary: a console has the room, and the summary
     // exists for the places that do not (see EffectNoteSummary).
     Flush(Output);
+    if Session.Report.SidecarError <> '' then
+      WriteLn(ErrOutput, ProgramName, ' render: ', Session.Report.SidecarError);
     if Session.Report.FramingNote <> '' then
       WriteLn(ErrOutput, ProgramName, ' render: ',
         EffectFramingNoteLine(Session.Report.FramingNote));

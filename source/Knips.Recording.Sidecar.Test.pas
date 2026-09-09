@@ -28,6 +28,9 @@ program Knips.Recording.Sidecar.Test;
 {$I Knips.inc}
 
 uses
+{$IFDEF UNIX}
+  BaseUnix,
+{$ENDIF}
   Classes,
   SysUtils,
 
@@ -36,6 +39,21 @@ uses
   TestingPascalLibrary;
 
 type
+  TWriterSafetyTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestCreateAndAppend;
+    procedure TestDirectoryRefusal;
+    procedure TestRenderCollision;
+    procedure TestPublication;
+    procedure TestPublicationFailure;
+{$IFDEF UNIX}
+    procedure TestSymlinkRefusal;
+    procedure TestReplacedPath;
+    procedure TestRenderAliases;
+{$ENDIF}
+  end;
+
   TRoundTripTests = class(TTestSuite)
   public
     procedure SetupTests; override;
@@ -1990,7 +2008,288 @@ begin
   Expect<Boolean>(SidecarMovieNameIsBare('..hidden.mp4')).ToBe(True);
 end;
 
+procedure TWriterSafetyTests.SetupTests;
 begin
+  Test('create replaces a regular sidecar and append preserves it',
+    TestCreateAndAppend);
+  Test('a sidecar directory fails explicitly without being modified',
+    TestDirectoryRefusal);
+  Test('render refuses colliding movie and sidecar names', TestRenderCollision);
+  Test('publication reheads the complete sidecar and replaces old metadata',
+    TestPublication);
+  Test('failed publication preserves the old and source sidecars',
+    TestPublicationFailure);
+{$IFDEF UNIX}
+  Test('create and append refuse existing and dangling symbolic links',
+    TestSymlinkRefusal);
+  Test('a link swapped in after open cannot redirect buffered writes',
+    TestReplacedPath);
+  Test('render refuses hardlinked and symlink-aliased sidecars',
+    TestRenderAliases);
+{$ENDIF}
+end;
+
+procedure TWriterSafetyTests.TestCreateAndAppend;
+var
+  Path, Error: string;
+  Writer: TSidecarWriter;
+  Log: TSidecarLog;
+  Header: TSidecarHeader;
+  Trailer: TSidecarTrailer;
+begin
+  Path := WriteFixture('replace', 3, Header);
+  Log := TSidecarLog.Create;
+  try
+    Writer := TSidecarWriter.Create(Path);
+    try
+      Writer.WriteHeader(Header);
+      Writer.WriteAnchor(Anchor);
+      Writer.Close;
+      Expect<Boolean>(Writer.Failed).ToBe(False);
+    finally
+      Writer.Free;
+    end;
+    Writer := TSidecarWriter.Create(Path, True);
+    try
+      Trailer := Default(TSidecarTrailer);
+      Trailer.Frames := 42;
+      Writer.WriteTrailer(Trailer);
+      Writer.Close;
+      Expect<Boolean>(Writer.Failed).ToBe(False);
+    finally
+      Writer.Free;
+    end;
+    Expect<Boolean>(Log.LoadFromFile(Path, Error)).ToBe(True);
+    Expect<Boolean>(Log.HasHeader and Log.HasAnchor and Log.HasTrailer).ToBe(True);
+    Expect<Integer>(Log.SampleCount).ToBe(0);
+    Expect<Int64>(Log.Trailer.Frames).ToBe(Int64(42));
+  finally
+    Log.Free;
+    DeleteFile(Path);
+  end;
+end;
+
+procedure TWriterSafetyTests.TestDirectoryRefusal;
+var
+  Path: string;
+  Writer: TSidecarWriter;
+  Append: Boolean;
+begin
+  Path := TempSidecarPath('directory');
+  Expect<Boolean>(CreateDir(Path)).ToBe(True);
+  try
+    for Append := False to True do
+    begin
+      Writer := TSidecarWriter.Create(Path, Append);
+      try
+        Writer.WriteHeader(SampleHeader);
+        Writer.Close;
+        Expect<Boolean>(Writer.Failed).ToBe(True);
+        Expect<Boolean>(Writer.LastError <> '').ToBe(True);
+        Expect<Boolean>(DirectoryExists(Path)).ToBe(True);
+      finally
+        Writer.Free;
+      end;
+    end;
+  finally
+    RemoveDir(Path);
+  end;
+end;
+
+procedure TWriterSafetyTests.TestRenderCollision;
+begin
+  Expect<Boolean>(RenderTakePathRefusal('source.mp4', 'source.mov') <> '')
+    .ToBe(True);
+  Expect<Boolean>(RenderTakePathRefusal('source.mp4', './source.mp4') <> '')
+    .ToBe(True);
+  Expect<string>(RenderTakePathRefusal('source.mp4', 'deliverable.mp4'))
+    .ToBe('');
+end;
+
+procedure TWriterSafetyTests.TestPublication;
+var
+  SourcePath, MoviePath, OutputPath, Error: string;
+  Header: TSidecarHeader;
+  Log: TSidecarLog;
+begin
+  SourcePath := WriteFixture('publish-source', 3, Header);
+  OutputPath := WriteFixture('publish-output', 9, Header);
+  MoviePath := ChangeFileExt(ChangeFileExt(OutputPath, ''), '.mp4');
+  Log := TSidecarLog.Create;
+  try
+    Expect<Boolean>(PublishSidecarForMovie(SourcePath, MoviePath, Error)).ToBe(True);
+    Expect<string>(Error).ToBe('');
+    Expect<Boolean>(FileExists(SourcePath)).ToBe(False);
+    Expect<Boolean>(Log.LoadFromFile(OutputPath, Error)).ToBe(True);
+    Expect<string>(Log.Header.MovieName).ToBe(ExtractFileName(MoviePath));
+    Expect<Integer>(Log.SampleCount).ToBe(3);
+    Expect<Boolean>(Log.HasTrailer).ToBe(True);
+  finally
+    Log.Free;
+    DeleteFile(SourcePath);
+    DeleteFile(OutputPath);
+  end;
+end;
+
+procedure TWriterSafetyTests.TestPublicationFailure;
+var
+  SourcePath, MoviePath, OutputPath, Error: string;
+  Header: TSidecarHeader;
+  Before, After: TStringList;
+begin
+  SourcePath := TempSidecarPath('missing-publish-source');
+  OutputPath := WriteFixture('failed-publish-output', 9, Header);
+  MoviePath := ChangeFileExt(ChangeFileExt(OutputPath, ''), '.mp4');
+  Before := TStringList.Create;
+  After := TStringList.Create;
+  try
+    Before.LoadFromFile(OutputPath);
+    Expect<Boolean>(PublishSidecarForMovie(SourcePath, MoviePath, Error)).ToBe(False);
+    Expect<Boolean>(Pos('movie saved', Error) > 0).ToBe(True);
+    After.LoadFromFile(OutputPath);
+    Expect<string>(After.Text).ToBe(Before.Text);
+    DeleteFile(OutputPath);
+    Expect<Boolean>(CreateDir(OutputPath)).ToBe(True);
+    SourcePath := WriteFixture('retained-publish-source', 3, Header);
+    Expect<Boolean>(PublishSidecarForMovie(SourcePath, MoviePath, Error)).ToBe(False);
+    Expect<Boolean>(Pos(SourcePath, Error) > 0).ToBe(True);
+    Expect<Boolean>(FileExists(SourcePath)).ToBe(True);
+    Expect<Boolean>(DirectoryExists(OutputPath)).ToBe(True);
+  finally
+    Before.Free;
+    After.Free;
+    DeleteFile(SourcePath);
+    DeleteFile(OutputPath);
+    RemoveDir(OutputPath);
+  end;
+end;
+
+{$IFDEF UNIX}
+procedure TWriterSafetyTests.TestSymlinkRefusal;
+var
+  Path, Target: string;
+  Writer: TSidecarWriter;
+  Header: TSidecarHeader;
+  Before, After: TStringList;
+  Append, Dangling: Boolean;
+  Info: Stat;
+begin
+  Path := TempSidecarPath('link');
+  Target := WriteFixture('link-target', 3, Header);
+  Before := TStringList.Create;
+  After := TStringList.Create;
+  try
+    Before.LoadFromFile(Target);
+    for Dangling := False to True do
+    begin
+      if Dangling then
+        DeleteFile(Target);
+      Expect<Integer>(FpSymlink(PChar(Target), PChar(Path))).ToBe(0);
+      try
+        for Append := False to True do
+        begin
+          Writer := TSidecarWriter.Create(Path, Append);
+          try
+            Expect<Boolean>(Writer.Failed).ToBe(True);
+            Expect<Boolean>(Writer.LastError <> '').ToBe(True);
+            Writer.WriteHeader(Header);
+            Writer.Close;
+          finally
+            Writer.Free;
+          end;
+          Expect<Integer>(FpLStat(PChar(Path), Info)).ToBe(0);
+          Expect<Boolean>(FpS_ISLNK(Info.st_mode)).ToBe(True);
+          if Dangling then
+            Expect<Boolean>(FileExists(Target)).ToBe(False)
+          else
+          begin
+            After.LoadFromFile(Target);
+            Expect<string>(After.Text).ToBe(Before.Text);
+          end;
+        end;
+      finally
+        DeleteFile(Path);
+      end;
+    end;
+  finally
+    Before.Free;
+    After.Free;
+    DeleteFile(Target);
+  end;
+end;
+
+procedure TWriterSafetyTests.TestReplacedPath;
+var
+  Path, MovedPath, Target: string;
+  Header: TSidecarHeader;
+  Writer: TSidecarWriter;
+  Before, After: TStringList;
+  Append: Boolean;
+begin
+  Target := WriteFixture('swapped-target', 3, Header);
+  Path := TempSidecarPath('swapped-path');
+  MovedPath := Path + '.moved';
+  Before := TStringList.Create;
+  After := TStringList.Create;
+  try
+    Before.LoadFromFile(Target);
+    for Append := False to True do
+    begin
+      Writer := TSidecarWriter.Create(Path, Append);
+      try
+        Expect<Boolean>(Writer.Failed).ToBe(False);
+        Expect<Boolean>(RenameFile(Path, MovedPath)).ToBe(True);
+        Expect<Integer>(FpSymlink(PChar(Target), PChar(Path))).ToBe(0);
+        Writer.WriteHeader(Header);
+        Writer.Close;
+        Expect<Boolean>(Writer.Failed).ToBe(False);
+        After.LoadFromFile(Target);
+        Expect<string>(After.Text).ToBe(Before.Text);
+        Expect<Boolean>(FileSizeOf(MovedPath) > 0).ToBe(True);
+      finally
+        Writer.Free;
+        DeleteFile(Path);
+        DeleteFile(MovedPath);
+      end;
+    end;
+  finally
+    Before.Free;
+    After.Free;
+    DeleteFile(Target);
+  end;
+end;
+
+procedure TWriterSafetyTests.TestRenderAliases;
+var
+  InputPath, OutputPath, SourcePath, AliasPath, TargetPath, Error: string;
+  Header: TSidecarHeader;
+begin
+  TargetPath := WriteFixture('publication-link-target', 9, Header);
+  SourcePath := WriteFixture('alias-source', 3, Header);
+  AliasPath := TempSidecarPath('alias-output');
+  InputPath := ChangeFileExt(ChangeFileExt(SourcePath, ''), '.mp4');
+  OutputPath := ChangeFileExt(ChangeFileExt(AliasPath, ''), '.mp4');
+  try
+    Expect<Integer>(FpLink(PChar(SourcePath), PChar(AliasPath))).ToBe(0);
+    Expect<Boolean>(RenderTakePathRefusal(InputPath, OutputPath) <> '').ToBe(True);
+    DeleteFile(AliasPath);
+    Expect<Integer>(FpSymlink(PChar(SourcePath), PChar(AliasPath))).ToBe(0);
+    Expect<Boolean>(RenderTakePathRefusal(InputPath, OutputPath) <> '').ToBe(True);
+    DeleteFile(AliasPath);
+    Expect<Integer>(FpSymlink(PChar(TargetPath), PChar(AliasPath))).ToBe(0);
+    Expect<Boolean>(PublishSidecarForMovie(SourcePath, OutputPath, Error)).ToBe(False);
+    Expect<Boolean>(FileExists(SourcePath)).ToBe(True);
+    Expect<Boolean>(Pos('symbolic link', Error) > 0).ToBe(True);
+  finally
+    DeleteFile(AliasPath);
+    DeleteFile(SourcePath);
+    DeleteFile(TargetPath);
+  end;
+end;
+{$ENDIF}
+
+begin
+  TestRunnerProgram.AddSuite(TWriterSafetyTests.Create('safe sidecar writes and publication'));
   TestRunnerProgram.AddSuite(TRoundTripTests.Create(
     'writing and reading a sidecar back'));
   TestRunnerProgram.AddSuite(TSourceRectTests.Create(

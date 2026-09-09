@@ -229,6 +229,33 @@ and feel right", and the first item is what gates the rest:
    The measured run was launched from a parent without a camera grant, so
    only the no-kill and silent-refusal halves generalise.
 
+## Audit remediation device checks (2026-09-09)
+
+The atomic recording and keyboard-selection changes require the following
+on-device checks in addition to the automated filesystem and geometry tests:
+
+- Run the release `knips probe` with Screen Recording access, record a
+  real take over an existing output, and play the result in QuickTime.
+- Kill a recording after a fragment flush. Confirm the prior output and
+  sidecar survive, and startup recovery reports the separate pending take.
+- Start Region recording using the keyboard; check arrows, Shift resize,
+  Option fine adjustment, Return/keypad Enter and Escape. Check Tab and
+  Shift+Tab with two displays, then confirm mouse drag still works.
+- Record Follow Mouse while moving the pointer and dragging a docked
+  camera, checking that the border, captured region and camera stay together.
+
+Partial verification on 2026-09-09: a temporary audit-source build opened the
+real overlay at startup and stopped captures after five seconds. Computer Use
+verified arrows, Shift resize, Option fine adjustment, Tab/Shift+Tab on two
+displays, Return, Escape and mouse dragging. Two real takes published movies
+and sidecars and reached Knips playback; the first played to completion.
+Recorded Follow Mouse framing changed while its dimensions stayed fixed.
+All four raw/rendered movies decoded without errors. See the
+[evidence and test-build limits](../audits/2026-09-09-computer-use-diagnosis.md#follow-up-a-test-build-unlocks-real-ui-checks).
+Release-probe authorization, QuickTime playback, replacement of an existing
+real take, killed-capture recovery, keypad Enter, and docked-camera coordination
+remain open.
+
 ## Out of scope
 
 Menu bar, region overlay, microphone capture, and any second recording

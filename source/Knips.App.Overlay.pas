@@ -9,7 +9,7 @@ unit Knips.App.Overlay;
 // mouse and key handlers are plain cdecl Pascal routines, and
 // KnipsOverlayWindow is an NSWindow subclass that exists only to answer
 // YES to canBecomeKeyWindow — a borderless window says NO by default, and
-// without key status the view never sees the Esc keystroke.
+// without key status the view never sees selection keystrokes.
 //
 // Coordinates. AppKit hands mouse locations in window coordinates, whose
 // origin is the window's bottom-left corner with y growing upwards. The
@@ -84,6 +84,9 @@ type
     function ClampedSelectionRect(AIndex: Integer): NSRect;
     procedure Invalidate;
     procedure DrawSizeLabel(AIndex: Integer; const ASelection: NSRect);
+    procedure DrawInstructions(AIndex: Integer);
+    procedure SetSelectionRegion(const ARegion: TCaptureRegion);
+    procedure SelectKeyboardScreen(AIndex: Integer);
     procedure Finish(ACommitted: Boolean);
   public
     constructor Create;
@@ -101,7 +104,7 @@ type
     procedure BeginSelection(AIndex: Integer; const APoint: NSPoint);
     procedure ExtendSelection(AIndex: Integer; const APoint: NSPoint);
     procedure EndSelection(AIndex: Integer; const APoint: NSPoint);
-    procedure HandleKey(AKeyCode: Word);
+    procedure HandleKey(AKeyCode: Word; AShift, AOption: Boolean);
     property Visible: Boolean read FVisible;
     property OnSelected: TRegionSelectedEvent read FOnSelected
       write FOnSelected;
@@ -143,12 +146,12 @@ const
   OverlayWindowLevel = 1000;
   LabelBackdropAlpha = 0.75;
   LabelFontSize = 11;
+  InstructionFontSize = 13;
+  InstructionsTopInset = 40;
   LabelPadding = 4;
   LabelGap = 6;
   LabelCornerRadius = 3;
   SelectionBorderWidth = 1;
-  // kVK_Escape from Carbon's Events.h; AppKit reports it in keyCode.
-  EscapeKeyCode = 53;
   ScreenNumberKey = 'NSScreenNumber';
   NoActiveScreen = -1;
 
@@ -277,7 +280,9 @@ begin
   try
     Owner := OwnerOf(ASelf);
     if Owner <> nil then
-      Owner.HandleKey(NSEvent(AEvent).keyCode);
+      Owner.HandleKey(NSEvent(AEvent).keyCode,
+        (NSEvent(AEvent).modifierFlags and NSShiftKeyMask) <> 0,
+        (NSEvent(AEvent).modifierFlags and NSAlternateKeyMask) <> 0);
   except
     on E: Exception do
       HandleBodyException(Owner, 'keyDown:', E);
@@ -406,7 +411,7 @@ var
   Window: NSWindow;
   Allocated: id;
   View: NSView;
-  I, Created: Integer;
+  I, Created, FirstScreen: Integer;
 begin
   Result := FVisible;
   if FVisible then
@@ -418,6 +423,7 @@ begin
   Screens := NSScreen.screens;
   SetLength(FScreens, Screens.count);
   Created := 0;
+  FirstScreen := NoActiveScreen;
   for I := 0 to High(FScreens) do
   begin
     FScreens[I] := Default(TOverlayScreen);
@@ -459,13 +465,15 @@ begin
     // setContentView: retains; balance the alloc.
     View.release;
     Window.makeFirstResponder(View);
-    Window.makeKeyAndOrderFront(nil);
+    Window.orderFront(nil);
 
     FScreens[I].Window := Window;
     FScreens[I].View := View;
     FScreens[I].DisplayID := ScreenDisplayID(Screen);
     FScreens[I].Width := Frame.size.width;
     FScreens[I].Height := Frame.size.height;
+    if FirstScreen = NoActiveScreen then
+      FirstScreen := I;
     Inc(Created);
   end;
 
@@ -485,6 +493,7 @@ begin
     FCursorPushed := True;
   end;
   FVisible := True;
+  SelectKeyboardScreen(FirstScreen);
   Result := True;
 end;
 
@@ -574,6 +583,7 @@ begin
   if (not FSelecting) or (AIndex <> FActiveIndex) then
   begin
     NSRectFill(Bounds);
+    DrawInstructions(AIndex);
     Exit;
   end;
 
@@ -581,6 +591,7 @@ begin
   if (Selection.size.width < 1) or (Selection.size.height < 1) then
   begin
     NSRectFill(Bounds);
+    DrawInstructions(AIndex);
     Exit;
   end;
 
@@ -607,6 +618,7 @@ begin
   Outline.stroke;
 
   DrawSizeLabel(AIndex, Selection);
+  DrawInstructions(AIndex);
 end;
 
 procedure TSelectionOverlay.DrawSizeLabel(AIndex: Integer;
@@ -648,10 +660,61 @@ begin
   Text.drawAtPoint_withAttributes(Origin, Attributes);
 end;
 
+procedure TSelectionOverlay.DrawInstructions(AIndex: Integer);
+const
+  Instructions = 'Drag a region, or use the keyboard' + #10
+    + 'Arrows: move 10 pt  •  Shift + arrows: resize right/bottom' + #10
+    + 'Option: 1 pt steps  •  Tab / Shift + Tab: next / previous display' + #10
+    + 'Return / Enter: start recording  •  Esc: cancel';
+var
+  Text: NSString;
+  Attributes: NSMutableDictionary;
+  TextSize: NSSize;
+  Origin: NSPoint;
+  Backdrop: NSRect;
+begin
+  Text := PascalToNSString(Instructions);
+  Attributes := NSMutableDictionary.dictionaryWithCapacity(2);
+  Attributes.setObject_forKey(NSFont.systemFontOfSize(InstructionFontSize),
+    id(NSFontAttributeName));
+  Attributes.setObject_forKey(NSColor.whiteColor,
+    id(NSForegroundColorAttributeName));
+  TextSize := Text.sizeWithAttributes(Attributes);
+  Origin := NSMakePoint(LabelGap + LabelPadding,
+    FScreens[AIndex].Height - TextSize.height - InstructionsTopInset);
+  Backdrop := NSInsetRect(NSMakeRect(Origin.x, Origin.y, TextSize.width,
+    TextSize.height), -LabelPadding, -LabelPadding);
+  NSColor.blackColor.colorWithAlphaComponent(LabelBackdropAlpha).setFill;
+  NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius(Backdrop,
+    LabelCornerRadius, LabelCornerRadius).fill;
+  Text.drawAtPoint_withAttributes(Origin, Attributes);
+end;
+
+procedure TSelectionOverlay.SetSelectionRegion(const ARegion: TCaptureRegion);
+begin
+  FAnchor := NSMakePoint(ARegion.Left,
+    FScreens[FActiveIndex].Height - ARegion.Top);
+  FCurrent := NSMakePoint(ARegion.Left + ARegion.Width,
+    FAnchor.y - ARegion.Height);
+  FSelecting := True;
+end;
+
+procedure TSelectionOverlay.SelectKeyboardScreen(AIndex: Integer);
+begin
+  FActiveIndex := AIndex;
+  SetSelectionRegion(DefaultKeyboardSelection(Round(FScreens[AIndex].Width),
+    Round(FScreens[AIndex].Height)));
+  FScreens[AIndex].Window.makeKeyAndOrderFront(nil);
+  FScreens[AIndex].Window.makeFirstResponder(FScreens[AIndex].View);
+  Invalidate;
+end;
+
 procedure TSelectionOverlay.BeginSelection(AIndex: Integer;
   const APoint: NSPoint);
 begin
   FActiveIndex := AIndex;
+  FScreens[AIndex].Window.makeKeyAndOrderFront(nil);
+  FScreens[AIndex].Window.makeFirstResponder(FScreens[AIndex].View);
   FAnchor := APoint;
   FCurrent := APoint;
   FSelecting := True;
@@ -679,10 +742,46 @@ begin
   Finish(True);
 end;
 
-procedure TSelectionOverlay.HandleKey(AKeyCode: Word);
+procedure TSelectionOverlay.HandleKey(AKeyCode: Word;
+  AShift, AOption: Boolean);
+var
+  Direction: TSelectionDirection;
+  Index, Step: Integer;
 begin
-  if AKeyCode = EscapeKeyCode then
-    Finish(False);
+  if not FVisible then
+    Exit;
+  // Carbon Events.h key codes and NSEvent.h modifier flags, also present
+  // in FPC's Events/NSEvent bindings. No character-layout assumptions.
+  case AKeyCode of
+    kVK_Escape: Finish(False);
+    kVK_Return, kVK_ANSI_KeypadEnter: Finish(True);
+    kVK_Tab:
+      begin
+        Step := 1;
+        if AShift then
+          Step := -1;
+        Index := FActiveIndex;
+        repeat
+          Index := (Index + Step + Length(FScreens)) mod Length(FScreens);
+        until FScreens[Index].View <> nil;
+        if Index <> FActiveIndex then
+          SelectKeyboardScreen(Index);
+      end;
+    kVK_LeftArrow, kVK_RightArrow, kVK_UpArrow, kVK_DownArrow:
+      begin
+        case AKeyCode of
+          kVK_LeftArrow: Direction := sdLeft;
+          kVK_RightArrow: Direction := sdRight;
+          kVK_UpArrow: Direction := sdUp;
+          else Direction := sdDown;
+        end;
+        SetSelectionRegion(AdjustKeyboardSelection(
+          SelectionRegion(FActiveIndex), Direction, AShift, AOption,
+          Round(FScreens[FActiveIndex].Width),
+          Round(FScreens[FActiveIndex].Height)));
+        Invalidate;
+      end;
+  end;
 end;
 
 // The single exit: tear the overlay down first so the windows are off

@@ -170,63 +170,34 @@ begin
   Result := fpgeterrno <> ESysESRCH;
 end;
 
-// The scratch name a re-mux writes into. Beside the original rather than
-// in the temporary directory so the replace is a rename within one
-// volume: a cross-device copy of a gigabyte, half way through, is exactly
-// the failure this unit exists to avoid.
-function RecoveringPathFor(const AMoviePath: string): string;
-begin
-  Result := ChangeFileExt(AMoviePath, '.recovering'
-    + ExtractFileExt(AMoviePath));
-end;
-
-// The passthrough re-mux, into a neighbour file and then over the top.
+// The trim already writes to a reserved sibling and commits by rename.
+// Using its in-place form avoids a second, unowned .recovering movie.
 function RemuxInPlace(const AMoviePath: string; ADurationSeconds: Double;
   out AError: string): Boolean;
 var
   Options: TExportOptions;
   Session: TMovieTrimSession;
-  Temporary: string;
 begin
-  Result := False;
-  AError := '';
-  Temporary := RecoveringPathFor(AMoviePath);
-  // A previous recovery that itself died leaves one of these behind. It
-  // is ours by construction — nothing else in the program writes that
-  // name — and it is a partial copy of a movie that still exists, so it
-  // is removed rather than kept.
-  DeleteFile(Temporary);
   Options := DefaultExportOptions;
   Options.InputPath := AMoviePath;
-  Options.OutputPath := Temporary;
+  Options.OutputPath := AMoviePath;
+  Options.Format := efMovie;
+  if not ContainerForPath(AMoviePath, Options.InputContainer) then
+  begin
+    AError := 'unsupported recovered movie container';
+    Exit(False);
+  end;
+  Options.OutputContainer := Options.InputContainer;
   Options.HasTrim := True;
   Options.TrimStartSeconds := 0;
   Options.HasTrimEnd := True;
-  // A hair past the end: the range is clamped to the asset, and asking
-  // for exactly the duration leaves the last sample's inclusion up to a
-  // rounding this code cannot see.
   Options.TrimEndSeconds := ADurationSeconds + 1;
-  if not ValidateExportOptions(Options, AError) then
-    Exit;
   Session := TMovieTrimSession.Create(Options);
   try
-    if not Session.Run(AError) then
-    begin
-      DeleteFile(Temporary);
-      Exit;
-    end;
+    Result := Session.Run(AError);
   finally
     Session.Free;
   end;
-  // RenameFile over an existing path is rename(2), which is atomic within
-  // a volume: at no instant is there no movie at AMoviePath.
-  if not RenameFile(Temporary, AMoviePath) then
-  begin
-    AError := 'could not replace ' + AMoviePath;
-    DeleteFile(Temporary);
-    Exit;
-  end;
-  Result := True;
 end;
 
 // Closes the sidecar off so this take is never picked up again. The
@@ -413,11 +384,42 @@ begin
   end;
 end;
 
+// SysUtils.FindFirst strips the prefix before a literal backslash from
+// TSearchRec.Name on Unix. Recovery must use the actual directory entry:
+// a truncated name could cause it to delete a different neighbour.
+function DirectoryFiles(const ADirectory: string): TStringList;
+var
+  Entries: PDir;
+  Entry: PDirent;
+  Name: string;
+  Info: Stat;
+begin
+  Result := TStringList.Create;
+  Entries := FpOpenDir(PChar(ADirectory));
+  if Entries = nil then
+    Exit;
+  try
+    Entry := FpReadDir(Entries^);
+    while Entry <> nil do
+    begin
+      Name := StrPas(@Entry^.d_name[0]);
+      if (Name <> '.') and (Name <> '..')
+        and (FpLStat(ADirectory + Name, Info) = 0)
+        and not FpS_ISDIR(Info.st_mode) then
+        Result.Add(Name);
+      Entry := FpReadDir(Entries^);
+    end;
+  finally
+    FpCloseDir(Entries^);
+  end;
+end;
+
 function RecoverOrphanedTakes(const ADirectory: string;
   out ATakes: TRecoveredTakes;
   out ASweptTemporaries: Integer): Integer;
 var
-  Search: TSearchRec;
+  Names: TStringList;
+  I: Integer;
   Take: TRecoveredTake;
   Directory: string;
   Pool: Pointer;
@@ -437,11 +439,12 @@ begin
   // than reported: a render can always be run again from the raw take,
   // which is the file this directory keeps for exactly that reason.
   ASweptTemporaries := SweepRenderTemporaries(Directory);
-  if FindFirst(Directory + '*' + SidecarExtension, faAnyFile, Search) <> 0 then
-    Exit;
+  Names := DirectoryFiles(Directory);
   try
-    repeat
-      if (Search.Attr and faDirectory) <> 0 then
+    for I := 0 to Names.Count - 1 do
+    begin
+      if Copy(Names[I], Length(Names[I]) - Length(SidecarExtension) + 1,
+        Length(SidecarExtension)) <> SidecarExtension then
         Continue;
       // One bad sidecar must not stop the pass: the next one might be the
       // take somebody actually wants back.
@@ -453,7 +456,7 @@ begin
       Pool := BeginAutoreleasePool;
       try
         try
-          if not RecoverOne(Directory + Search.Name, Take) then
+          if not RecoverOne(Directory + Names[I], Take) then
             Continue;
         except
           on Exception do
@@ -465,9 +468,9 @@ begin
       SetLength(ATakes, Result + 1);
       ATakes[Result] := Take;
       Inc(Result);
-    until FindNext(Search) <> 0;
+    end;
   finally
-    FindClose(Search);
+    Names.Free;
   end;
 end;
 
@@ -511,7 +514,7 @@ end;
 
 function SweepRenderTemporaries(const ADirectory: string): Integer;
 var
-  Search: TSearchRec;
+  Names: TStringList;
   Directory, TemporaryName: string;
   Kind: TRenderTemporaryKind;
   Live, Found: TStringList;
@@ -534,25 +537,22 @@ begin
     // shadow before the marker. The first pass decides which
     // temporaries are somebody's live work; the second deletes only
     // what is left.
-    if FindFirst(Directory + '*' + RenderTemporarySuffix + '*', faAnyFile,
-      Search) <> 0 then
-      Exit;
+    Names := DirectoryFiles(Directory);
     try
-      repeat
-        if (Search.Attr and faDirectory) <> 0 then
-          Continue;
+      for I := 0 to Names.Count - 1 do
+      begin
         // The tightened rule. `*<suffix>*` used to match — and delete —
         // an ordinary user file called `notes.knips-render-tmp.txt`.
-        Kind := ClassifyRenderTemporary(Search.Name, TemporaryName);
+        Kind := ClassifyRenderTemporary(Names[I], TemporaryName);
         if Kind = rtkNotOurs then
           Continue;
-        Found.AddObject(Search.Name, TObject(PtrInt(Ord(Kind))));
+        Found.AddObject(Names[I], TObject(PtrInt(Ord(Kind))));
         if (Live.IndexOf(TemporaryName) < 0)
           and TemporaryIsLive(Directory + TemporaryName) then
           Live.Add(TemporaryName);
-      until FindNext(Search) <> 0;
+      end;
     finally
-      FindClose(Search);
+      Names.Free;
     end;
     for I := 0 to Found.Count - 1 do
     begin

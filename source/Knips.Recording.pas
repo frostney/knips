@@ -807,7 +807,7 @@ var
   Header: TSidecarHeader;
   Bounds: CGRect;
 begin
-  FSidecar := TSidecarWriter.Create(SidecarPathFor(FOptions.OutputPath));
+  FSidecar := TSidecarWriter.Create(SidecarPathFor(FWriter.TemporaryPath));
   FReport.SidecarPath := FSidecar.Path;
   if FSidecar.Failed then
   begin
@@ -837,8 +837,8 @@ begin
   // as one, so a movie legitimately called `a\b.mp4` would be recorded in
   // the sidecar as `b.mp4` and recovery would look for a file that does
   // not exist.
-  Header.MovieName := Copy(FOptions.OutputPath,
-    LastDelimiter('/', FOptions.OutputPath) + 1, MaxInt);
+  Header.MovieName := Copy(FWriter.TemporaryPath,
+    LastDelimiter('/', FWriter.TemporaryPath) + 1, MaxInt);
   Header.CreatedUtc := FormatDateTime('yyyy-mm-dd"T"hh:nn:ss"Z"',
     LocalTimeToUniversal(Now));
   // The one field the recovery pass needs: a sidecar with no trailer is
@@ -1139,6 +1139,18 @@ begin
     FSidecar.WriteTrailer(Trailer);
   end;
   CloseSidecar;
+  if Result and (FReport.SidecarPath <> '')
+    and (FReport.SidecarError = '') then
+  begin
+    if PublishSidecarForMovie(FReport.SidecarPath, FOptions.OutputPath,
+      FReport.SidecarError) then
+      FReport.SidecarPath := SidecarPathFor(FOptions.OutputPath);
+  end;
+  if Result and (FReport.SidecarError <> '')
+    and (FReport.SidecarPath <> '')
+    and (Pos(FReport.SidecarPath, FReport.SidecarError) = 0) then
+    FReport.SidecarError := FReport.SidecarError
+      + '; event sidecar retained at ' + FReport.SidecarPath;
   ReleaseFilter;
 end;
 

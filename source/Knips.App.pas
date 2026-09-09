@@ -2899,6 +2899,8 @@ begin
         if Result and (Session.Report.SidecarSkippedLines > 0) then
           LogMessage('render: '
             + SidecarSkippedLinesNote(Session.Report.SidecarSkippedLines));
+        if Result and (Session.Report.SidecarError <> '') then
+          NoteError(Session.Report.SidecarError);
       finally
         Session.Free;
       end;
@@ -3093,7 +3095,7 @@ begin
           + 'around the region was not excluded from the capture');
     end;
   end;
-  if not Zoom and not Follow then
+  if not Follow then
     Exit;
 
   DisplayID := FPendingDisplayID;
@@ -3116,7 +3118,7 @@ begin
   // one call per tick and no window-server traffic at all.
   FLive.Start(FSession, Border, FCamera, ScreenFrame,
     LiveRect(Base.origin.x, Base.origin.y, Base.size.width,
-    Base.size.height), Zoom, Follow);
+    Base.size.height));
 end;
 
 // Created unscheduled and added to the *common* modes, not scheduled and
@@ -3769,6 +3771,15 @@ begin
   // FinishCapture stops the stream before it finalises the writer
   // (Knips.Recording.FinishCapture, "Stream first, then writer"), so by
   // here there is nothing left for the movement to land in.
+  if Finished and (FSession.Report.SidecarError <> '') then
+  begin
+    NoteError(FSession.Report.SidecarError);
+    PlaybackNote := 'event sidecar unavailable';
+    // The final name may still hold metadata from a previous recording.
+    // Keep the successful movie, but never auto-render against that pair.
+    Deliverable := FSession.Report.OutputPath;
+    RawPath := '';
+  end;
   FCameraRide.UndockCamera;
   FreeAndNil(FSession);
   RefreshStatusItem;
