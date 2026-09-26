@@ -160,6 +160,9 @@ Changelog](https://keepachangelog.com/en/1.1.0/)'s: **Added**,
 
 ### Changed
 
+- CodeRabbit no longer reviews the Agent Skills vendored from upstream
+  (the ones `skills-lock.json` lists); project-authored skills under
+  `.agents/skills` are still reviewed. See `docs/tooling.md`.
 - Removed unused live Zoom on Click machinery. Follow Mouse remains live;
   Zoom on Click still runs when rendering the recorded take.
 
