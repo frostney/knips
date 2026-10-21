@@ -160,6 +160,9 @@ Changelog](https://keepachangelog.com/en/1.1.0/)'s: **Added**,
 
 ### Changed
 
+- Claude Code loads the shared agent instructions through an import that also works
+  in Windows checkouts without symlink support.
+
 - Removed unused live Zoom on Click machinery. Follow Mouse remains live;
   Zoom on Click still runs when rendering the recorded take.
 
