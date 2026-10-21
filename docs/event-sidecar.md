@@ -109,7 +109,11 @@ late; the third is decided after the parse, on the values it returned:
 A reader that cannot check every field should at least wrap the reading
 of a line, not only its parse: knips' own does both, and the wrapper is
 what makes the promise above true for record kinds nobody has written
-yet.
+yet. During each line's parse and read, knips temporarily masks floating-point
+overflow so a number such as `1e999` becomes an infinity that the finite
+checks can reject. It clears pending exceptions before restoring the caller's
+exception mask. This matters on x87: an overflow during conversion to
+`Double` can otherwise arrive after the reader returns, outside the guard.
 
 A header carrying a non-finite number is skipped **whole**, not
 field-by-field: `baseWidth` seeds every sample's carried-forward source

@@ -1692,6 +1692,7 @@ function TSidecarLog.ConsumeLine(const ALine: string;
 var
   Line: string;
   Data: TJSONData;
+  SavedMask: TFPUExceptionMask;
 begin
   Result := True;
   Line := Trim(ALine);
@@ -1719,28 +1720,40 @@ begin
   // and lists go stale; this is the rule that does not. Anything
   // that raises anywhere in a line's reading is a skipped line, for
   // ever, including whatever a future record kind does.
+  // FPC can defer an x87 overflow while narrowing a JSON number to
+  // Double until arithmetic AFTER this try/except. Mask overflow here
+  // so the conversion finishes as infinity and the finite checks can
+  // reject it. Never leave the caller with a changed trap policy or a
+  // pending exception from a discarded line.
+  SavedMask := GetExceptionMask;
+  SetExceptionMask(SavedMask + [exOverflow]);
   try
     try
-      Data := GetJSON(Line);
-      if (Data <> nil) and (Data is TJSONObject) then
-      begin
-        if not ReadObject(TJSONObject(Data)) then
+      try
+        Data := GetJSON(Line);
+        if (Data <> nil) and (Data is TJSONObject) then
+        begin
+          if not ReadObject(TJSONObject(Data)) then
+            Inc(FSkippedLines);
+        end
+        else
           Inc(FSkippedLines);
-      end
-      else
-        Inc(FSkippedLines);
-    except
-      // A half-written last line, a line from a newer writer this
-      // parser cannot make sense of, or a value that blew up on the
-      // way out. Counted, never fatal — that is the whole reason the
-      // format is one object per line.
-      on Exception do
-        Inc(FSkippedLines);
+      except
+        // A half-written last line, a line from a newer writer this
+        // parser cannot make sense of, or a value that blew up on the
+        // way out. Counted, never fatal — that is the whole reason the
+        // format is one object per line.
+        on Exception do
+          Inc(FSkippedLines);
+      end;
+    finally
+      // In a finally, not after the read: the read can now be left
+      // early by an exception, and the document is ours either way.
+      Data.Free;
     end;
   finally
-    // In a finally, not after the read: the read can now be left
-    // early by an exception, and the document is ours either way.
-    Data.Free;
+    ClearExceptions(False);
+    SetExceptionMask(SavedMask);
   end;
   // A header-only load stops at the header, which is the first line of
   // every sidecar this program writes. That is the whole point of it:
