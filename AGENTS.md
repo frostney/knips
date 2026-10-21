@@ -36,8 +36,8 @@
   and Apple's headers before being declared; anything unverified on real
   hardware is listed in [docs/spikes/0001-runtime-objc-class.md](docs/spikes/0001-runtime-objc-class.md)
   until `knips probe` and a real recording clear it.
-- **Edit `AGENTS.md` only** — `CLAUDE.md` is a symlink to it. Same for
-  `.agents/skills/` (canonical) vs `.claude/skills` (symlink).
+- **Edit shared instructions in `AGENTS.md`**; `CLAUDE.md` imports it with
+  `@AGENTS.md`. `.agents/skills/` is canonical; `.claude/skills` is a symlink.
 
 ## Runtime / Commands
 

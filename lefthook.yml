@@ -72,4 +72,4 @@ pre-push:
       fail_text: |
         The generated block at the end of AGENTS.md is stale. Run
         `lwpt agents` and commit the result. Edit AGENTS.md, never
-        CLAUDE.md — that is a symlink to it.
+        CLAUDE.md — that imports it with `@AGENTS.md`.
