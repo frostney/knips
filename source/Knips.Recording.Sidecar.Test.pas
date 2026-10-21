@@ -33,6 +33,7 @@ uses
 {$ENDIF}
   Classes,
   SysUtils,
+  Math,
 
   Knips.Options,
   Knips.Recording.Sidecar,
@@ -101,6 +102,7 @@ type
     procedure TestADeeplyNestedLineIsSkippedNotFatal;
     procedure TestBracketsInsideAStringDoNotCountAsNesting;
     procedure TestAnEnormousLineIsSkipped;
+    procedure TestOverflowDoesNotEscapeTheReader;
     procedure TestANonFiniteHeaderIsSkipped;
     procedure TestANonFiniteSampleIsDropped;
     procedure TestANonFiniteAnchorIsDropped;
@@ -774,6 +776,8 @@ begin
     TestBracketsInsideAStringDoNotCountAsNesting);
   Test('a line past the length limit is skipped',
     TestAnEnormousLineIsSkipped);
+  Test('overflow stays inside the reader and preserves the caller mask',
+    TestOverflowDoesNotEscapeTheReader);
   Test('a header carrying an infinity is skipped whole',
     TestANonFiniteHeaderIsSkipped);
   Test('a sample carrying an infinity is dropped',
@@ -884,6 +888,54 @@ begin
     Expect<Integer>(Log.SampleCount).ToBe(0);
   finally
     Log.Free;
+  end;
+end;
+
+procedure THostileFileTests.TestOverflowDoesNotEscapeTheReader;
+var
+  Log: TSidecarLog;
+  Error: string;
+  SavedMask, CallerMask: TFPUExceptionMask;
+  MaskOverflow: Boolean;
+  Stamp: TDateTime;
+begin
+  SavedMask := GetExceptionMask;
+  try
+    for MaskOverflow := False to True do
+    begin
+      CallerMask := SavedMask - [exOverflow];
+      if MaskOverflow then
+        Include(CallerMask, exOverflow);
+      SetExceptionMask(CallerMask);
+      Log := TSidecarLog.Create;
+      try
+        Expect<Boolean>(Log.LoadFromText(
+          '{"k":"cursor","t":0,"x":1e999,"y":0,"b":0}',
+          Error)).ToBe(True);
+        // Now uses x87 arithmetic on Linux. A deferred overflow used to
+        // escape the reader here, outside its per-line exception guard.
+        Stamp := Now;
+        Expect<Boolean>(Stamp > 0).ToBe(True);
+        Expect<Boolean>(GetExceptionMask = CallerMask).ToBe(True);
+        Expect<Integer>(Log.SkippedLines).ToBe(1);
+        Expect<Integer>(Log.SampleCount).ToBe(0);
+        Expect<Boolean>(Log.LoadFromText(
+          '{"k":"cursor","t":0,"x":-1e999,"y":0,"b":0}'
+          + LineEnding + '{"k":"cursor","t":1,"x":3,"y":4,"b":0}'
+          + LineEnding + '{malformed', Error)).ToBe(True);
+        Stamp := Now;
+        Expect<Boolean>(Stamp > 0).ToBe(True);
+        Expect<Boolean>(GetExceptionMask = CallerMask).ToBe(True);
+        Expect<Integer>(Log.SkippedLines).ToBe(2);
+        Expect<Integer>(Log.SampleCount).ToBe(1);
+        Expect<Double>(Log.Sample(0).X).ToBe(3);
+      finally
+        Log.Free;
+      end;
+    end;
+  finally
+    ClearExceptions(False);
+    SetExceptionMask(SavedMask);
   end;
 end;
 

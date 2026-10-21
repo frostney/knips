@@ -211,6 +211,9 @@ Changelog](https://keepachangelog.com/en/1.1.0/)'s: **Added**,
 
 ### Fixed
 
+- Oversized numbers in event sidecars are skipped without leaving a delayed
+  floating-point exception that crashes later work on Linux. The reader
+  preserves the caller's floating-point exception mask.
 - Failed recordings preserve the previous movie and event sidecar.
   Recording fragments stay under a separate recoverable name until the
   movie finishes; sidecar publication failure reports partial success.
