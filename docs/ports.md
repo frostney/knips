@@ -23,7 +23,7 @@
   in the Linux container and writes it as a GIF through the neutral
   encoder —
   xdg-desktop-portal + PipeWire as the real target; recording writes our
-  own APNG/GIF before it writes H.264 through anything `dlopen`ed.
+  own APNG/GIF, and does not produce MP4 ([ADR-0006](adr/0006-linux-gif-apng-and-dlopen-x11.md)).
 - **No cthreads is a Darwin rule only.** Linux uses `cthreads`; Windows
   uses the RTL's native thread manager.
 - Everything a Mac cannot answer is listed under
@@ -105,9 +105,11 @@ Three notes on that list, because they are where a port goes wrong:
   on Linux it is the main loop pumping DBus and PipeWire. A backend that
   blocks in `StartCapture` breaks the app but not the CLI, which is the
   worst way to find out.
-- **`CGRect` in `UpdateSourceRect` is a leak from macOS** and should
-  become a neutral rectangle record in `Knips.Options` before the second
-  backend exists. It is the only platform type in the signature.
+- **`CGRect` in `UpdateSourceRect` is a leak from macOS.** It is the only
+  platform type in the signature. The macOS signature is left as it is
+  until it can be changed and verified on a Mac; the Linux session works in
+  the neutral `TLiveRect` and `TCaptureRegion`
+  ([ADR-0006](adr/0006-linux-gif-apng-and-dlopen-x11.md)).
 - **`TRecordingReport` fields a backend cannot fill are zero**, exactly
   as a macOS recording without live effects reports zero live updates.
   No `{$IFDEF}` in the record, no per-platform variants.
@@ -295,10 +297,11 @@ nothing comparable, and the options each cost something:
 `Knips.Export.Gif` already exist, are neutral, and are tested on Linux
 today; a first Linux `knips record --out=demo.apng` needs no new encoder
 at all, and GIF was Kap's signature output anyway. `knips record
---out=demo.mp4` refuses with a message rather than pretending. H.264
-arrives later as a `dlopen`ed VA-API or LGPL `libavcodec` path — runtime,
-optional, never a link-time dependency, matching the project's
-dependency-light stance and the flag-free build.
+--out=demo.mp4` refuses with a message rather than pretending. Linux
+does not produce or read MP4
+([ADR-0006](adr/0006-linux-gif-apng-and-dlopen-x11.md)); the VA-API and
+`libavcodec` rows above are the options that were weighed, and none is
+part of the Linux backend.
 
 ### App shell
 
@@ -569,8 +572,9 @@ checked off.
 3. **Linux headless recorder.** `source/capture-linux/` XSHM bindings,
    `Knips.Recording.Linux`, `knips record --out=demo.apng` and
    `demo.gif` working against Xvfb in the container, `knips probe`
-   growing a Linux arm. Neutral rectangle type replaces `CGRect` in the
-   session signature. This is the first milestone that produces a file
+   growing a Linux arm. The Linux session works in the existing neutral
+   rectangle types (`TLiveRect`, `TCaptureRegion`); the macOS session keeps
+   its `CGRect` signatures ([ADR-0006](adr/0006-linux-gif-apng-and-dlopen-x11.md)). This is the first milestone that produces a file
    on a second platform, and all of it is verifiable from a Mac.
 4. **Linux desktop.** Portal + PipeWire backend behind the same session;
    `restore_token`; StatusNotifierItem tray; GlobalShortcuts stop
