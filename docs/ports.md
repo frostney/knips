@@ -6,8 +6,10 @@
   a Debian bookworm container with FPC 3.2.2 and the real lwpt 0.7.0
   Linux binary, and runs all sixteen `*.Test.pas` suites plus `lwpt build`
   plus `lwpt format --check` — green on `linux/arm64` and `linux/amd64`.
-  The Linux binary is a working `knips` that serves MCP and refuses
-  capture with exit 3.
+  The Linux binary is a working `knips` that serves MCP and records the
+  X11 screen (or a `--rect` of it) to an APNG with `knips record
+  --out=demo.apng`; what it cannot record yet it refuses with exit 3
+  (see [Linux: what `knips record` does today](#linux-what-knips-record-does-today)).
 - **The whole program cross-compiles for 64-bit Windows.**
   `tools/win64-cross.sh` bootstraps an FPC 3.2.2 `x86_64-win64` cross
   compiler inside a container and links `knips.exe` plus all sixteen
@@ -280,6 +282,47 @@ from a Mac.
 So: two backends, one session type, XSHM first because it is testable and
 PipeWire second because it is correct.
 
+### Linux: what `knips record` does today
+
+`knips record --out=demo.apng` grabs the X11 root window over MIT-SHM
+at the requested frame rate and writes a lossless APNG. The rules are
+[ADR-0006](adr/0006-linux-gif-apng-and-dlopen-x11.md)'s: `libX11` and
+`libXext` are opened with `dlopen` when `record` runs, never linked, so
+`knips` and `knips mcp` start on a machine with no X11 at all.
+
+- **Pacing.** Frames are grabbed on a monotonic grid. A frame the encoder
+  was too slow for is skipped and counted as dropped, never grabbed in a
+  burst, and each frame is stored with the time it was actually on
+  screen, so the animation plays back in real time at whatever rate the
+  machine managed. The summary says both the achieved and the requested
+  rate. Full-screen 1920x1200 is dominated by the deflate pass, so
+  expect single-digit frames per second there and the full 30 on a
+  region.
+- **A take is whole or not there.** It is written to
+  `<out>.knips-recording-<pid>-<nonce>.tmp` beside the target and
+  renamed over `<out>` when finished. A stop (Ctrl-C or SIGTERM) finishes
+  the file. A second stop at least a second later abandons it and removes
+  the temporary. `kill -9` and power loss leave the temporary behind;
+  nothing recovers it yet, so delete it by hand.
+- **A lost display keeps what it has.** If the X server goes away or a
+  grab is refused (the screen shrank under a `--rect`, for instance), the
+  frames recorded so far are finished into a valid APNG and `knips`
+  exits 2 saying so.
+- **The pointer is not drawn.** An XSHM grab of the root window does not
+  include the pointer on the servers tried (Xvfb); `knips` says so on
+  stderr unless `--no-cursor` is given. Cursor drawing is its own piece
+  of work.
+- **Refused with exit 3, by name:** `.mp4`/`.mov`, `.gif` (until the
+  production APNG reader lands), `--audio`, `--bitrate`, `--scale=2`,
+  `--window`, `--big-cursor`, `--smooth-cursor`, and `--display` above 0.
+- **Not unified with the macOS report yet.** The Linux recorder returns
+  its own `TLinuxRecordingReport` rather than the Darwin
+  `TRecordingReport`, because `TRecordingReport` lives in the
+  `{$IFDEF DARWIN}` recording unit and cannot be changed or compiled
+  here, so a neutral report type could not be checked against it. The
+  CLI maps the shared fields onto the same summary line; hoisting the
+  report into a neutral unit is the follow-up.
+
 ### Encode: there is no OS encoder
 
 macOS has AVAssetWriter and Windows has Media Foundation. Linux has
@@ -424,7 +467,8 @@ Two facts worth knowing before touching `tools/ci/Dockerfile.win64`:
 | --- | --- | --- |
 | Neutral core compiles on Linux | **yes** | `tools/linux-ci.sh`, both architectures |
 | Neutral suites pass on Linux | **yes** | all sixteen green in-container |
-| `knips` builds and runs on Linux | **yes** | `lwpt build`, `--version`, `record` → exit 3 |
+| `knips` builds and runs on Linux | **yes** | `lwpt build`, `--version`, `record --out=*.mp4` → exit 3 |
+| `knips record --out=*.apng` records an X11 screen | **yes, on Xvfb** | live runs on Xvfb; the gate step is added to `tools/ci/linux-gate.sh` and has not yet run under Docker |
 | Formatter agrees on Linux | **yes** | `lwpt format --check` in-container |
 | Everything compiles and links for win64 | **yes** | `tools/win64-cross.sh`, PE32+ verified |
 | Neutral suites behave Windows-shaped | **partly** | `tools/wine-smoke.sh` — all sixteen green under Wine; Wine is not Windows, but see below |

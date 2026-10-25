@@ -177,6 +177,14 @@ type
   // amBoth keeps them apart, as two tracks — nothing here mixes them.
   TAudioMode = (amNone, amSystem, amMicrophone, amBoth);
 
+  // Which platform's rules a recording request is validated against.
+  TRecordingPlatform = (rpMacOS, rpLinux);
+
+  // What a recording's output extension asks for. Linux writes rokApng
+  // (and, later, rokGif); rokMovie is what macOS writes and what Linux
+  // recognises only to refuse (ADR-0006).
+  TRecordingOutputKind = (rokMovie, rokApng, rokGif);
+
   TRecordingOptions = record
     TargetKind: TCaptureTargetKind;
     // Index into the enumerated displays; -1 = the main display.
@@ -622,6 +630,25 @@ function IsRawTakePath(const APath: string): Boolean;
 // start a recording.
 function ValidateRecordingOptions(var AOptions: TRecordingOptions;
   out AError: string): Boolean;
+
+// ValidateRecordingOptions for a named platform. The shape rules (ranges,
+// mutually exclusive switches) are the same everywhere; what differs is
+// what an output path may end in, and the encoder's two-pixel alignment
+// that only the macOS movie writer needs. ValidateRecordingOptions is
+// exactly ValidateRecordingOptionsFor(rpMacOS, ...).
+//
+// This says whether the invocation is well formed, not whether the
+// platform can honour it: a Linux `--out=demo.mp4` is well formed and is
+// refused by Knips.Recording.LinuxPlan.LinuxRecordingRefusal, which is a
+// different exit code (unsupported, not usage).
+function ValidateRecordingOptionsFor(APlatform: TRecordingPlatform;
+  var AOptions: TRecordingOptions; out AError: string): Boolean;
+
+// What an output path's extension names on a platform. Movie extensions
+// are recognised on every platform so that Linux can refuse them by name
+// instead of calling them unknown; False for any other extension.
+function RecordingOutputKindForPath(const APath: string;
+  APlatform: TRecordingPlatform; out AKind: TRecordingOutputKind): Boolean;
 
 // Rounds a capture dimension down to the encoder's alignment.
 function AlignDimension(AValue: Integer): Integer; inline;
@@ -1229,24 +1256,61 @@ begin
   Result := Round(Budget);
 end;
 
+function RecordingOutputKindForPath(const APath: string;
+  APlatform: TRecordingPlatform; out AKind: TRecordingOutputKind): Boolean;
+var
+  Container: TOutputContainer;
+  Extension: string;
+begin
+  Result := True;
+  AKind := rokMovie;
+  if ContainerForPath(APath, Container) then
+    Exit;
+  Extension := LowerCase(ExtractFileExt(APath));
+  if (APlatform = rpLinux) and (Extension = '.apng') then
+    AKind := rokApng
+  else if (APlatform = rpLinux) and (Extension = '.gif') then
+    AKind := rokGif
+  else
+    Result := False;
+end;
+
 function ValidateRecordingOptions(var AOptions: TRecordingOptions;
   out AError: string): Boolean;
+begin
+  Result := ValidateRecordingOptionsFor(rpMacOS, AOptions, AError);
+end;
+
+function ValidateRecordingOptionsFor(APlatform: TRecordingPlatform;
+  var AOptions: TRecordingOptions; out AError: string): Boolean;
 var
   I: Integer;
+  Kind: TRecordingOutputKind;
 begin
   Result := False;
   AError := '';
   if AOptions.OutputPath = '' then
   begin
-    AError := 'an output path is required (--out=demo.mp4)';
+    if APlatform = rpLinux then
+      AError := 'an output path is required (--out=demo.apng)'
+    else
+      AError := 'an output path is required (--out=demo.mp4)';
     Exit;
   end;
-  if not ContainerForPath(AOptions.OutputPath, AOptions.Container) then
+  if not RecordingOutputKindForPath(AOptions.OutputPath, APlatform, Kind) then
   begin
-    AError := 'unsupported output extension "'
-      + ExtractFileExt(AOptions.OutputPath) + '" (use .mp4 or .mov)';
+    if APlatform = rpLinux then
+      AError := 'unsupported output extension "'
+        + ExtractFileExt(AOptions.OutputPath) + '" (use .apng or .gif)'
+    else
+      AError := 'unsupported output extension "'
+        + ExtractFileExt(AOptions.OutputPath) + '" (use .mp4 or .mov)';
     Exit;
   end;
+  // Only a movie path has a container; a Linux APNG or GIF leaves the
+  // field at its default, which nothing on Linux reads.
+  if Kind = rokMovie then
+    ContainerForPath(AOptions.OutputPath, AOptions.Container);
   // -1 is "the main display" and is the only negative that means
   // anything. Every other one used to be accepted and silently treated
   // as -1, so `--display=-5` recorded the main display and said nothing
@@ -1349,7 +1413,10 @@ begin
       AError := 'an excluded window id must be non-zero';
       Exit;
     end;
-  if AOptions.HasRegion and ((AlignDimension(AOptions.Region.Width) = 0)
+  // The two-pixel alignment is the macOS movie writer's; an APNG frame can
+  // be any positive size, and ParseCaptureRegion already refuses zero.
+  if (APlatform = rpMacOS) and AOptions.HasRegion
+    and ((AlignDimension(AOptions.Region.Width) = 0)
     or (AlignDimension(AOptions.Region.Height) = 0)) then
   begin
     AError := Format('--rect must be at least %dx%d points',

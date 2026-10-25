@@ -40,7 +40,13 @@ program knips;
 //                        no-cthreads build; creates no threads
 //   objc                 the `id` type for the probe; the program itself
 //                        is not in Objective-C mode
+//   cthreads             Linux only, and first: ADR-0005 has Linux use the
+//                        pthread thread manager (the no-cthreads rule is
+//                        Darwin's)
 uses
+  {$IFDEF LINUX}
+  cthreads,
+  {$ENDIF}
   {$IFDEF DARWIN}
   cmem,
   Knips.ThreadManager,
@@ -73,6 +79,10 @@ uses
   Knips.Recording.CursorOverlay,
   Knips.Recording.Recovery,
   Knips.Recording.Sidecar,
+  {$ENDIF}
+  {$IFDEF LINUX}
+  Knips.Recording.Linux,
+  Knips.Recording.LinuxPlan,
   {$ENDIF}
   Knips.Mcp,
   Knips.Options;
@@ -128,6 +138,16 @@ begin
   Result := (Option <> nil) and Option.Present;
 end;
 
+const
+  // Whose rules a recording request is validated against: Linux has its
+  // own output extensions; every other build keeps the macOS rules it has
+  // always had (the unsupported builds validate and then refuse).
+  {$IFDEF LINUX}
+  HostRecordingPlatform = rpLinux;
+  {$ELSE}
+  HostRecordingPlatform = rpMacOS;
+  {$ENDIF}
+
 // Turns the parsed CLI options into a validated recording request.
 function BuildRecordingOptions(const AOptions: TOptionArray;
   out ARecording: TRecordingOptions; out AError: string): Boolean;
@@ -176,7 +196,8 @@ begin
     ARecording.HasRegion := True;
   end;
 
-  Result := ValidateRecordingOptions(ARecording, AError);
+  Result := ValidateRecordingOptionsFor(HostRecordingPlatform, ARecording,
+    AError);
 end;
 
 // Turns the parsed CLI options into a validated export request.
@@ -1265,6 +1286,66 @@ end;
 
 {$ELSE}
 
+{$IFDEF LINUX}
+
+// Linux `record`: the X screen, or a --rect of it, into an APNG. The
+// switches Linux cannot honour are refused by name with the unsupported
+// exit code (LinuxRecordingRefusal), never accepted and ignored. The
+// summary line is the macOS one, field for field, filled from
+// TLinuxRecordingReport, whose shared names are listed on the record.
+function HandleRecord(const APositionals: TStringList;
+  const AOptions: TOptionArray): Integer;
+var
+  Recording: TRecordingOptions;
+  Session: TLinuxRecordingSession;
+  Error, Refusal: string;
+begin
+  if not BuildRecordingOptions(AOptions, Recording, Error) then
+  begin
+    WriteLn(ErrOutput, ProgramName, ' record: ', Error);
+    Flush(ErrOutput);
+    Exit(ExitUsage);
+  end;
+  Refusal := LinuxRecordingRefusal(Recording);
+  if Refusal <> '' then
+  begin
+    WriteLn(ErrOutput, ProgramName, ' record: ', Refusal);
+    Flush(ErrOutput);
+    Exit(ExitUnsupported);
+  end;
+  InstallLinuxStopSignals;
+  Session := TLinuxRecordingSession.Create(Recording);
+  try
+    if not Session.Run(Error) then
+    begin
+      WriteLn(ErrOutput, ProgramName, ' record: ', Error);
+      Flush(ErrOutput);
+      Exit(ExitFailure);
+    end;
+    WriteLn(Format(
+      'wrote %s: %dx%d, %.1fs, %d frames (%d dropped, %d failed)',
+      [Session.Report.OutputPath, Session.Report.PixelWidth,
+      Session.Report.PixelHeight, Session.Report.DurationSeconds,
+      Session.Report.AppendedFrames, Session.Report.DroppedFrames,
+      Session.Report.FailedAppends]));
+    WriteLn(Format('wrote %s: %d bytes, %.1f frames/s achieved of %d '
+      + 'requested', [Session.Report.OutputPath, Session.Report.FileBytes,
+      AchievedFramesPerSecond(Session.Report.AppendedFrames,
+      Session.Report.DurationSeconds), Session.Report.FramesPerSecond]));
+    Flush(Output);
+    // Advice, not failure: the file is written and exit stays 0.
+    if Session.Report.PointerNotDrawn then
+      WriteLn(ErrOutput, ProgramName, ' record: the pointer is not drawn '
+        + 'into Linux recordings yet (--no-cursor silences this note)');
+    Flush(ErrOutput);
+    Result := ExitOk;
+  finally
+    Session.Free;
+  end;
+end;
+
+{$ENDIF}
+
 function HandleUnsupported(const APositionals: TStringList;
   const AOptions: TOptionArray): Integer;
 var
@@ -1361,8 +1442,13 @@ function RecordOptions: TOptionArray;
 begin
   Result := nil;
   SetLength(Result, 11);
+  {$IFDEF LINUX}
+  Result[0] := TStringOption.Create('out',
+    'Output file; .apng (required; .mp4 and .mov are not produced on Linux)');
+  {$ELSE}
   Result[0] := TStringOption.Create('out',
     'Output file; .mp4 or .mov (required)');
+  {$ENDIF}
   Result[1] := TIntegerOption.Create('display',
     'Display index from `knips displays` (default: main)');
   Result[2] := TIntegerOption.Create('window',
@@ -1544,10 +1630,17 @@ begin
     Registry.Add(TSubcommand.Create('app',
       'Run the menu-bar app (macOS only)', '', @HandleUnsupported,
       NoOptions));
+    {$IFDEF LINUX}
+    Registry.Add(TSubcommand.Create('record',
+      'Record the X screen or a region of it to an .apng file',
+      '--out=<file.apng> [--rect=x,y,w,h] [--fps=N] [--no-cursor]',
+      @HandleRecord, RecordOptions));
+    {$ELSE}
     Registry.Add(TSubcommand.Create('record',
       'Record a display, region, or window (macOS only)',
       '--out=<file> [--display=N|--window=ID] [--rect=x,y,w,h] [--fps=N] [--audio=system|mic|both]',
       @HandleUnsupported, RecordOptions));
+    {$ENDIF}
     Registry.Add(TSubcommand.Create('export',
       'Convert a recording to a GIF or APNG, or trim it (macOS only)',
       '--in=<movie> --out=<file.gif|.apng|.mp4> [--fps=N] [--width=N] [--trim=start,end]',
