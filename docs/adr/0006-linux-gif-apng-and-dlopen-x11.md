@@ -57,5 +57,3 @@ libraries, including a headless one that only runs `knips mcp`.
   system library or a model, and each is decided in its own change.
 - Linux export, render and trim work on the files Knips itself writes; they
   are specified in their own changes.
-- The Linux playback window and settings window are drawn directly on X11 and
-  are specified in their own changes.
