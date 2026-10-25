@@ -55,11 +55,15 @@ else. Knips never listens on a port and never injects input.
   bindings, not its server.
 - **Not a plugin host.** Kap's plugin ecosystem was its most fragile part;
   exports are built in, in Pascal.
-- **Not cross-platform in this release.** ScreenCaptureKit and
-  AVAssetWriter are the whole point; a Windows path
-  (Windows.Graphics.Capture + Media Foundation) would be a parallel
-  implementation behind the same `Knips.Options`, not an abstraction
-  layered on top of macOS.
+- **Not an abstraction across platforms.** ScreenCaptureKit and
+  AVAssetWriter are the whole point on macOS. A Windows path
+  (Windows.Graphics.Capture + Media Foundation) and the Linux port in
+  progress are parallel implementations behind the same `Knips.Options`,
+  not an abstraction layered on top of macOS
+  ([ADR-0005](docs/adr/0005-windows-linux-ports.md)). Linux writes GIF
+  and APNG rather than video
+  ([ADR-0006](docs/adr/0006-linux-gif-apng-and-dlopen-x11.md)); its
+  playback and settings windows are drawn on X11 in their own changes.
 - **Not an editor.** Trim and export, no timeline.
 
 ## Related documents

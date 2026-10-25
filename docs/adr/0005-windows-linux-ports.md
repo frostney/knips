@@ -109,7 +109,9 @@ runtime so the binary still starts on a machine without it. Both are
 backends under the same session type; the portal one needs a real desktop
 session to verify and is gated accordingly.
 
-**Encoding on Linux is our own, until it is not.** There is no OS
+**Encoding on Linux is our own, until it is not.** *Superseded by
+[ADR-0006](0006-linux-gif-apng-and-dlopen-x11.md): Linux writes GIF and APNG
+and does not produce or read MP4.* There is no OS
 encoder. `Knips.Export.Apng` and `Knips.Export.Gif` already exist, are
 neutral, and are tested — so the first Linux recording writes an APNG or
 GIF straight to disk, and `knips record --out=x.mp4` says what it cannot
@@ -154,7 +156,8 @@ so `lwpt.cfg` and `lwpt.lock` are still never hand-edited.
   the first milestone — Kap's *Record Window* has no Windows equivalent
   until WGC lands. That is a visible product gap, taken deliberately in
   exchange for a capture path FPC can actually reach.
-- Choosing our own encoders on Linux costs `.mp4` output. A Linux user
+- *Superseded by [ADR-0006](0006-linux-gif-apng-and-dlopen-x11.md).*
+  Choosing our own encoders on Linux costs `.mp4` output. A Linux user
   gets an animated image, which is the format Kap was known for anyway,
   and a small one — the GIF encoder is the same median-cut/LZW code macOS
   exports through.
