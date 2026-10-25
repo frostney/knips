@@ -38,8 +38,16 @@ file build/knips || true
 step 'binary smoke'
 ./build/knips --version
 
-# The capture subcommands are macOS-only in this build and must say so with
-# ExitUnsupported (3), not a crash and not a silent success.
+# knips and `knips mcp` must start on a machine with no X11 at all: the X11
+# libraries are opened at run time by `record` (ADR-0006), never linked.
+if ldd build/knips | grep -E 'libX11|libXext'; then
+  echo "linux-gate: build/knips links X11 at load time; ADR-0006 forbids it" >&2
+  exit 1
+fi
+echo "build/knips links no X11 library"
+
+# What Linux cannot record is refused with ExitUnsupported (3), not a crash
+# and not a silent success. Movies are the one the gate pins here.
 set +e
 ./build/knips record --out=/tmp/knips-linux-gate.mp4 >/tmp/knips-record.out 2>&1
 record_rc=$?
@@ -95,5 +103,29 @@ if [ ! -s build/x11spike/frame.gif ]; then
   exit 1
 fi
 file build/x11spike/frame.gif
+
+# knips record itself: a real take off the same Xvfb, stopped with SIGINT the
+# way a user's Ctrl-C would, must leave a finished APNG and no temporary.
+step 'knips record --out=*.apng (Xvfb)'
+rm -f build/x11spike/take.apng
+./build/knips record --out=build/x11spike/take.apng --rect=0,0,320,200 \
+  --no-cursor &
+record_pid=$!
+sleep 2
+kill -INT "$record_pid"
+wait "$record_pid"
+if [ "$(head -c 8 build/x11spike/take.apng | od -An -c | tr -d ' ')" != '211PNG\r\n032\n' ]; then
+  echo "linux-gate: take.apng does not start with the PNG signature" >&2
+  exit 1
+fi
+if ! grep -q acTL build/x11spike/take.apng; then
+  echo "linux-gate: take.apng has no acTL chunk, so it is not animated" >&2
+  exit 1
+fi
+if ls build/x11spike/*.knips-recording-*.tmp >/dev/null 2>&1; then
+  echo "linux-gate: a finished take left its temporary behind" >&2
+  exit 1
+fi
+file build/x11spike/take.apng
 
 step 'linux gate: ok'
