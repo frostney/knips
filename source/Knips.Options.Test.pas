@@ -30,6 +30,24 @@ type
     procedure TestUnknownExtension;
   end;
 
+  // Which output extensions each platform's recorder accepts. macOS is
+  // exactly what it was before Linux got a recorder; Linux recognises the
+  // movie extensions only to refuse them by name.
+  TRecordingPlatformTests = class(TTestSuite)
+  public
+    procedure SetupTests; override;
+    procedure TestMacOSKnowsOnlyMovies;
+    procedure TestMacOSStillCallsApngAndGifUnknown;
+    procedure TestLinuxKnowsApngAndGif;
+    procedure TestLinuxRecognisesMoviesSoItCanRefuseThem;
+    procedure TestTheWrapperIsTheMacOSRules;
+    procedure TestLinuxAcceptsAnApngAndLeavesTheContainerAlone;
+    procedure TestLinuxAcceptsAnOddRegion;
+    procedure TestMacOSStillRefusesAOnePixelRegion;
+    procedure TestLinuxNamesItsOwnExtensionInItsMessages;
+    procedure TestMacOSMessagesAreUnchanged;
+  end;
+
   TAudioModeTests = class(TTestSuite)
   public
     procedure SetupTests; override;
@@ -329,6 +347,153 @@ var
 begin
   Expect<Boolean>(ContainerForPath('demo.gif', Container)).ToBe(False);
   Expect<Boolean>(ContainerForPath('demo', Container)).ToBe(False);
+end;
+
+{ TRecordingPlatformTests }
+
+procedure TRecordingPlatformTests.SetupTests;
+begin
+  Test('macOS knows only movies', TestMacOSKnowsOnlyMovies);
+  Test('macOS still calls .apng and .gif unknown',
+    TestMacOSStillCallsApngAndGifUnknown);
+  Test('Linux knows .apng and .gif', TestLinuxKnowsApngAndGif);
+  Test('Linux recognises movies so it can refuse them by name',
+    TestLinuxRecognisesMoviesSoItCanRefuseThem);
+  Test('ValidateRecordingOptions is the macOS rules',
+    TestTheWrapperIsTheMacOSRules);
+  Test('Linux accepts an .apng and leaves the container alone',
+    TestLinuxAcceptsAnApngAndLeavesTheContainerAlone);
+  Test('Linux accepts a region that is not 2-aligned',
+    TestLinuxAcceptsAnOddRegion);
+  Test('macOS still refuses a one-pixel region',
+    TestMacOSStillRefusesAOnePixelRegion);
+  Test('Linux messages name .apng', TestLinuxNamesItsOwnExtensionInItsMessages);
+  Test('macOS messages are unchanged', TestMacOSMessagesAreUnchanged);
+end;
+
+procedure TRecordingPlatformTests.TestMacOSKnowsOnlyMovies;
+var
+  Kind: TRecordingOutputKind;
+begin
+  Expect<Boolean>(RecordingOutputKindForPath('a.mp4', rpMacOS, Kind)).ToBe(True);
+  Expect<Boolean>(Kind = rokMovie).ToBe(True);
+  Expect<Boolean>(RecordingOutputKindForPath('A.MOV', rpMacOS, Kind)).ToBe(True);
+  Expect<Boolean>(Kind = rokMovie).ToBe(True);
+end;
+
+procedure TRecordingPlatformTests.TestMacOSStillCallsApngAndGifUnknown;
+var
+  Kind: TRecordingOutputKind;
+begin
+  Expect<Boolean>(RecordingOutputKindForPath('a.apng', rpMacOS, Kind)).ToBe(False);
+  Expect<Boolean>(RecordingOutputKindForPath('a.gif', rpMacOS, Kind)).ToBe(False);
+  Expect<Boolean>(RecordingOutputKindForPath('a', rpMacOS, Kind)).ToBe(False);
+end;
+
+procedure TRecordingPlatformTests.TestLinuxKnowsApngAndGif;
+var
+  Kind: TRecordingOutputKind;
+begin
+  Expect<Boolean>(RecordingOutputKindForPath('a.APNG', rpLinux, Kind)).ToBe(True);
+  Expect<Boolean>(Kind = rokApng).ToBe(True);
+  Expect<Boolean>(RecordingOutputKindForPath('a.gif', rpLinux, Kind)).ToBe(True);
+  Expect<Boolean>(Kind = rokGif).ToBe(True);
+  Expect<Boolean>(RecordingOutputKindForPath('a.png', rpLinux, Kind)).ToBe(False);
+  Expect<Boolean>(RecordingOutputKindForPath('a', rpLinux, Kind)).ToBe(False);
+end;
+
+procedure TRecordingPlatformTests.TestLinuxRecognisesMoviesSoItCanRefuseThem;
+var
+  Kind: TRecordingOutputKind;
+begin
+  Expect<Boolean>(RecordingOutputKindForPath('a.mp4', rpLinux, Kind)).ToBe(True);
+  Expect<Boolean>(Kind = rokMovie).ToBe(True);
+end;
+
+procedure TRecordingPlatformTests.TestTheWrapperIsTheMacOSRules;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := DefaultRecordingOptions;
+  Options.OutputPath := 'a.apng';
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+  Options.OutputPath := 'a.mp4';
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(True);
+  Expect<Boolean>(Options.Container = ocMPEG4).ToBe(True);
+end;
+
+procedure TRecordingPlatformTests.TestLinuxAcceptsAnApngAndLeavesTheContainerAlone;
+var
+  Options: TRecordingOptions;
+  Error: string;
+  Before: TOutputContainer;
+begin
+  Options := DefaultRecordingOptions;
+  Options.OutputPath := 'a.apng';
+  Before := Options.Container;
+  Expect<Boolean>(ValidateRecordingOptionsFor(rpLinux, Options, Error)).ToBe(True);
+  Expect<Boolean>(Options.Container = Before).ToBe(True);
+end;
+
+procedure TRecordingPlatformTests.TestLinuxAcceptsAnOddRegion;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := DefaultRecordingOptions;
+  Options.OutputPath := 'a.apng';
+  Options.HasRegion := True;
+  Options.Region.Width := 641;
+  Options.Region.Height := 479;
+  Expect<Boolean>(ValidateRecordingOptionsFor(rpLinux, Options, Error)).ToBe(True);
+  Expect<Integer>(Options.Region.Width).ToBe(641);
+end;
+
+procedure TRecordingPlatformTests.TestMacOSStillRefusesAOnePixelRegion;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  // The movie writer's two-pixel alignment turns a 1x1 rect into 0x0,
+  // which macOS refuses; Linux has no such alignment and accepts it.
+  Options := DefaultRecordingOptions;
+  Options.OutputPath := 'a.mp4';
+  Options.HasRegion := True;
+  Options.Region.Width := 1;
+  Options.Region.Height := 1;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+  Expect<Boolean>(Pos('--rect must be at least', Error) > 0).ToBe(True);
+  Options.OutputPath := 'a.apng';
+  Expect<Boolean>(ValidateRecordingOptionsFor(rpLinux, Options, Error)).ToBe(True);
+end;
+
+procedure TRecordingPlatformTests.TestLinuxNamesItsOwnExtensionInItsMessages;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := DefaultRecordingOptions;
+  Expect<Boolean>(ValidateRecordingOptionsFor(rpLinux, Options, Error)).ToBe(False);
+  Expect<string>(Error).ToBe('an output path is required (--out=demo.apng)');
+  Options.OutputPath := 'a.webm';
+  Expect<Boolean>(ValidateRecordingOptionsFor(rpLinux, Options, Error)).ToBe(False);
+  Expect<string>(Error).ToBe(
+    'unsupported output extension ".webm" (use .apng or .gif)');
+end;
+
+procedure TRecordingPlatformTests.TestMacOSMessagesAreUnchanged;
+var
+  Options: TRecordingOptions;
+  Error: string;
+begin
+  Options := DefaultRecordingOptions;
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+  Expect<string>(Error).ToBe('an output path is required (--out=demo.mp4)');
+  Options.OutputPath := 'a.webm';
+  Expect<Boolean>(ValidateRecordingOptions(Options, Error)).ToBe(False);
+  Expect<string>(Error).ToBe(
+    'unsupported output extension ".webm" (use .mp4 or .mov)');
 end;
 
 { TAudioModeTests }
@@ -2282,6 +2447,8 @@ end;
 begin
   TestRunnerProgram.AddSuite(TRegionTests.Create('ParseCaptureRegion'));
   TestRunnerProgram.AddSuite(TContainerTests.Create('ContainerForPath'));
+  TestRunnerProgram.AddSuite(TRecordingPlatformTests.Create(
+    'which output extensions each platform records'));
   TestRunnerProgram.AddSuite(TAudioModeTests.Create('ParseAudioMode'));
   TestRunnerProgram.AddSuite(TValidationTests.Create('ValidateRecordingOptions'));
   TestRunnerProgram.AddSuite(TTrimTests.Create('ParseTrimRange'));
