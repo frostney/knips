@@ -20,6 +20,9 @@ unit Knips.Capture.ScreenCaptureKit;
   - Added: SCStream.updateConfiguration:completionHandler:, which is what
     makes Zoom on Click and Follow Mouse possible without touching the
     writer's dimensions.
+  - Added: SCStreamConfiguration.setCaptureResolution: and the
+    SCCaptureResolutionType values (macOS 14), so a window is captured at
+    the pixel density its output size asks for.
   - The block types and async completion pattern are unchanged.
 
   Everything else is carried verbatim, including formatting. }
@@ -68,6 +71,17 @@ const
   SCFrameStatusSuspended = 3;
   SCFrameStatusStarted   = 4;
   SCFrameStatusStopped   = 5;
+
+  { SCCaptureResolutionType, the value SCStreamConfiguration's
+    captureResolution takes (macOS 14). Verified against SCStream.h in the
+    MacOSX.sdk of Xcode's current toolchain: the NS_ENUM lists Automatic,
+    Best, Nominal with no explicit values. Nominal is one pixel per point;
+    Best is the display's backing resolution. Automatic, the default,
+    sampled a desktop-independent window at one pixel per point on a
+    Retina display (docs/porting-notes.md). }
+  SCCaptureResolutionAutomatic = 0;
+  SCCaptureResolutionBest      = 1;
+  SCCaptureResolutionNominal   = 2;
 
 var
   { NSString* const, toll-free bridged to CFStringRef so the attachment
@@ -162,6 +176,10 @@ type
       message 'setCaptureMicrophone:';
     procedure setMicrophoneCaptureDeviceID(deviceID: NSString);
       message 'setMicrophoneCaptureDeviceID:';
+    { knips addition: captureResolution, an SCCaptureResolutionType
+      (NSInteger), macOS 14. Verified against SCStream.h as above. }
+    procedure setCaptureResolution(resolution: NSInteger);
+      message 'setCaptureResolution:';
   end;
 
   { SCStream }

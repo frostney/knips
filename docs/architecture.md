@@ -3160,6 +3160,27 @@ the region in pixels with `scalesToFit` on. For a window,
 what overlaps it; the output size is the window's frame at start, and
 SCK scales later resizes into it.
 
+A window's auto scale is the backing scale of the display under the
+window's centre (`CGGetDisplaysWithPoint`), not the main display's: a
+window on the 1x external display of a Retina laptop is recorded at 1x.
+The density is then *asked for*, never left to SCK. Left on
+`SCCaptureResolutionAutomatic`, a Retina window was sampled at one pixel
+per point into a 2x output, which put a 1x picture in the top-left
+quarter of the movie and black around it. A window recording sets
+`captureResolution` to `Best` at scale 2 and `Nominal` at scale 1
+(`WindowCaptureDensity`), and turns `scalesToFit` on too: where
+`captureResolution` cannot be asked (it is macOS 14; the floor is 13),
+or a 2x movie is asked of a window on a 1x display, the window is
+stretched to fill the movie rather than left in a corner. Display and
+region captures leave both alone.
+
+The filter's init asks the window server which displays the window is on,
+and SkyLight aborts the process (`CGS_REQUIRE_INIT`) if nothing has opened
+the CoreGraphics connection yet. The display lookup above runs first and
+opens it, whatever `--scale` says. Before that, only `--scale=auto` did,
+because its main-display lookup happened to come first, so every explicit
+`--scale` window recording crashed before writing anything.
+
 ## Errors and exit codes
 
 | Code | Meaning |

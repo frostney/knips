@@ -167,6 +167,7 @@ type
   public
     procedure SetupTests; override;
     procedure TestAlignsDown;
+    procedure TestWindowDensityFollowsScale;
     procedure TestBitRateClampsLow;
     procedure TestBitRateClampsHigh;
     procedure TestBitRateScalesWithArea;
@@ -1599,6 +1600,8 @@ end;
 procedure TDerivedValueTests.SetupTests;
 begin
   Test('odd dimensions round down to even', TestAlignsDown);
+  Test('a window is sampled as densely as its scale asks',
+    TestWindowDensityFollowsScale);
   Test('tiny captures get the minimum bit rate', TestBitRateClampsLow);
   Test('huge captures get the maximum bit rate', TestBitRateClampsHigh);
   Test('bit rate grows with area and frame rate', TestBitRateScalesWithArea);
@@ -1609,6 +1612,16 @@ begin
   Expect<Integer>(AlignDimension(1441)).ToBe(1440);
   Expect<Integer>(AlignDimension(1440)).ToBe(1440);
   Expect<Integer>(AlignDimension(1)).ToBe(0);
+end;
+
+// Scale 1 must ask for nominal, not leave it to ScreenCaptureKit, and
+// anything denser than one pixel per point must ask for the best it has:
+// a 2x movie fed one pixel per point is the window in a quarter of it.
+procedure TDerivedValueTests.TestWindowDensityFollowsScale;
+begin
+  Expect<Boolean>(WindowCaptureDensity(1) = wcdNominal).ToBe(True);
+  Expect<Boolean>(WindowCaptureDensity(2) = wcdBest).ToBe(True);
+  Expect<Boolean>(WindowCaptureDensity(MaxScale) = wcdBest).ToBe(True);
 end;
 
 procedure TDerivedValueTests.TestBitRateClampsLow;

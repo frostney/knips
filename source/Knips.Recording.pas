@@ -371,6 +371,30 @@ begin
     Result := 0;
 end;
 
+// The display under a window's centre, for --scale=auto: a window on the
+// external 1x display of a Retina laptop wants a 1x movie, and the main
+// display's scale says nothing about it. AFrame is SCWindow.frame, which is
+// in the same top-left-origin global points CoreGraphics hit-tests in. A
+// centre that is on no display (a window dragged mostly off-screen) falls
+// back to the main display.
+//
+// CGMainDisplayID goes first and unconditionally: it is also what opens
+// the window-server connection ResolveFilter needs before the filter.
+function WindowDisplayID(const AFrame: CGRect): UInt32;
+var
+  Centre: CGPoint;
+  Display: CGDirectDisplayID;
+  Count: UInt32;
+begin
+  Result := CGMainDisplayID;
+  Centre.x := AFrame.origin.x + AFrame.size.width / 2;
+  Centre.y := AFrame.origin.y + AFrame.size.height / 2;
+  Count := 0;
+  if (CGGetDisplaysWithPoint(Centre, 1, @Display, Count) = kCGErrorSuccess)
+    and (Count > 0) then
+    Result := Display;
+end;
+
 { TRecordingSession }
 
 constructor TRecordingSession.Create(const AOptions: TRecordingOptions);
@@ -461,6 +485,7 @@ var
   Display: SCDisplay;
   Window: SCWindow;
   Frame: CGRect;
+  WindowDisplay: UInt32;
   PointWidth, PointHeight, Scale: Integer;
 begin
   Result := False;
@@ -484,11 +509,25 @@ begin
           Frame := Window.frame;
           PointWidth := Round(Frame.size.width);
           PointHeight := Round(Frame.size.height);
-          Scale := FOptions.Scale;
-          if Scale = ScaleAuto then
-            Scale := DisplayBackingScale(CGMainDisplayID);
+          // Before the filter, and whatever the scale: the filter's init
+          // asks the window server which displays the window is on, and
+          // aborts the process (CGS_REQUIRE_INIT) when nothing has opened
+          // the connection yet. --scale=auto only ever worked because its
+          // own display lookup happened to open it first.
+          WindowDisplay := WindowDisplayID(Frame);
           AFilter := SCContentFilter(
             SCContentFilter.alloc.initWithDesktopIndependentWindow(Window));
+          Scale := FOptions.Scale;
+          if Scale = ScaleAuto then
+            Scale := DisplayBackingScale(WindowDisplay);
+          if WindowCaptureDensity(Scale) = wcdBest then
+            AGeometry.CaptureResolution := SCCaptureResolutionBest
+          else
+            AGeometry.CaptureResolution := SCCaptureResolutionNominal;
+          // Where captureResolution is not there to ask (macOS 13), or a
+          // 2x movie is asked of a window on a 1x display, the window is
+          // stretched to the movie rather than left in its top-left corner.
+          AGeometry.ScalesToFit := True;
         finally
           Window.release;
         end;

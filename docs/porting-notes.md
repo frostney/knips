@@ -110,6 +110,17 @@ anything sends it: an unrecognised selector is an Objective-C exception
 no Pascal handler can catch, and this one would be sent into a live
 recording thirty times a second.
 
+Window capture density added `SCStreamConfiguration.setCaptureResolution:`
+and the three `SCCaptureResolutionType` values, checked against
+`SCStream.h` in the current `MacOSX.sdk`. The property is
+`API_AVAILABLE(macos(14.0))` and takes an `NSInteger` `NS_ENUM` listing
+`Automatic`, `Best` and `Nominal` with no explicit initialisers, so they
+are 0, 1 and 2; the derivation sits beside them in the `knips additions`
+const block. The project floor is 13, so `Knips.Capture.Stream` asks the
+runtime for the selector before sending it and skips it when it is not
+there. Why a window needs it at all is in
+[architecture.md](architecture.md#geometry).
+
 ### Everything under the `knips additions` banner
 
 `source/capture/Knips.Capture.CoreMedia.pas` is the unit the additions
