@@ -214,6 +214,17 @@ Changelog](https://keepachangelog.com/en/1.1.0/)'s: **Added**,
 
 ### Fixed
 
+- **Window recordings on a Retina display are sharp and fill the movie.**
+  `knips record --window` at the default `--scale=auto` wrote a 2x movie
+  with a 1x picture of the window in its top-left quarter and black
+  around it. ScreenCaptureKit is now asked for 2x pixels at scale 2 and
+  1x at scale 1. Auto follows the display the window is actually on, so
+  a window on a 1x external display is recorded at 1x instead of taking
+  the main display's 2x.
+- **`--scale=1` and `--scale=2` no longer crash a window recording.** Any
+  explicit scale aborted at once with `Assertion failed: (did_initialize)`
+  and wrote nothing, because the window-server connection was opened
+  only on the auto path.
 - Oversized numbers in event sidecars are skipped without leaving a delayed
   floating-point exception that crashes later work on Linux. The reader
   preserves the caller's floating-point exception mask.

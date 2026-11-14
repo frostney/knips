@@ -71,6 +71,13 @@ type
     HasSourceRect: Boolean;
     // Points, relative to the filtered content's origin.
     SourceRect: CGRect;
+    // An SCCaptureResolutionType. Zero, Automatic, leaves it to
+    // ScreenCaptureKit, which is right for a display and wrong for a
+    // desktop-independent window (Knips.Recording.ResolveFilter).
+    CaptureResolution: NSInteger;
+    // Fit the content to the output when nothing else asks for it, as a
+    // source rectangle does below.
+    ScalesToFit: Boolean;
     // System audio: SCK mixes it and delivers it on the audio output.
     CapturesAudio: Boolean;
     AudioSampleRate: Integer;
@@ -648,11 +655,16 @@ begin
     // explicitly keeps the v1 choice visible rather than implied.
     Configuration.setMicrophoneCaptureDeviceID(nil);
   end;
+  // captureResolution is macOS 14+. On 13 the send is skipped rather than
+  // refused: the movie still comes out at its size, only the window's
+  // pixels may be stretched up to it.
+  if (FGeometry.CaptureResolution <> SCCaptureResolutionAutomatic)
+    and RespondsToSelector(id(Configuration), 'setCaptureResolution:') then
+    Configuration.setCaptureResolution(FGeometry.CaptureResolution);
   if AHasSourceRect then
-  begin
     Configuration.setSourceRect(ASourceRect);
+  if AHasSourceRect or FGeometry.ScalesToFit then
     Configuration.setScalesToFit(ObjCBOOL(True));
-  end;
   AConfiguration := Configuration;
   Result := True;
 end;

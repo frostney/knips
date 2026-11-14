@@ -256,6 +256,32 @@ Release-probe authorization, QuickTime playback, replacement of an existing
 real take, killed-capture recovery, keypad Enter, and docked-camera coordination
 remain open.
 
+## Window capture density (2026-11-14)
+
+Proven on device (Darwin 25.5.0, Apple silicon, Retina main display at 2x
+plus an external display at 1x), recording a throwaway terminal window:
+
+- On the Retina display, `--scale=auto` and `--scale=2` write a 2x movie
+  filled edge to edge with 2x pixels; `--scale=1` writes a 1x movie with
+  1x pixels. Before the change, auto wrote the 2x movie with a 1x picture
+  in its top-left quarter, and both explicit scales aborted in
+  `CGS_REQUIRE_INIT` without writing a file.
+- On the 1x display, `--scale=auto` writes a 1x movie (it used to take the
+  main display's 2x), and `--scale=2` fills its 2x movie.
+- `--rect` captures inside the window write the region's size at every
+  scale, filled with the window.
+
+Not verified on hardware:
+
+- macOS 13, where `captureResolution` does not exist and the window is
+  only stretched to the movie by `scalesToFit`, so a 2x movie may come out
+  soft. No macOS 13 machine was available.
+- A window straddling two displays of different scales: auto takes the
+  display under the window's centre, which has not been checked against
+  a real one.
+- A whole-display recording. That path's configuration did not change,
+  and it was not recorded because the screen showed other apps' windows.
+
 ## Out of scope
 
 Menu bar, region overlay, microphone capture, and any second recording

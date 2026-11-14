@@ -169,6 +169,13 @@ type
 
   TCaptureTargetKind = (ctkDisplay, ctkWindow);
 
+  // How densely a window is sampled: one pixel per point, or the display's
+  // backing resolution. ScreenCaptureKit's own choice for a
+  // desktop-independent window was one pixel per point on a Retina
+  // display, which left a 2x movie with its window in the top-left
+  // quarter, so a window recording always says which it wants.
+  TWindowCaptureDensity = (wcdNominal, wcdBest);
+
   TOutputContainer = (ocMPEG4, ocQuickTime);
 
   // What, if anything, is recorded onto the movie's audio tracks.
@@ -625,6 +632,10 @@ function ValidateRecordingOptions(var AOptions: TRecordingOptions;
 
 // Rounds a capture dimension down to the encoder's alignment.
 function AlignDimension(AValue: Integer): Integer; inline;
+
+// The density a window recording at AScale pixels per point (already
+// resolved: 1 or 2, never ScaleAuto) asks ScreenCaptureKit for.
+function WindowCaptureDensity(AScale: Integer): TWindowCaptureDensity;
 
 // The average bit rate to request when the user gave none.
 function SuggestedBitRate(APixelWidth, APixelHeight,
@@ -1208,6 +1219,14 @@ end;
 function AlignDimension(AValue: Integer): Integer;
 begin
   Result := AValue - (AValue mod DimensionAlignment);
+end;
+
+function WindowCaptureDensity(AScale: Integer): TWindowCaptureDensity;
+begin
+  if AScale > 1 then
+    Result := wcdBest
+  else
+    Result := wcdNominal;
 end;
 
 function SuggestedBitRate(APixelWidth, APixelHeight,
