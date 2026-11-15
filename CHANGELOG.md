@@ -15,6 +15,20 @@ Changelog](https://keepachangelog.com/en/1.1.0/)'s: **Added**,
 
 ### Added
 
+- **`knips record --out=demo.apng` records the screen on Linux.** The
+  whole X11 screen or a `--rect` of it is grabbed over MIT-SHM and
+  written as a lossless APNG. Each frame is stored with the time it was
+  actually on screen and late frames are skipped rather than bunched, so
+  the animation lasts as long as the recording did even when the machine
+  cannot keep up: a 5.3 s take of a 1920x1200 screen played for 5.35 s.
+  It does keep up poorly at that size: a full 1920x1200 screen records at
+  single-digit frames per second (4.5 of the 30 requested, in the live
+  runs on Xvfb), and a 640x480 region at about 25. The X11 libraries are
+  loaded only when `record` runs, so `knips` and `knips mcp` still start
+  on a machine without them. The pointer is not drawn into Linux
+  recordings yet, and MP4, MOV, audio, windows and a second display are
+  refused by name with exit 3. macOS is unchanged.
+
 - Region selection works from the keyboard: arrows move, Shift resizes,
   Option makes fine adjustments, Tab changes displays, Return confirms
   and Escape cancels. The overlay shows the controls.
